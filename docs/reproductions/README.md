@@ -7,6 +7,8 @@ Model-centric evaluation reports. Each document covers one model's reproduction 
 | Model | Benchmarks | Verdict | Report |
 |-------|-----------|---------|--------|
 | DB-CogACT (CogACT 7B) | LIBERO, CALVIN, SimplerEnv | All reproduced within expected variance | [db-cogact.md](db-cogact.md) |
+| OpenVLA-OFT (7B) | LIBERO-Spatial | Reproduced (+1.2 pp) | [openvla-oft.md](openvla-oft.md) |
+| X-VLA | LIBERO (4 suites) | All reproduced within -0.7 pp | [x-vla.md](x-vla.md) |
 
 ## Benchmark Determinism Reference
 
