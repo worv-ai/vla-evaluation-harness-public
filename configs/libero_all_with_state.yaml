@@ -1,0 +1,54 @@
+# LIBERO with proprioceptive state — for models that need proprio (OFT, Pi0, etc.)
+# Identical to libero_all.yaml but with send_state: true
+server:
+  url: "ws://localhost:8000"
+
+docker:
+  image: ghcr.io/allenai/vla-evaluation-harness/libero:latest
+
+output_dir: "./results"
+
+benchmarks:
+  - benchmark: "vla_eval.benchmarks.libero.benchmark:LIBEROBenchmark"
+    subname: libero_spatial
+    mode: sync
+    episodes_per_task: 50
+    params:
+      suite: libero_spatial
+      seed: 7
+      num_steps_wait: 10
+      send_state: true
+      send_wrist_image: true
+
+  - benchmark: "vla_eval.benchmarks.libero.benchmark:LIBEROBenchmark"
+    subname: libero_object
+    mode: sync
+    episodes_per_task: 50
+    params:
+      suite: libero_object
+      seed: 7
+      num_steps_wait: 10
+      send_state: true
+      send_wrist_image: true
+
+  - benchmark: "vla_eval.benchmarks.libero.benchmark:LIBEROBenchmark"
+    subname: libero_goal
+    mode: sync
+    episodes_per_task: 50
+    params:
+      suite: libero_goal
+      seed: 7
+      num_steps_wait: 10
+      send_state: true
+      send_wrist_image: true
+
+  - benchmark: "vla_eval.benchmarks.libero.benchmark:LIBEROBenchmark"
+    subname: libero_10
+    mode: sync
+    episodes_per_task: 50
+    params:
+      suite: libero_10
+      seed: 7
+      num_steps_wait: 10
+      send_state: true
+      send_wrist_image: true
