@@ -1,0 +1,22 @@
+# CALVIN ABC→D for X-VLA — absolute actions, state, wrist image
+server:
+  url: "ws://localhost:8000"
+
+docker:
+  image: ghcr.io/allenai/vla-evaluation-harness/calvin:latest
+  env:
+    - "NVIDIA_DRIVER_CAPABILITIES=all"
+
+output_dir: "./results"
+
+benchmarks:
+  - benchmark: "vla_eval.benchmarks.calvin.benchmark:CALVINBenchmark"
+    mode: sync
+    episodes_per_task: 1
+    params:
+      dataset_path: "/data/calvin/dataset/validation"
+      num_sequences: 1000
+      seed: 0
+      send_state: true
+      send_wrist_image: true
+      absolute_action: true
