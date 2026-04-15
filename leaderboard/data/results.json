@@ -1,5 +1,5 @@
 {
-  "last_updated": "2026-04-06",
+  "last_updated": "2026-04-15",
   "benchmarks": {
     "libero": {
       "display_name": "LIBERO",
@@ -11548,7 +11548,7 @@
       "source_paper": null,
       "curated_by": "roboarena-api",
       "date_added": "2026-03-02",
-      "notes": "RoboArena API sync. num_evals=647, std=26.9."
+      "notes": "RoboArena API sync. num_evals=656, std=26.8."
     },
     {
       "model": "pi0_fast_ra",
@@ -11561,7 +11561,7 @@
       "source_paper": null,
       "curated_by": "roboarena-api",
       "date_added": "2026-03-02",
-      "notes": "RoboArena API sync. num_evals=834, std=25.6."
+      "notes": "RoboArena API sync. num_evals=843, std=25.5."
     },
     {
       "model": "pi0_ra",
@@ -11574,7 +11574,7 @@
       "source_paper": null,
       "curated_by": "roboarena-api",
       "date_added": "2026-03-02",
-      "notes": "RoboArena API sync. num_evals=1106, std=24.8."
+      "notes": "RoboArena API sync. num_evals=1112, std=24.7."
     },
     {
       "model": "ra_dam",
@@ -11596,7 +11596,7 @@
       "model_paper": null,
       "benchmark": "roboarena",
       "weight_type": "shared",
-      "overall_score": 1588,
+      "overall_score": 1589,
       "source_paper": null,
       "curated_by": "roboarena-api",
       "date_added": "2026-03-02",
@@ -11674,11 +11674,11 @@
       "model_paper": null,
       "benchmark": "roboarena",
       "weight_type": "shared",
-      "overall_score": 1548,
+      "overall_score": 1549,
       "source_paper": null,
       "curated_by": "roboarena-api",
       "date_added": "2026-03-02",
-      "notes": "RoboArena API sync. num_evals=853, std=25.6, open-source."
+      "notes": "RoboArena API sync. num_evals=866, std=25.5, open-source."
     },
     {
       "model": "ra_paligemma_fast_droid",
@@ -11687,11 +11687,11 @@
       "model_paper": null,
       "benchmark": "roboarena",
       "weight_type": "shared",
-      "overall_score": 1532,
+      "overall_score": 1531,
       "source_paper": null,
       "curated_by": "roboarena-api",
       "date_added": "2026-03-02",
-      "notes": "RoboArena API sync. num_evals=1047, std=24.9, open-source."
+      "notes": "RoboArena API sync. num_evals=1054, std=24.8, open-source."
     },
     {
       "model": "ra_paligemma_fast_specialist_droid",
@@ -11704,7 +11704,7 @@
       "source_paper": null,
       "curated_by": "roboarena-api",
       "date_added": "2026-03-02",
-      "notes": "RoboArena API sync. num_evals=1046, std=24.5, open-source."
+      "notes": "RoboArena API sync. num_evals=1052, std=24.5, open-source."
     },
     {
       "model": "ra_paligemma_vq_droid",
@@ -11713,11 +11713,11 @@
       "model_paper": null,
       "benchmark": "roboarena",
       "weight_type": "shared",
-      "overall_score": 1561,
+      "overall_score": 1562,
       "source_paper": null,
       "curated_by": "roboarena-api",
       "date_added": "2026-03-02",
-      "notes": "RoboArena API sync. num_evals=860, std=25.6, open-source."
+      "notes": "RoboArena API sync. num_evals=870, std=25.5, open-source."
     },
     {
       "model": "acg_groot_n1",
