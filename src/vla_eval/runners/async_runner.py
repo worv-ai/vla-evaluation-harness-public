@@ -20,6 +20,7 @@ import anyio
 
 import numpy as np
 
+from vla_eval import recording
 from vla_eval.benchmarks.base import Benchmark
 from vla_eval.runners.action_buffer import ActionBuffer
 from vla_eval.runners.base import EpisodeRunner
@@ -90,6 +91,11 @@ class AsyncEpisodeRunner(EpisodeRunner):
         step_times: list[float] = []
         step_count = 0
 
+        sid = getattr(conn, "session_id", None)
+        token = recording.set_active_session(sid) if sid else None
+        if sid:
+            recording.clear(sid)
+
         try:
             # --- Episode begins: clock starts, first obs sent ---
             clock.reset()
@@ -132,6 +138,10 @@ class AsyncEpisodeRunner(EpisodeRunner):
 
         finally:
             await conn.stop_listener()
+            if token is not None:
+                recording.reset_active_session(token)
+            if sid:
+                recording.clear(sid)
 
         elapsed = clock.time()
         bench_metrics = await benchmark.get_result()

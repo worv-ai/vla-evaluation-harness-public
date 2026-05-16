@@ -25,6 +25,7 @@ from typing import Any, Mapping
 
 import numpy as np
 
+from vla_eval import recording as _recording
 from vla_eval.benchmarks.recording import EpisodeVideoRecorder
 
 logger = logging.getLogger(__name__)
@@ -99,7 +100,9 @@ class EpisodeRecorder:
     def record_step(self, data: dict[str, Any]) -> None:
         if self._data_fh is None:
             return
-        self._data_fh.write(json.dumps(data, ensure_ascii=False, default=str) + "\n")
+        extras = _recording.drain_current()
+        row = {**data, **extras} if extras else data
+        self._data_fh.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")
 
     def save(self, **extra: Any) -> None:
         status_kwargs = {**self._context, **extra}
