@@ -36,45 +36,86 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
+def _fresh_recording() -> recording.Recording:
+    """A standalone Recording instance for tests that need isolation from the default."""
+    return recording.Recording()
+
+
 def test_record_uses_local_buffer_without_sender():
-    recording.clear()
+    r = _fresh_recording()
     ctx = SessionContext(session_id="sess-local", episode_id="ep")
-    recording.record(ctx, foo=1, bar="x")
-    drained = recording.drain("sess-local")
-    assert drained == {"foo": 1, "bar": "x"}
-    assert recording.drain("sess-local") == {}
+    r.record(ctx, foo=1, bar="x")
+    assert r.drain("sess-local") == {"foo": 1, "bar": "x"}
+    assert r.drain("sess-local") == {}
 
 
 def test_record_routes_via_sender_when_registered():
-    recording.clear()
+    r = _fresh_recording()
     sent: list[tuple[str, dict[str, Any]]] = []
-    recording.register_sender("sess-wire", lambda sid, fields: sent.append((sid, fields)))
+    r.register_sender("sess-wire", lambda sid, fields: sent.append((sid, fields)))
     try:
         ctx = SessionContext(session_id="sess-wire", episode_id="ep")
-        recording.record(ctx, foo=1)
+        r.record(ctx, foo=1)
         assert sent == [("sess-wire", {"foo": 1})]
-        assert recording.drain("sess-wire") == {}
+        assert r.drain("sess-wire") == {}
     finally:
-        recording.unregister_sender("sess-wire")
+        r.unregister_sender("sess-wire")
+
+
+def test_record_warns_when_server_mode_missing_sender(caplog):
+    """Server-side bug: a sender was registered for some session, but not this one."""
+    r = _fresh_recording()
+    r.register_sender("other", lambda sid, fields: None)
+
+    ctx = SessionContext(session_id="sess-missing", episode_id="ep")
+    with caplog.at_level("WARNING"):
+        r.record(ctx, foo=1)
+    # Fields are dropped (NOT buffered) in server mode when sender missing.
+    assert r.drain("sess-missing") == {}
+    assert any("no sender registered" in rec.message for rec in caplog.records)
 
 
 def test_ingest_appends_to_buffer():
-    recording.clear()
-    recording.ingest("sess-x", {"a": 1})
-    recording.ingest("sess-x", {"b": 2})
-    assert recording.drain("sess-x") == {"a": 1, "b": 2}
+    r = _fresh_recording()
+    r.ingest("sess-x", {"a": 1})
+    r.ingest("sess-x", {"b": 2})
+    assert r.drain("sess-x") == {"a": 1, "b": 2}
 
 
 def test_record_drops_when_session_id_missing(caplog):
-    recording.clear()
+    r = _fresh_recording()
 
     class _Ctx:
         session_id = None
 
     with caplog.at_level("WARNING"):
-        recording.record(_Ctx(), foo=1)
-    assert recording.drain("") == {}
-    assert any("no session_id" in r.message for r in caplog.records)
+        r.record(_Ctx(), foo=1)
+    assert r.drain("") == {}
+    assert any("no session_id" in rec.message for rec in caplog.records)
+
+
+def test_session_scope_clears_on_entry_and_exit():
+    r = _fresh_recording()
+    r.ingest("sess-scope", {"stale": True})
+    with r.session_scope("sess-scope"):
+        assert r.current_session() == "sess-scope"
+        # Entry cleared the stale data.
+        assert r.drain_current() == {}
+        r.ingest("sess-scope", {"fresh": 1})
+        assert r.drain_current() == {"fresh": 1}
+    # Exit restored ContextVar and cleared the buffer.
+    assert r.current_session() is None
+    assert r.drain("sess-scope") == {}
+
+
+def test_session_scope_none_is_noop():
+    r = _fresh_recording()
+    with r.session_scope(None):
+        assert r.current_session() is None
+
+
+def test_get_default_returns_singleton():
+    assert recording.get_default() is recording.get_default()
 
 
 def test_record_payload_roundtrip():
@@ -102,15 +143,12 @@ def test_episode_recorder_merges_drained_fields(tmp_path: Path):
     rec = EpisodeRecorder(tmp_path, record_video=False, record_step=True)
     rec.start({"env_id": "Test", "episode_idx": 0})
 
-    token = recording.set_active_session("sess-merge")
-    try:
-        recording.ingest("sess-merge", {"s2_subgoal": "pick", "s2_fired": True})
+    default = recording.get_default()
+    with default.session_scope("sess-merge"):
+        default.ingest("sess-merge", {"s2_subgoal": "pick", "s2_fired": True})
         rec.record_step({"step": 0, "reward": 1.0})
-        recording.ingest("sess-merge", {"chunk_idx": 3})
+        default.ingest("sess-merge", {"chunk_idx": 3})
         rec.record_step({"step": 1, "reward": 0.5})
-    finally:
-        recording.reset_active_session(token)
-        recording.clear("sess-merge")
 
     rec.save(status="success")
     jsonl_path = tmp_path / "Test_ep0000_success.jsonl"
@@ -118,6 +156,25 @@ def test_episode_recorder_merges_drained_fields(tmp_path: Path):
     rows = [json.loads(line) for line in jsonl_path.read_text().splitlines()]
     assert rows[0] == {"step": 0, "reward": 1.0, "s2_subgoal": "pick", "s2_fired": True}
     assert rows[1] == {"step": 1, "reward": 0.5, "chunk_idx": 3}
+
+
+def test_record_step_collision_logs_and_data_wins(tmp_path: Path, caplog):
+    """Benchmark-recorded fields are authoritative on collision."""
+    rec = EpisodeRecorder(tmp_path, record_video=False, record_step=True)
+    rec.start({"env_id": "Test", "episode_idx": 0})
+
+    default = recording.get_default()
+    with default.session_scope("sess-collide"):
+        default.ingest("sess-collide", {"step": 999, "reward": 9.9, "extra": "ok"})
+        with caplog.at_level("WARNING"):
+            rec.record_step({"step": 1, "reward": 0.5})
+    rec.save(status="success")
+
+    jsonl_path = tmp_path / "Test_ep0000_success.jsonl"
+    rows = [json.loads(line) for line in jsonl_path.read_text().splitlines()]
+    assert rows == [{"step": 1, "reward": 0.5, "extra": "ok"}]
+    msgs = [rec.message for rec in caplog.records]
+    assert any("collide with benchmark schema" in m and "'reward'" in m and "'step'" in m for m in msgs)
 
 
 class _RecordingServer(PredictModelServer):
@@ -151,9 +208,10 @@ class _RecordingBenchmark(StepBenchmark):
         # processes; here they share one, so the harness-side benchmark
         # uses ``ingest`` directly to avoid double-routing through the
         # wire sender bound by the in-process server.
-        sid = recording.current_session()
+        default = recording.get_default()
+        sid = default.current_session()
         if sid is not None:
-            recording.ingest(sid, {"bench_reward": 0.5, "bench_step": self._step_count})
+            default.ingest(sid, {"bench_reward": 0.5, "bench_step": self._step_count})
         self._step_count += 1
         done = self._step_count >= self.done_at_step
         self._recorder.record_step({"step": self._step_count - 1, "env_done": done})

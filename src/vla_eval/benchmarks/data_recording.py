@@ -100,8 +100,17 @@ class EpisodeRecorder:
     def record_step(self, data: dict[str, Any]) -> None:
         if self._data_fh is None:
             return
-        extras = _recording.drain_current()
-        row = {**data, **extras} if extras else data
+        extras = _recording.get_default().drain_current()
+        if extras:
+            collisions = sorted(set(data) & set(extras))
+            if collisions:
+                logger.warning(
+                    "record_step: dropping recording field(s) that collide with benchmark schema: %s",
+                    collisions,
+                )
+            row = {**{k: v for k, v in extras.items() if k not in data}, **data}
+        else:
+            row = data
         self._data_fh.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")
 
     def save(self, **extra: Any) -> None:

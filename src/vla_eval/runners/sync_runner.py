@@ -43,10 +43,7 @@ class SyncEpisodeRunner(EpisodeRunner):
         await conn.start_episode({"task": task_info})
 
         sid = getattr(conn, "session_id", None)
-        token = recording.set_active_session(sid) if sid else None
-        if sid:
-            recording.clear(sid)
-        try:
+        with recording.get_default().session_scope(sid):
             steps = range(max_steps) if max_steps is not None else itertools.count()
             for step in steps:
                 action = await conn.act(obs_dict)
@@ -54,11 +51,6 @@ class SyncEpisodeRunner(EpisodeRunner):
                 if await benchmark.is_done():
                     break
                 obs_dict = await benchmark.get_observation()
-        finally:
-            if token is not None:
-                recording.reset_active_session(token)
-            if sid:
-                recording.clear(sid)
 
         elapsed = await benchmark.get_time()
         metrics = await benchmark.get_result()
