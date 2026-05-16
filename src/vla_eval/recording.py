@@ -32,7 +32,7 @@ SenderFn = Callable[[str, dict[str, Any]], None]
 
 class _HasSessionId(Protocol):
     @property
-    def session_id(self) -> str: ...
+    def session_id(self) -> str | None: ...
 
 
 class Recording:
@@ -60,11 +60,14 @@ class Recording:
         if not fields:
             return
         session_id = ctx.session_id
+        if not session_id:
+            logger.warning("Dropped recording fields: no session_id in context")
+            return
         with self._lock:
             sender = self._senders.get(session_id)
         if sender is not None:
             try:
-                sender(session_id, dict(fields))
+                sender(session_id, fields)
             except Exception:
                 logger.exception("recording sender failed; dropping fields for session=%s", session_id[:8])
             return

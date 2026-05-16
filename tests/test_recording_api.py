@@ -65,6 +65,18 @@ def test_ingest_appends_to_buffer():
     assert recording.drain("sess-x") == {"a": 1, "b": 2}
 
 
+def test_record_drops_when_session_id_missing(caplog):
+    recording.clear()
+
+    class _Ctx:
+        session_id = None
+
+    with caplog.at_level("WARNING"):
+        recording.record(_Ctx(), foo=1)
+    assert recording.drain("") == {}
+    assert any("no session_id" in r.message for r in caplog.records)
+
+
 def test_record_payload_roundtrip():
     payload = make_record_payload("sess-1", {"foo": 1, "bar": "x"})
     msg = Message(type=MessageType.RECORD, payload=payload, seq=7)
