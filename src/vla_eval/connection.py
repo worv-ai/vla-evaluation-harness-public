@@ -10,7 +10,6 @@ import anyio
 import websockets
 from websockets.protocol import State as WebSocketState
 
-from vla_eval import recording
 from vla_eval.protocol.messages import Message, MessageType, make_hello_payload, pack_message, unpack_message
 from vla_eval.types import Action, Observation
 
@@ -113,10 +112,7 @@ class Connection:
         return seq
 
     async def recv(self, *, timeout: float | None = None) -> Message:
-        """Receive the next non-RECORD message from the server.
-
-        RECORD messages are ingested into the local recording buffer and
-        skipped — they're orthogonal to the request/response flow.
+        """Receive the next message from the server.
 
         Args:
             timeout: Max seconds to wait, or ``None`` to block indefinitely.
@@ -128,13 +124,8 @@ class Connection:
         if self._ws is None:
             raise RuntimeError("Not connected")
         with anyio.fail_after(timeout):
-            while True:
-                data = await self._ws.recv()
-                msg = unpack_message(data)
-                if msg.type == MessageType.RECORD:
-                    _ingest_record(msg)
-                    continue
-                return msg
+            data = await self._ws.recv()
+        return unpack_message(data)
 
     # ── Convenience methods (all delegate to send / recv) ────────────
 
@@ -286,24 +277,9 @@ class Connection:
         self._seq += 1
         return self._seq
 
-    @property
-    def session_id(self) -> str | None:
-        sid = self.server_info.get("session_id") if self.server_info else None
-        return sid if isinstance(sid, str) else None
-
     async def __aenter__(self) -> Connection:
         await self.connect()
         return self
 
     async def __aexit__(self, *args: Any) -> None:
         await self.close()
-
-
-def _ingest_record(msg: Message) -> None:
-    payload = msg.payload or {}
-    sid = payload.get("session_id")
-    fields = payload.get("fields")
-    if not isinstance(sid, str) or not isinstance(fields, dict):
-        logger.warning("Ignoring malformed RECORD payload: keys=%s", list(payload.keys()))
-        return
-    recording.ingest(sid, fields)

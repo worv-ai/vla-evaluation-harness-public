@@ -23,7 +23,6 @@ HTTP control plane:
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import os
@@ -39,17 +38,9 @@ import anyio
 from anyio.to_thread import run_sync as _run_in_thread
 import websockets
 
-from vla_eval import recording
 from vla_eval.model_servers.base import ModelServer, SessionContext
 from vla_eval.types import Action
-from vla_eval.protocol.messages import (
-    Message,
-    MessageType,
-    make_hello_payload,
-    make_record_payload,
-    pack_message,
-    unpack_message,
-)
+from vla_eval.protocol.messages import Message, MessageType, make_hello_payload, pack_message, unpack_message
 
 logger = logging.getLogger(__name__)
 
@@ -90,23 +81,6 @@ async def _handle_connection(
 
     ctx._send_action_fn = send_action
 
-    loop = asyncio.get_running_loop()
-
-    async def _send_record(sid: str, fields: dict[str, Any]) -> None:
-        msg = Message(type=MessageType.RECORD, payload=make_record_payload(sid, fields))
-        try:
-            await ws.send(pack_message(msg))
-        except Exception:
-            logger.exception("Failed to send RECORD session=%s", sid[:8])
-
-    def record_sender(sid: str, fields: dict[str, Any]) -> None:
-        try:
-            asyncio.run_coroutine_threadsafe(_send_record(sid, fields), loop)
-        except RuntimeError:
-            logger.warning("Dropping RECORD for session=%s (loop unavailable)", sid[:8])
-
-    recording.register_sender(session_id, record_sender)
-
     logger.info("Client connected: session=%s", session_id)
     _msg_count = 0
     in_episode = False
@@ -132,7 +106,6 @@ async def _handle_connection(
                 reply_payload = make_hello_payload(
                     model_server=type(model_server).__name__,
                     capabilities={},
-                    session_id=session_id,
                     **extra,
                 )
                 reply = Message(type=MessageType.HELLO, payload=reply_payload, seq=msg.seq)
@@ -217,7 +190,6 @@ async def _handle_connection(
     except Exception:
         logger.exception("Error handling session=%s msgs=%d", session_id[:8], _msg_count)
     finally:
-        recording.unregister_sender(session_id)
         if in_episode:
             try:
                 await model_server.on_episode_end({}, ctx)

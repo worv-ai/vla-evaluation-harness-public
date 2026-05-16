@@ -20,7 +20,6 @@ import anyio
 
 import numpy as np
 
-from vla_eval import recording
 from vla_eval.benchmarks.base import Benchmark
 from vla_eval.runners.action_buffer import ActionBuffer
 from vla_eval.runners.base import EpisodeRunner
@@ -91,40 +90,46 @@ class AsyncEpisodeRunner(EpisodeRunner):
         step_times: list[float] = []
         step_count = 0
 
-        sid = getattr(conn, "session_id", None)
-
         try:
-            with recording.get_default().session_scope(sid):
-                # --- Episode begins: clock starts, first obs sent ---
-                clock.reset()
+            # --- Episode begins: clock starts, first obs sent ---
+            clock.reset()
+            await conn.send_observation(obs_dict)
+
+            # By default, no waiting for first action: the step loop starts
+            # immediately.  The model server computes concurrently; until it
+            # responds, action_buffer.get() returns a zero/held action — just
+            # like real deployment where physics does not pause for inference.
+            #
+            # When wait_first_action=True, we block until the first action
+            # arrives.  This is useful for sanity-checking that the async
+            # pipeline matches sync results (eliminates step-0 zero action).
+            if self.wait_first_action:
+                deadline = _time.monotonic() + 30.0
+                while not action_buffer.has_action():
+                    if _time.monotonic() > deadline:
+                        raise TimeoutError("wait_first_action: no action received within 30s")
+                    await anyio.sleep(0.0001)
+
+            steps = range(max_steps) if max_steps is not None else itertools.count()
+            for step in steps:
+                step_start = clock.time()
+
+                action = action_buffer.get()
+
+                _t0 = _time.monotonic()
+                await benchmark.apply_action(action)
+                step_times.append(_time.monotonic() - _t0)
+                step_count += 1
+                if await benchmark.is_done():
+                    break
+                obs_dict = await benchmark.get_observation()
+
+                # Send next observation
                 await conn.send_observation(obs_dict)
 
-                if self.wait_first_action:
-                    deadline = _time.monotonic() + 30.0
-                    while not action_buffer.has_action():
-                        if _time.monotonic() > deadline:
-                            raise TimeoutError("wait_first_action: no action received within 30s")
-                        await anyio.sleep(0.0001)
+                # Pacing via clock
+                await clock.wait_until(step_start + step_period)
 
-                steps = range(max_steps) if max_steps is not None else itertools.count()
-                for step in steps:
-                    step_start = clock.time()
-
-                    action = action_buffer.get()
-
-                    _t0 = _time.monotonic()
-                    await benchmark.apply_action(action)
-                    step_times.append(_time.monotonic() - _t0)
-                    step_count += 1
-                    if await benchmark.is_done():
-                        break
-                    obs_dict = await benchmark.get_observation()
-
-                    # Send next observation
-                    await conn.send_observation(obs_dict)
-
-                    # Pacing via clock
-                    await clock.wait_until(step_start + step_period)
         finally:
             await conn.stop_listener()
 

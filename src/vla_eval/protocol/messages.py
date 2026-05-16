@@ -19,11 +19,6 @@ class MessageType(str, enum.Enum):
     EPISODE_START = "episode_start"
     EPISODE_END = "episode_end"
     ERROR = "error"
-    RECORD = "record"
-
-
-def make_record_payload(session_id: str, fields: dict[str, Any]) -> dict[str, Any]:
-    return {"session_id": session_id, "fields": fields}
 
 
 PROTOCOL_VERSION = 1
