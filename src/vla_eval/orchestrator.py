@@ -20,7 +20,8 @@ import websockets
 from vla_eval import recording
 from vla_eval.config import EvalConfig, ServerConfig
 from vla_eval.connection import Connection
-from vla_eval.recording import EpisodeRecorder, NullEpisodeRecorder, RecordingContext
+from vla_eval.recording import EpisodeRecorder, EpisodeStatus, NullEpisodeRecorder, RecordingContext
+from vla_eval.recording_daemon.client import RecordingClient
 from vla_eval.registry import resolve_import_string
 from vla_eval.specs import DimSpec, check_specs
 from vla_eval.results.collector import EpisodeResult, ResultCollector
@@ -83,9 +84,10 @@ class Orchestrator:
         self._progress_path: Path | None = None
         self._recording_daemon_url = recording_daemon_url
         self._eval_id = eval_id or str(uuid.uuid4())
-        self._client: Any = None  # RecordingClient | None — lazy-loaded
+        self._client: RecordingClient | None = None
         # One sid per orchestrator/shard process; episodes within get fresh eids.
         self._sid = str(uuid.uuid4())
+        self._progress_last: tuple[int, int, int] | None = None
 
     @property
     def _output_dir(self) -> Path:
@@ -120,8 +122,6 @@ class Orchestrator:
     def _install_recording_client(self) -> None:
         if not self._recording_daemon_url:
             return
-        from vla_eval.recording_daemon.client import RecordingClient
-
         self._client = RecordingClient(self._recording_daemon_url)
         recording.set_client(self._client)
         logger.info("Recording emitter installed: %s", self._recording_daemon_url)
@@ -133,9 +133,18 @@ class Orchestrator:
             self._output_file_lock = None
 
     def _update_progress(self, completed: int, total: int, errors: int) -> None:
-        """Write a lightweight progress file for live monitoring."""
+        """Write a lightweight progress file for live monitoring.
+
+        Skips the write when nothing changed since the last call — across a
+        5000-episode eval this saves thousands of tiny disk transactions
+        when only ``completed`` would otherwise tick.
+        """
         if self._progress_path is None:
             return
+        snapshot = (completed, total, errors)
+        if snapshot == self._progress_last:
+            return
+        self._progress_last = snapshot
         tmp = self._progress_path.with_suffix(".tmp")
         tmp.write_text(json.dumps({"completed": completed, "total": total, "errors": errors}))
         tmp.replace(self._progress_path)  # atomic on POSIX
@@ -171,6 +180,7 @@ class Orchestrator:
     async def _run_benchmark_inner(self, cfg: EvalConfig, name: str, safe_name: str) -> dict[str, Any]:
         """Run benchmark episodes, collect results, and save."""
         self._progress_path = self._output_dir / f"{self._shard_stem(safe_name)}.progress"
+        self._progress_last = None
 
         conn = Connection(self._server_cfg.url, timeout=self._server_cfg.timeout)
         await conn.connect(benchmark=cfg.benchmark)
@@ -275,7 +285,7 @@ class Orchestrator:
             for item_idx, (task, ep) in enumerate(work_items):
                 task_name = task.get("name", str(task))
                 recorder: EpisodeRecorder = NullEpisodeRecorder()
-                ep_status = "fail"
+                ep_status: EpisodeStatus = "fail"
                 ep_metrics: dict[str, Any] = {"success": False}
                 try:
                     episode_idx = ep

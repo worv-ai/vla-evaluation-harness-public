@@ -21,8 +21,7 @@ no ``EPISODE_START`` or ``EVAL_START`` — neither side needs them.
 from __future__ import annotations
 
 import enum
-import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 import msgpack
@@ -40,11 +39,10 @@ class RecMessageType(str, enum.Enum):
 class RecordingFrame:
     type: RecMessageType
     payload: dict[str, Any]
-    ts: float = field(default_factory=time.time)
 
 
 def pack_frame(frame: RecordingFrame) -> bytes:
-    raw = {"type": frame.type.value, "ts": frame.ts, "payload": frame.payload}
+    raw = {"type": frame.type.value, "payload": frame.payload}
     return msgpack.packb(raw, default=encode_ndarray, use_bin_type=True)
 
 
@@ -58,7 +56,7 @@ def unpack_frame(data: bytes) -> RecordingFrame:
     if not isinstance(raw, dict):
         raise ValueError(f"Expected msgpack dict, got {type(raw).__name__}")
 
-    missing = [k for k in ("type", "ts", "payload") if k not in raw]
+    missing = [k for k in ("type", "payload") if k not in raw]
     if missing:
         raise ValueError(f"Recording frame missing required fields: {missing}")
 
@@ -67,4 +65,4 @@ def unpack_frame(data: bytes) -> RecordingFrame:
     except ValueError:
         raise ValueError(f"Unknown recording frame type: {raw['type']!r}")
 
-    return RecordingFrame(type=msg_type, payload=raw["payload"], ts=raw["ts"])
+    return RecordingFrame(type=msg_type, payload=raw["payload"])

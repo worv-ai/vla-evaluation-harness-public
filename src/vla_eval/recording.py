@@ -27,12 +27,21 @@ import logging
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
     import numpy as np
 
     from vla_eval.recording_daemon.client import RecordingClient
+
+
+EpisodeStatus = Literal["success", "fail", "error"]
+"""Terminal status passed to :meth:`EpisodeRecorder.close`.
+
+``"success"`` / ``"fail"`` reflect the benchmark metric; ``"error"`` is
+reserved for the orchestrator's exception paths (server unreachable,
+connection closed, timeout, generic exception).
+"""
 
 
 @dataclass
@@ -124,9 +133,9 @@ class EpisodeRecorder:
         self._aggregate_dir = str(aggregate_dir)
         self._aggregate_filename = aggregate_filename
         self._record_step = record_step
-        self._step_counter = 0
+        self._next_step = 0
         self._closed = False
-        self._video: Any = None  # EpisodeVideoRecorder | None — lazy import to avoid cycle
+        self._video: Any = None  # lazy: EpisodeVideoRecorder; deferred import breaks a cycle
 
         if record_video:
             from vla_eval.benchmarks.video import EpisodeVideoRecorder
@@ -145,6 +154,17 @@ class EpisodeRecorder:
     # ------------------------------------------------------------------
     # Identifiers (read by benchmarks that want to attribute external work)
     # ------------------------------------------------------------------
+
+    @property
+    def is_active(self) -> bool:
+        """``True`` for a real recorder, ``False`` for :class:`NullEpisodeRecorder`.
+
+        Callers that need to know whether emits will reach anywhere — e.g.
+        the runner deciding whether to forward ``(sid, eid, eval_id)`` to
+        the model server in ``EPISODE_START`` — should branch on this rather
+        than poking at ``sid`` truthiness.
+        """
+        return True
 
     @property
     def sid(self) -> str:
@@ -169,15 +189,15 @@ class EpisodeRecorder:
     def record_step(self, row: dict[str, Any]) -> None:
         if not self._record_step or self._client is None:
             return
-        step_id = int(row.pop("step", self._step_counter))
-        self._step_counter = max(self._step_counter, step_id + 1)
+        step_id = int(row.pop("step", self._next_step))
+        self._next_step = step_id + 1
         self._client.step(self._sid, self._eid, step_id, row)
 
     # ------------------------------------------------------------------
     # Close (orchestrator owns this — happy and exception paths)
     # ------------------------------------------------------------------
 
-    def close(self, *, status: str, metrics: dict[str, Any]) -> None:
+    def close(self, *, status: EpisodeStatus, metrics: dict[str, Any]) -> None:
         if self._closed:
             return
         self._closed = True
@@ -213,18 +233,35 @@ class EpisodeRecorder:
 
 
 class NullEpisodeRecorder(EpisodeRecorder):
-    """No-op recorder. All methods return immediately.
+    """No-op recorder. All capture / close methods return immediately and
+    :attr:`is_active` reads ``False``.
 
     Hand this to a benchmark when recording is disabled so the benchmark
-    doesn't need ``if recorder is not None`` guards on every call.
+    can call ``recorder.record_video(...)`` / ``record_step(...)`` without
+    ``if recorder is not None`` guards.
     """
 
     def __init__(self) -> None:  # type: ignore[override]
-        # Skip the parent's heavy setup; mark closed so close() is a no-op too.
-        self._closed = True
-        self._sid = ""
-        self._eid = ""
-        self._eval_id = ""
+        # Bypass parent setup — we hold no client, no video writer, no paths.
+        # Identifiers stay empty; gate behaviour on `is_active` instead.
+        self._client = None
+        self._video = None
+
+    @property
+    def is_active(self) -> bool:  # type: ignore[override]
+        return False
+
+    @property
+    def sid(self) -> str:  # type: ignore[override]
+        return ""
+
+    @property
+    def eid(self) -> str:  # type: ignore[override]
+        return ""
+
+    @property
+    def eval_id(self) -> str:  # type: ignore[override]
+        return ""
 
     def record_video(self, frame: "np.ndarray") -> None:  # type: ignore[override]
         pass
@@ -232,5 +269,5 @@ class NullEpisodeRecorder(EpisodeRecorder):
     def record_step(self, row: dict[str, Any]) -> None:  # type: ignore[override]
         pass
 
-    def close(self, *, status: str, metrics: dict[str, Any]) -> None:  # type: ignore[override]
+    def close(self, *, status: EpisodeStatus, metrics: dict[str, Any]) -> None:  # type: ignore[override]
         pass

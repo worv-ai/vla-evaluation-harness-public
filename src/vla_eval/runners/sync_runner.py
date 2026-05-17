@@ -42,7 +42,7 @@ class SyncEpisodeRunner(EpisodeRunner):
         # Send only serializable task info to the model server
         task_info = {k: v for k, v in task.items() if isinstance(v, (str, int, float, bool, list))}
         ep_payload: dict[str, Any] = {"task": task_info}
-        if recorder is not None and recorder.sid:
+        if recorder is not None and recorder.is_active:
             ep_payload["recording"] = {
                 "sid": recorder.sid,
                 "eid": recorder.eid,

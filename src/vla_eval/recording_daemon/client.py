@@ -42,7 +42,10 @@ class RecordingClient:
 
     def __init__(self, daemon_url: str, queue_size: int = _DEFAULT_QUEUE_SIZE) -> None:
         self._url = daemon_url
-        self._queue: queue.Queue[bytes | None] = queue.Queue(maxsize=queue_size)
+        # Queue holds unpacked RecordingFrame objects; pack happens in the
+        # sender thread so the hot caller (per-step record_step) never pays
+        # msgpack serialization cost. The sentinel (None) signals shutdown.
+        self._queue: queue.Queue[RecordingFrame | None] = queue.Queue(maxsize=queue_size)
         self._drop_count = 0
         self._warned_overflow = False
         self._warned_unreachable = False
@@ -105,7 +108,7 @@ class RecordingClient:
             return
         self._closed = True
         try:
-            self._queue.put(None, timeout=1.0)
+            self._queue.put(None, timeout=1.0)  # sentinel
         except queue.Full:
             pass
         if self._thread is not None:
@@ -118,14 +121,8 @@ class RecordingClient:
     def _enqueue(self, msg_type: RecMessageType, payload: dict[str, Any]) -> None:
         if self._closed:
             return
-        frame = RecordingFrame(type=msg_type, payload=payload)
         try:
-            data = pack_frame(frame)
-        except Exception:
-            logger.exception("Failed to pack recording frame type=%s", msg_type.value)
-            return
-        try:
-            self._queue.put_nowait(data)
+            self._queue.put_nowait(RecordingFrame(type=msg_type, payload=payload))
         except queue.Full:
             self._drop_count += 1
             if not self._warned_overflow:
@@ -183,14 +180,21 @@ class RecordingClient:
                 continue
 
     async def _drain_into(self, ws: Any) -> None:
-        """Pop frames from the cross-thread queue, send each over ws.
+        """Pop frames from the cross-thread queue, pack, and send.
 
-        Returns normally when the sentinel ``None`` is dequeued; raises on
-        connection errors so the outer loop can reconnect.
+        Packing happens here (sender thread) rather than in ``_enqueue`` so
+        msgpack serialization stays out of the predict/step loop on the
+        caller side. Returns normally when the sentinel ``None`` is dequeued;
+        raises on connection errors so the outer loop can reconnect.
         """
         loop = asyncio.get_running_loop()
         while True:
-            data = await loop.run_in_executor(None, self._queue.get)
-            if data is None:
+            frame = await loop.run_in_executor(None, self._queue.get)
+            if frame is None:
                 return
+            try:
+                data = pack_frame(frame)
+            except Exception:
+                logger.exception("Failed to pack recording frame type=%s", frame.type.value)
+                continue
             await ws.send(data)

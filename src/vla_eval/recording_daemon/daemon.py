@@ -85,6 +85,11 @@ class RecordingDaemon:
         self._evals: dict[str, _Eval] = {}
         self._stop_event: asyncio.Event | None = None
         self._started_at = time.monotonic()
+        self._dispatch_table = {
+            RecMessageType.STEP: self._on_step,
+            RecMessageType.RESULT: self._on_result,
+            RecMessageType.EVAL_END: self._on_eval_end,
+        }
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -176,14 +181,13 @@ class RecordingDaemon:
             logger.exception("Recording emitter handler crashed")
 
     async def _dispatch(self, frame: RecordingFrame) -> None:
-        if frame.type is RecMessageType.STEP:
-            self._on_step(frame.payload)
-        elif frame.type is RecMessageType.RESULT:
-            await self._on_result(frame.payload)
-        elif frame.type is RecMessageType.EVAL_END:
-            await self._on_eval_end(frame.payload)
-        else:  # pragma: no cover — enum exhaustive
+        handler = self._dispatch_table.get(frame.type)
+        if handler is None:  # pragma: no cover — enum exhaustive
             logger.warning("Unknown recording frame type: %s", frame.type)
+            return
+        result = handler(frame.payload)
+        if asyncio.iscoroutine(result):
+            await result
 
     # ------------------------------------------------------------------
     # Handlers
@@ -248,7 +252,6 @@ class RecordingDaemon:
 
     async def _flush_eval(self, agg: _Eval, *, unclosed: bool) -> None:
         try:
-            agg.aggregate_dir.mkdir(parents=True, exist_ok=True)
             stem, _, ext = agg.aggregate_filename.rpartition(".")
             if not stem:
                 stem, ext = agg.aggregate_filename, "json"
