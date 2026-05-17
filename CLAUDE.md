@@ -43,9 +43,9 @@ CLI (cli/main.py)
      ├─ Benchmark (benchmarks/base.py)  ── runs inside Docker container
      │   └─ EpisodeRunner (runners/)    ── sync or async (Sim2Live)
      │       └─ Connection (connection.py) ←─ WebSocket/msgpack ─→ ModelServer (model_servers/base.py)
-     └─ ResultCollector (results/collector.py)
+     └─ ResultCollector (results/collector.py)  ── in-memory only
 
-recording_daemon/  ── optional sidecar; collects per-episode jsonl + mp4 + per-eval aggregate JSON over its own WS.
+recording_daemon/  ── sidecar process; sole writer of per-episode jsonl + mp4 and per-eval aggregate JSON. Frames travel over its own WS + msgpack.
 ```
 
 ### Key design decisions
@@ -53,13 +53,14 @@ recording_daemon/  ── optional sidecar; collects per-episode jsonl + mp4 + p
 - **Episode-level error isolation**: One episode failure never aborts the entire evaluation.
 - **anyio-based async**: asyncio-compatible, not trio. Use anyio primitives for new async code.
 - **Parallel evaluation**: Environment parallelism via episode sharding + inference parallelism via batch forward passes.
+- **Recording daemon is the sole disk writer**: orchestrator / shards / model server are emit-only; no per-shard JSON, no `vla-eval merge`.
 
-### Recording daemon (optional)
+### Recording daemon
 
-`vla-eval recording-daemon` runs as a sidecar on the eval host. Model server (`--recording-daemon-url ws://...`) and harness shards (`--recording-daemon-url`, `--eval-id`) push per-step / per-episode artefacts to it; the daemon writes jsonl + mp4 + aggregate JSON.
+`vla-eval recording-daemon` runs as a sidecar. Model server (`--recording-daemon-url ws://...`) and harness shards (`--recording-daemon-url`, `--eval-id`) push per-step / per-episode / per-eval frames to it; the daemon writes jsonl + mp4 + aggregate JSON.
 
-Use `scripts/run_sharded.sh` to spawn the daemon, run N shards, and push EVAL_END automatically. `scripts/run_sharded.sh --no-daemon` disables the daemon flow if you only need per-shard JSON (legacy).
+Use `scripts/run_sharded.sh` to spawn the daemon, run N shards, and push `EVAL_END` automatically.
 
-The daemon owns disk writes — local-mode `EpisodeRecorder` still works when no emitter is installed; daemon-mode kicks in once the orchestrator installs an emitter and calls `Benchmark.set_recording_target(sid, eid)`.
+Video frames are pushed through the same client API but stay on local disk — the client owns one working mp4 per `(sid, eid)` and only sends the path on `end_episode`, so binary never crosses the wire.
 
-Read `CONTRIBUTING.md` before any integration work (adding benchmarks/model servers, PR workflow).
+Read `CONTRIBUTING.md` before any integration work (adding benchmarks/model servers, recording, PR workflow).

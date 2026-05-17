@@ -3,17 +3,17 @@ set -euo pipefail
 
 usage() {
   cat <<EOF
-Usage: $(basename "$0") -c <config> [-n <num_shards>] [-o <output>] [-d <daemon_url>] [--no-daemon]
+Usage: $(basename "$0") -c <config> [-n <num_shards>] [-o <output>] [-d <daemon_url>]
 
 Run a benchmark in parallel shards. Spawns a recording-daemon sidecar
-that collects per-episode artefacts and writes the aggregate result.
+that collects per-episode artefacts and the per-eval aggregate JSON —
+nothing else writes to disk in this flow.
 
 Options:
   -c <config>          Config YAML file (required)
   -n <num_shards>      Number of shards (default: 50)
   -o <output>          Output directory for recording-daemon (default: results/recording-<config_name>/)
   -d <daemon_url>      WS URL for daemon (default: ws://127.0.0.1:9001)
-  --no-daemon          Don't spawn the recording daemon (skip daemon-based collection)
   -h                   Show this help
 EOF
   exit "${1:-0}"
@@ -23,7 +23,6 @@ CONFIG=""
 NUM_SHARDS=50
 OUTPUT=""
 DAEMON_URL="ws://127.0.0.1:9001"
-NO_DAEMON=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -31,7 +30,6 @@ while [[ $# -gt 0 ]]; do
     -n) NUM_SHARDS="$2"; shift 2 ;;
     -o) OUTPUT="$2"; shift 2 ;;
     -d) DAEMON_URL="$2"; shift 2 ;;
-    --no-daemon) NO_DAEMON=1; shift ;;
     -h|--help) usage 0 ;;
     *) echo "Unknown option: $1" >&2; usage 1 ;;
   esac
@@ -72,27 +70,21 @@ echo "Config:     $CONFIG"
 echo "Shards:     $NUM_SHARDS"
 echo "Output:     $OUTPUT"
 echo "Eval ID:    $EVAL_ID"
-echo "Daemon URL: $DAEMON_URL (no-daemon=$NO_DAEMON)"
+echo "Daemon URL: $DAEMON_URL"
 echo ""
 
-if [[ "$NO_DAEMON" -eq 0 ]]; then
-  echo "Starting recording daemon..."
-  vla-eval recording-daemon --bind "$DAEMON_URL" --out-dir "$OUTPUT" &
-  DAEMON_PID=$!
-  # Give the daemon a moment to bind before shards start dialing it.
-  sleep 1
-fi
+echo "Starting recording daemon..."
+vla-eval recording-daemon --bind "$DAEMON_URL" --out-dir "$OUTPUT" &
+DAEMON_PID=$!
+# Give the daemon a moment to bind before shards start dialing it.
+sleep 1
 
 echo "Launching ${NUM_SHARDS} shards..."
 
-DAEMON_ARGS=()
-if [[ "$NO_DAEMON" -eq 0 ]]; then
-  DAEMON_ARGS=(--recording-daemon-url "$DAEMON_URL" --eval-id "$EVAL_ID")
-fi
-
 pids=()
 for i in $(seq 0 $((NUM_SHARDS - 1))); do
-  vla-eval run -c "$CONFIG" --shard-id "$i" --num-shards "$NUM_SHARDS" "${DAEMON_ARGS[@]}" &
+  vla-eval run -c "$CONFIG" --shard-id "$i" --num-shards "$NUM_SHARDS" \
+    --recording-daemon-url "$DAEMON_URL" --eval-id "$EVAL_ID" &
   pids+=($!)
 done
 
@@ -108,18 +100,16 @@ if [[ "$failed" -gt 0 ]]; then
   echo "ERROR: $failed of $NUM_SHARDS shards failed." >&2
 fi
 
-if [[ "$NO_DAEMON" -eq 0 ]]; then
-  echo "Sending EVAL_END to recording daemon..."
-  python3 -c "
+echo "Sending EVAL_END to recording daemon..."
+python3 -c "
 from vla_eval.recording_daemon.client import RecordingClient
 import time
-e = RecordingClient('$DAEMON_URL')
-e.end_eval('$EVAL_ID')
+c = RecordingClient('$DAEMON_URL')
+c.end_eval('$EVAL_ID')
 time.sleep(1.0)  # let the queue drain over WS
-e.close()
+c.close()
 "
-  echo "Done. Per-episode artefacts and aggregate JSON in $OUTPUT"
-fi
+echo "Done. Per-episode artefacts and aggregate JSON in $OUTPUT"
 
 if [[ "$failed" -gt 0 ]]; then
   exit 1
