@@ -74,7 +74,7 @@ class Orchestrator:
         self._progress_path: Path | None = None
         self._recording_daemon_url = recording_daemon_url
         self._eval_id = eval_id or str(uuid.uuid4())
-        self._emitter: Any | None = None
+        self._client: Any | None = None
 
     @property
     def _output_dir(self) -> Path:
@@ -93,25 +93,25 @@ class Orchestrator:
         benchmark_configs = self.config.get("benchmarks", [])
         all_results = []
 
-        self._maybe_install_emitter()
+        self._maybe_set_client()
         try:
             for bench_cfg in benchmark_configs:
                 result = await self._run_benchmark(bench_cfg)
                 all_results.append(result)
         finally:
-            if self._emitter is not None:
-                self._emitter.close()
+            if self._client is not None:
+                self._client.close()
 
         return all_results
 
-    def _maybe_install_emitter(self) -> None:
+    def _maybe_set_client(self) -> None:
         if not self._recording_daemon_url:
             return
         from vla_eval import recording
-        from vla_eval.recording_daemon.emitter import RecordingEmitter
+        from vla_eval.recording_daemon.client import RecordingClient
 
-        self._emitter = RecordingEmitter(self._recording_daemon_url)
-        recording.install_emitter(self._emitter)
+        self._client = RecordingClient(self._recording_daemon_url)
+        recording.set_client(self._client)
         logger.info("Orchestrator recording emitter installed: %s", self._recording_daemon_url)
 
     def _release_file_lock(self) -> None:
@@ -264,8 +264,8 @@ class Orchestrator:
 
         # Recording daemon: announce this eval before any episode emits.
         sid = str(uuid.uuid4())  # one (sid) per orchestrator/shard process.
-        if self._emitter is not None:
-            self._emitter.push_eval_start(
+        if self._client is not None:
+            self._client.start_eval(
                 eval_id=self._eval_id,
                 output_dir=str(self._output_dir),
                 aggregate_filename=f"{safe_name}_aggregate.json",
@@ -294,7 +294,7 @@ class Orchestrator:
                         episode_idx = ep % max_ep
                     task = {**task, "episode_idx": episode_idx}
                     eid = str(uuid.uuid4())
-                    recording_payload = self._push_episode_start(benchmark, task, sid, eid)
+                    recording_payload = self._start_episode(benchmark, task, sid, eid)
                     if recording_payload is not None:
                         benchmark.set_recording_target(sid, eid)
                     raw = await runner.run_episode(
@@ -378,7 +378,7 @@ class Orchestrator:
 
         return self._save_results(collector, cfg, safe_name, partial=False, server_info=conn.server_info)
 
-    def _push_episode_start(
+    def _start_episode(
         self,
         benchmark: Any,
         task: dict[str, Any],
@@ -386,7 +386,7 @@ class Orchestrator:
         eid: str,
     ) -> dict[str, Any] | None:
         """Push EPISODE_START to the daemon and return the wire payload (or None)."""
-        if self._emitter is None:
+        if self._client is None:
             return None
         try:
             rec_ctx = benchmark.get_recording_context(task)
@@ -398,7 +398,7 @@ class Orchestrator:
         output_dir = rec_ctx["output_dir"]
         filename_template = rec_ctx["filename_template"]
         context = rec_ctx.get("context") or {}
-        self._emitter.push_episode_start(
+        self._client.start_episode(
             eval_id=self._eval_id,
             sid=sid,
             eid=eid,
@@ -422,12 +422,12 @@ class Orchestrator:
         ep_result: Any,
         recording_active: bool,
     ) -> None:
-        if self._emitter is None or not recording_active:
+        if self._client is None or not recording_active:
             return
         metrics = dict(ep_result.get("metrics") or {})
         status = "success" if metrics.get("success") else "fail"
-        self._emitter.push_episode_result(eval_id=self._eval_id, sid=sid, eid=eid, status=status, metrics=metrics)
-        self._emitter.push_episode_end(sid=sid, eid=eid)
+        self._client.result(eval_id=self._eval_id, sid=sid, eid=eid, status=status, metrics=metrics)
+        self._client.end_episode(sid=sid, eid=eid)
 
     def _save_results(
         self,

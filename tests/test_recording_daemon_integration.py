@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from vla_eval.recording_daemon.emitter import RecordingEmitter
+from vla_eval.recording_daemon.client import RecordingClient
 
 
 def _free_port() -> int:
@@ -78,11 +78,11 @@ def _kill(proc: subprocess.Popen) -> None:
 def test_end_to_end(tmp_path: Path) -> None:
     proc, ws_port, _ = _spawn_daemon(tmp_path)
     try:
-        emitter = RecordingEmitter(f"ws://127.0.0.1:{ws_port}")
+        emitter = RecordingClient(f"ws://127.0.0.1:{ws_port}")
         try:
-            emitter.push_eval_start("e2e", str(tmp_path), "e2e_run.json", expected_count=3)
+            emitter.start_eval("e2e", str(tmp_path), "e2e_run.json", expected_count=3)
             for i in range(3):
-                emitter.push_episode_start(
+                emitter.start_episode(
                     "e2e",
                     "shard0",
                     f"ep{i}",
@@ -91,10 +91,10 @@ def test_end_to_end(tmp_path: Path) -> None:
                     {"idx": i},
                 )
                 for s in range(2):
-                    emitter.push_record_commit("shard0", f"ep{i}", s, {"reward": s + 0.5})
-                emitter.push_episode_result("e2e", "shard0", f"ep{i}", "success", {"success": True})
-                emitter.push_episode_end("shard0", f"ep{i}")
-            emitter.push_eval_end("e2e")
+                    emitter.record("shard0", f"ep{i}", s, {"reward": s + 0.5})
+                emitter.result("e2e", "shard0", f"ep{i}", "success", {"success": True})
+                emitter.end_episode("shard0", f"ep{i}")
+            emitter.end_eval("e2e")
         finally:
             emitter.close(timeout=3.0)
 
@@ -112,11 +112,11 @@ def test_two_shard_emitters_one_daemon(tmp_path: Path) -> None:
     proc, ws_port, _ = _spawn_daemon(tmp_path)
     try:
         url = f"ws://127.0.0.1:{ws_port}"
-        a = RecordingEmitter(url)
-        b = RecordingEmitter(url)
+        a = RecordingClient(url)
+        b = RecordingClient(url)
         try:
             for emitter, sid, idx in [(a, "sA", 0), (b, "sB", 1)]:
-                emitter.push_episode_start(
+                emitter.start_episode(
                     "shared",
                     sid,
                     f"e{idx}",
@@ -124,9 +124,9 @@ def test_two_shard_emitters_one_daemon(tmp_path: Path) -> None:
                     "shard_{idx:04d}_{status}",
                     {"idx": idx},
                 )
-                emitter.push_record_commit(sid, f"e{idx}", 0, {"sid": sid})
-                emitter.push_episode_result("shared", sid, f"e{idx}", "success", {"success": True})
-                emitter.push_episode_end(sid, f"e{idx}")
+                emitter.record(sid, f"e{idx}", 0, {"sid": sid})
+                emitter.result("shared", sid, f"e{idx}", "success", {"success": True})
+                emitter.end_episode(sid, f"e{idx}")
         finally:
             a.close(timeout=2.0)
             b.close(timeout=2.0)
@@ -166,10 +166,10 @@ def test_signal_shutdown_flushes_unclosed(tmp_path: Path) -> None:
 
     proc, ws_port, _ = _spawn_daemon(tmp_path)
     try:
-        emitter = RecordingEmitter(f"ws://127.0.0.1:{ws_port}")
+        emitter = RecordingClient(f"ws://127.0.0.1:{ws_port}")
         try:
-            emitter.push_episode_start("e1", "s1", "ep1", str(tmp_path), "sig_{idx:04d}_{status}", {"idx": 0})
-            emitter.push_record_commit("s1", "ep1", 0, {"x": 1})
+            emitter.start_episode("e1", "s1", "ep1", str(tmp_path), "sig_{idx:04d}_{status}", {"idx": 0})
+            emitter.record("s1", "ep1", 0, {"x": 1})
             time.sleep(0.5)
         finally:
             emitter.close(timeout=2.0)

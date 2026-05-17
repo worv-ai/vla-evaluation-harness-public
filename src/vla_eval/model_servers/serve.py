@@ -127,9 +127,9 @@ async def _handle_connection(
                 ctx = SessionContext(session_id=effective_sid, episode_id=episode_id, mode="sync")
                 ctx._send_action_fn = send_action
                 logger.info("EPISODE_START session=%s episode=%s", effective_sid[:8], episode_id[:8])
-                emitter = recording.installed_emitter()
+                emitter = recording.client()
                 if emitter is not None and rec:
-                    emitter.push_episode_start(
+                    emitter.start_episode(
                         eval_id=rec.get("eval_id"),
                         sid=effective_sid,
                         eid=episode_id,
@@ -184,9 +184,9 @@ async def _handle_connection(
                     await model_server.on_episode_end(msg.payload, ctx)
                 except Exception:
                     logger.exception("Error in on_episode_end session=%s", session_id[:8])
-                emitter = recording.installed_emitter()
+                emitter = recording.client()
                 if emitter is not None and ctx.episode_id:
-                    emitter.push_episode_end(sid=ctx.session_id, eid=ctx.episode_id)
+                    emitter.end_episode(sid=ctx.session_id, eid=ctx.episode_id)
                 in_episode = False
 
             elif msg.type == MessageType.ERROR:
@@ -481,9 +481,9 @@ def run_server(server_cls: type[ModelServer]) -> None:
     server = server_cls(**ctor_kwargs)
 
     if args.recording_daemon_url:
-        from vla_eval.recording_daemon.emitter import RecordingEmitter
+        from vla_eval.recording_daemon.client import RecordingClient
 
-        recording.install_emitter(RecordingEmitter(args.recording_daemon_url))
+        recording.set_client(RecordingClient(args.recording_daemon_url))
         logger.info("Recording daemon emitter installed: %s", args.recording_daemon_url)
 
     load_model = getattr(server, "_load_model", None)

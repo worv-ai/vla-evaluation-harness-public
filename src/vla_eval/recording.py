@@ -2,8 +2,8 @@
 
 Public surface:
 
-- :func:`install_emitter` / :func:`installed_emitter` — wire the
-  RecordingEmitter at process startup.  Optional: with no emitter installed,
+- :func:`set_client` / :func:`client` — wire the
+  RecordingClient at process startup.  Optional: with no emitter installed,
   step_scope is a no-op and a one-shot WARN is logged.
 - :func:`step_scope` — context manager that accumulates fields and emits one
   ``RECORD_COMMIT`` frame on exit, keyed by ``(session_id, step_id)``.
@@ -67,7 +67,7 @@ class Step:
             self._fields.update(fields)
 
 
-def install_emitter(emitter: Any) -> None:
+def set_client(emitter: Any) -> None:
     """Install the daemon emitter for this process. Call once at startup."""
     global _emitter, _warned_no_emitter
     with _lock:
@@ -75,7 +75,7 @@ def install_emitter(emitter: Any) -> None:
         _warned_no_emitter = False
 
 
-def installed_emitter() -> Any | None:
+def client() -> Any | None:
     return _emitter
 
 
@@ -104,10 +104,10 @@ def _commit_step(step: Step) -> None:
                 _warned_no_emitter = True
                 logger.warning(
                     "recording.step_scope called but no emitter installed; "
-                    "records dropped. Install with recording.install_emitter() at startup."
+                    "records dropped. Install with recording.set_client() at startup."
                 )
         return
     try:
-        emitter.push_record_commit(step._sid, step._eid, step._step_id, dict(step._fields))
+        emitter.record(step._sid, step._eid, step._step_id, dict(step._fields))
     except Exception:
         logger.exception("Failed to push RECORD_COMMIT for sid=%s eid=%s step=%d", step._sid, step._eid, step._step_id)

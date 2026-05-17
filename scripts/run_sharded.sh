@@ -111,10 +111,10 @@ fi
 if [[ "$NO_DAEMON" -eq 0 ]]; then
   echo "Sending EVAL_END to recording daemon..."
   python3 -c "
-from vla_eval.recording_daemon.emitter import RecordingEmitter
+from vla_eval.recording_daemon.client import RecordingClient
 import time
-e = RecordingEmitter('$DAEMON_URL')
-e.push_eval_end('$EVAL_ID')
+e = RecordingClient('$DAEMON_URL')
+e.end_eval('$EVAL_ID')
 time.sleep(1.0)  # let the queue drain over WS
 e.close()
 "

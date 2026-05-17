@@ -31,7 +31,7 @@ _RECONNECT_INITIAL_SEC = 0.1
 _RECONNECT_MAX_SEC = 5.0
 
 
-class RecordingEmitter:
+class RecordingClient:
     """Thread-safe emitter that sends frames to a recording daemon over WS."""
 
     def __init__(self, daemon_url: str, queue_size: int = _DEFAULT_QUEUE_SIZE) -> None:
@@ -49,7 +49,7 @@ class RecordingEmitter:
     # Public push API
     # ------------------------------------------------------------------
 
-    def push_eval_start(
+    def start_eval(
         self,
         eval_id: str,
         output_dir: str,
@@ -66,7 +66,7 @@ class RecordingEmitter:
             },
         )
 
-    def push_episode_start(
+    def start_episode(
         self,
         eval_id: str,
         sid: str,
@@ -87,28 +87,28 @@ class RecordingEmitter:
             },
         )
 
-    def push_record_commit(self, sid: str, eid: str, step_id: int, fields: dict[str, Any]) -> None:
+    def record(self, sid: str, eid: str, step_id: int, fields: dict[str, Any]) -> None:
         self._enqueue(
             RecordingMessageType.RECORD_COMMIT,
             {"sid": sid, "eid": eid, "step_id": step_id, "fields": fields},
         )
 
-    def push_episode_result(self, eval_id: str, sid: str, eid: str, status: str, metrics: dict[str, Any]) -> None:
+    def result(self, eval_id: str, sid: str, eid: str, status: str, metrics: dict[str, Any]) -> None:
         self._enqueue(
             RecordingMessageType.EPISODE_RESULT,
             {"eval_id": eval_id, "sid": sid, "eid": eid, "status": status, "metrics": metrics},
         )
 
-    def push_video_artifact(self, sid: str, eid: str, working_path: str) -> None:
+    def video(self, sid: str, eid: str, working_path: str) -> None:
         self._enqueue(
             RecordingMessageType.VIDEO_ARTIFACT,
             {"sid": sid, "eid": eid, "working_path": working_path},
         )
 
-    def push_episode_end(self, sid: str, eid: str) -> None:
+    def end_episode(self, sid: str, eid: str) -> None:
         self._enqueue(RecordingMessageType.EPISODE_END, {"sid": sid, "eid": eid})
 
-    def push_eval_end(self, eval_id: str) -> None:
+    def end_eval(self, eval_id: str) -> None:
         self._enqueue(RecordingMessageType.EVAL_END, {"eval_id": eval_id})
 
     def close(self, timeout: float = 5.0) -> None:
@@ -143,7 +143,7 @@ class RecordingEmitter:
             if not self._warned_overflow:
                 self._warned_overflow = True
                 logger.warning(
-                    "RecordingEmitter queue full at %d frames; dropping. Further drops silent this session.",
+                    "RecordingClient queue full at %d frames; dropping. Further drops silent this session.",
                     self._queue.maxsize,
                 )
 
@@ -157,7 +157,7 @@ class RecordingEmitter:
             asyncio.set_event_loop(self._loop)
             self._loop.run_until_complete(self._sender_loop())
         except Exception:
-            logger.exception("RecordingEmitter sender loop crashed")
+            logger.exception("RecordingClient sender loop crashed")
         finally:
             if self._loop is not None:
                 self._loop.close()

@@ -19,7 +19,7 @@ import websockets
 
 from vla_eval.recording_daemon.config import RecordingDaemonConfig
 from vla_eval.recording_daemon.daemon import RecordingDaemon
-from vla_eval.recording_daemon.emitter import RecordingEmitter
+from vla_eval.recording_daemon.client import RecordingClient
 from vla_eval.recording_daemon.messages import (
     RecordingFrame,
     RecordingMessageType,
@@ -114,19 +114,19 @@ def test_unpack_rejects_malformed() -> None:
 @pytest.mark.anyio
 async def test_episode_lifecycle(daemon: tuple) -> None:
     d, url, out_dir = daemon
-    emitter = RecordingEmitter(url)
+    emitter = RecordingClient(url)
     try:
-        emitter.push_eval_start("e1", str(out_dir), "agg.json", expected_count=1)
-        emitter.push_episode_start(
+        emitter.start_eval("e1", str(out_dir), "agg.json", expected_count=1)
+        emitter.start_episode(
             "e1", "s1", "ep1", str(out_dir), "{task}_ep{idx:04d}_{status}", {"task": "T", "idx": 0}
         )
         for step in range(3):
-            emitter.push_record_commit("s1", "ep1", step, {"reward": float(step)})
+            emitter.record("s1", "ep1", step, {"reward": float(step)})
         working = out_dir / ".recorder-fake.mp4"
         working.write_bytes(b"\x00\x00\x00\x18ftypmp42")
-        emitter.push_video_artifact("s1", "ep1", str(working))
-        emitter.push_episode_result("e1", "s1", "ep1", "success", {"success": True})
-        emitter.push_episode_end("s1", "ep1")
+        emitter.video("s1", "ep1", str(working))
+        emitter.result("e1", "s1", "ep1", "success", {"success": True})
+        emitter.end_episode("s1", "ep1")
 
         jsonl = out_dir / "T_ep0000_success.jsonl"
         mp4 = out_dir / "T_ep0000_success.mp4"
@@ -142,16 +142,16 @@ async def test_episode_lifecycle(daemon: tuple) -> None:
 @pytest.mark.anyio
 async def test_two_emitters_merge(daemon: tuple) -> None:
     d, url, out_dir = daemon
-    a = RecordingEmitter(url)
-    b = RecordingEmitter(url)
+    a = RecordingClient(url)
+    b = RecordingClient(url)
     try:
-        a.push_episode_start("e1", "s1", "ep1", str(out_dir), "merge_{idx:04d}_{status}", {"idx": 0})
-        b.push_episode_start("e1", "s1", "ep1", str(out_dir), "merge_{idx:04d}_{status}", {"idx": 0})
-        a.push_record_commit("s1", "ep1", 0, {"from_a": 1})
-        b.push_record_commit("s1", "ep1", 0, {"from_b": 2})
-        a.push_record_commit("s1", "ep1", 1, {"from_a": 1})
-        a.push_episode_result("e1", "s1", "ep1", "fail", {"success": False})
-        a.push_episode_end("s1", "ep1")
+        a.start_episode("e1", "s1", "ep1", str(out_dir), "merge_{idx:04d}_{status}", {"idx": 0})
+        b.start_episode("e1", "s1", "ep1", str(out_dir), "merge_{idx:04d}_{status}", {"idx": 0})
+        a.record("s1", "ep1", 0, {"from_a": 1})
+        b.record("s1", "ep1", 0, {"from_b": 2})
+        a.record("s1", "ep1", 1, {"from_a": 1})
+        a.result("e1", "s1", "ep1", "fail", {"success": False})
+        a.end_episode("s1", "ep1")
 
         jsonl = out_dir / "merge_0000_fail.jsonl"
         assert await _wait_path(jsonl), list(out_dir.iterdir())
@@ -167,15 +167,15 @@ async def test_two_emitters_merge(daemon: tuple) -> None:
 @pytest.mark.anyio
 async def test_late_frame_dropped(daemon: tuple) -> None:
     d, url, out_dir = daemon
-    emitter = RecordingEmitter(url)
+    emitter = RecordingClient(url)
     try:
-        emitter.push_episode_start("e1", "s1", "ep1", str(out_dir), "late_{idx:04d}_{status}", {"idx": 0})
-        emitter.push_record_commit("s1", "ep1", 0, {"x": 1})
-        emitter.push_episode_result("e1", "s1", "ep1", "success", {"success": True})
-        emitter.push_episode_end("s1", "ep1")
+        emitter.start_episode("e1", "s1", "ep1", str(out_dir), "late_{idx:04d}_{status}", {"idx": 0})
+        emitter.record("s1", "ep1", 0, {"x": 1})
+        emitter.result("e1", "s1", "ep1", "success", {"success": True})
+        emitter.end_episode("s1", "ep1")
         jsonl = out_dir / "late_0000_success.jsonl"
         assert await _wait_path(jsonl)
-        emitter.push_record_commit("s1", "ep1", 1, {"x": 2})  # bucket already gone
+        emitter.record("s1", "ep1", 1, {"x": 2})  # bucket already gone
         await asyncio.sleep(0.3)
         rows = [json.loads(line) for line in jsonl.read_text().splitlines()]
         assert [r["step"] for r in rows] == [0]
@@ -186,9 +186,9 @@ async def test_late_frame_dropped(daemon: tuple) -> None:
 @pytest.mark.anyio
 async def test_unknown_episode_id_dropped(daemon: tuple) -> None:
     d, url, out_dir = daemon
-    emitter = RecordingEmitter(url)
+    emitter = RecordingClient(url)
     try:
-        emitter.push_record_commit("nope", "nope", 0, {"x": 1})
+        emitter.record("nope", "nope", 0, {"x": 1})
         await asyncio.sleep(0.3)
         assert list(out_dir.glob("*.jsonl")) == []
     finally:
@@ -198,13 +198,13 @@ async def test_unknown_episode_id_dropped(daemon: tuple) -> None:
 @pytest.mark.anyio
 async def test_video_rename_failure(daemon: tuple) -> None:
     d, url, out_dir = daemon
-    emitter = RecordingEmitter(url)
+    emitter = RecordingClient(url)
     try:
-        emitter.push_episode_start("e1", "s1", "ep1", str(out_dir), "vid_{idx:04d}_{status}", {"idx": 0})
-        emitter.push_record_commit("s1", "ep1", 0, {"x": 1})
-        emitter.push_video_artifact("s1", "ep1", str(out_dir / "does-not-exist.mp4"))
-        emitter.push_episode_result("e1", "s1", "ep1", "success", {"success": True})
-        emitter.push_episode_end("s1", "ep1")
+        emitter.start_episode("e1", "s1", "ep1", str(out_dir), "vid_{idx:04d}_{status}", {"idx": 0})
+        emitter.record("s1", "ep1", 0, {"x": 1})
+        emitter.video("s1", "ep1", str(out_dir / "does-not-exist.mp4"))
+        emitter.result("e1", "s1", "ep1", "success", {"success": True})
+        emitter.end_episode("s1", "ep1")
         jsonl = out_dir / "vid_0000_success.jsonl"
         assert await _wait_path(jsonl)
         assert not (out_dir / "vid_0000_success.mp4").exists()
@@ -215,14 +215,14 @@ async def test_video_rename_failure(daemon: tuple) -> None:
 @pytest.mark.anyio
 async def test_eval_aggregate(daemon: tuple) -> None:
     d, url, out_dir = daemon
-    emitter = RecordingEmitter(url)
+    emitter = RecordingClient(url)
     try:
-        emitter.push_eval_start("agg1", str(out_dir), "myrun.json", expected_count=2)
+        emitter.start_eval("agg1", str(out_dir), "myrun.json", expected_count=2)
         for i in range(2):
-            emitter.push_episode_start("agg1", "s1", f"ep{i}", str(out_dir), "agg_{idx:04d}_{status}", {"idx": i})
-            emitter.push_episode_result("agg1", "s1", f"ep{i}", "success", {"success": True, "idx": i})
-            emitter.push_episode_end("s1", f"ep{i}")
-        emitter.push_eval_end("agg1")
+            emitter.start_episode("agg1", "s1", f"ep{i}", str(out_dir), "agg_{idx:04d}_{status}", {"idx": i})
+            emitter.result("agg1", "s1", f"ep{i}", "success", {"success": True, "idx": i})
+            emitter.end_episode("s1", f"ep{i}")
+        emitter.end_eval("agg1")
 
         aggregate = out_dir / "myrun.json"
         assert await _wait_path(aggregate, deadline=4.0)
@@ -242,10 +242,10 @@ async def test_eval_aggregate(daemon: tuple) -> None:
 @pytest.mark.anyio
 async def test_age_out_partial_flush_bucket(free_port: int, tmp_path: Path) -> None:
     d, url, task = await _start_daemon(free_port, tmp_path, idle_timeout=0.1)
-    emitter = RecordingEmitter(url)
+    emitter = RecordingClient(url)
     try:
-        emitter.push_episode_start("e1", "s1", "ep1", str(tmp_path), "age_{idx:04d}_{status}", {"idx": 0})
-        emitter.push_record_commit("s1", "ep1", 0, {"x": 1})
+        emitter.start_episode("e1", "s1", "ep1", str(tmp_path), "age_{idx:04d}_{status}", {"idx": 0})
+        emitter.record("s1", "ep1", 0, {"x": 1})
         await asyncio.sleep(0.5)
         await d._age_out_once()
         files = sorted(tmp_path.glob("age_*"))
@@ -258,9 +258,9 @@ async def test_age_out_partial_flush_bucket(free_port: int, tmp_path: Path) -> N
 @pytest.mark.anyio
 async def test_age_out_partial_flush_eval(free_port: int, tmp_path: Path) -> None:
     d, url, task = await _start_daemon(free_port, tmp_path, idle_timeout=0.1)
-    emitter = RecordingEmitter(url)
+    emitter = RecordingClient(url)
     try:
-        emitter.push_eval_start("e1", str(tmp_path), "aggpartial.json", expected_count=10)
+        emitter.start_eval("e1", str(tmp_path), "aggpartial.json", expected_count=10)
         await asyncio.sleep(0.5)
         await d._age_out_once()
         out = tmp_path / "aggpartial_unclosed.json"
@@ -277,10 +277,10 @@ async def test_age_out_partial_flush_eval(free_port: int, tmp_path: Path) -> Non
 
 def test_emitter_daemon_down_drops_silently(free_port: int) -> None:
     # Nothing listening — emitter must not raise; close cleanly within timeout.
-    emitter = RecordingEmitter(f"ws://127.0.0.1:{free_port}")
+    emitter = RecordingClient(f"ws://127.0.0.1:{free_port}")
     try:
-        emitter.push_episode_start("e1", "s1", "ep1", "/tmp/none", "x_{status}", {})
-        emitter.push_record_commit("s1", "ep1", 0, {"x": 1})
+        emitter.start_episode("e1", "s1", "ep1", "/tmp/none", "x_{status}", {})
+        emitter.record("s1", "ep1", 0, {"x": 1})
         time.sleep(0.3)
     finally:
         emitter.close(timeout=1.0)
@@ -294,10 +294,10 @@ def test_emitter_daemon_down_drops_silently(free_port: int) -> None:
 @pytest.mark.anyio
 async def test_shutdown_flush(free_port: int, tmp_path: Path) -> None:
     d, url, task = await _start_daemon(free_port, tmp_path)
-    emitter = RecordingEmitter(url)
+    emitter = RecordingClient(url)
     try:
-        emitter.push_episode_start("e1", "s1", "ep1", str(tmp_path), "sh_{idx:04d}_{status}", {"idx": 0})
-        emitter.push_record_commit("s1", "ep1", 0, {"x": 1})
+        emitter.start_episode("e1", "s1", "ep1", str(tmp_path), "sh_{idx:04d}_{status}", {"idx": 0})
+        emitter.record("s1", "ep1", 0, {"x": 1})
         await asyncio.sleep(0.3)
     finally:
         emitter.close()

@@ -560,5 +560,5 @@ class RoboMMEBenchmark(StepBenchmark):
         if self._recorder is not None:
             from vla_eval import recording
 
-            emitter = recording.installed_emitter()
+            emitter = recording.client()
             self._recorder.set_emitter_target(emitter, sid, eid)

@@ -81,14 +81,14 @@ class EpisodeRecorder:
             for bare in [field_name.split(".")[0].split("[")[0]]
             if bare and bare != "status"
         )
-        self._emitter: Any | None = None
+        self._client: Any | None = None
         self._sid: str | None = None
         self._eid: str | None = None
         self._step_counter = 0
 
     @property
     def active(self) -> bool:
-        if self._emitter is not None:
+        if self._client is not None:
             return self._sid is not None and self._eid is not None and self._video_active()
         return (self._video is not None and self._video.active) or self._data_fh is not None
 
@@ -100,7 +100,7 @@ class EpisodeRecorder:
 
         Pass ``emitter=None`` to revert to local mode.
         """
-        self._emitter = emitter
+        self._client = emitter
         self._sid = sid
         self._eid = eid
 
@@ -112,7 +112,7 @@ class EpisodeRecorder:
         self._step_counter = 0
         if self._video is not None:
             self._video.start(context)
-        if self._emitter is not None:
+        if self._client is not None:
             return  # daemon owns jsonl; no local working file.
         if self._data_dir is not None:
             if self._data_fh is not None:
@@ -126,8 +126,8 @@ class EpisodeRecorder:
             self._video.record(frame)
 
     def record_step(self, data: dict[str, Any]) -> None:
-        if self._emitter is not None and self._sid and self._eid:
-            self._emitter.push_record_commit(self._sid, self._eid, self._step_counter, dict(data))
+        if self._client is not None and self._sid and self._eid:
+            self._client.record(self._sid, self._eid, self._step_counter, dict(data))
             self._step_counter += 1
             return
         if self._data_fh is None:
@@ -135,7 +135,7 @@ class EpisodeRecorder:
         self._data_fh.write(json.dumps(data, ensure_ascii=False, default=str) + "\n")
 
     def save(self, **extra: Any) -> None:
-        if self._emitter is not None and self._sid and self._eid:
+        if self._client is not None and self._sid and self._eid:
             self._save_via_emitter()
             return
         status_kwargs = {**self._context, **extra}
@@ -158,11 +158,11 @@ class EpisodeRecorder:
             self._data_working = None
 
     def _save_via_emitter(self) -> None:
-        assert self._emitter is not None and self._sid and self._eid
+        assert self._client is not None and self._sid and self._eid
         if self._video is not None:
             working = self._video.close_keep_working_path()
             if working is not None:
-                self._emitter.push_video_artifact(self._sid, self._eid, str(working))
+                self._client.video(self._sid, self._eid, str(working))
 
     def discard(self) -> None:
         if self._video is not None:
