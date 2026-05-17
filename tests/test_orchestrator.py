@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from unittest.mock import patch
 
 import numpy as np
@@ -42,12 +41,9 @@ async def test_orchestrator_runs_to_completion(echo_server, tmp_path):
     result = results[0]
     assert result.get("mean_success") == pytest.approx(1.0)
     assert len(result["tasks"]) == 2
-
-    # Verify file was saved
-    json_files = list(tmp_path.glob("*.json"))
-    assert len(json_files) == 1
-    saved = json.loads(json_files[0].read_text())
-    assert "partial" not in saved
+    assert "partial" not in result
+    # Per-shard / per-eval disk artifacts are owned by the recording daemon now.
+    assert list(tmp_path.glob("*.json")) == []
 
 
 @pytest.mark.anyio
@@ -112,13 +108,10 @@ async def test_orchestrator_saves_partial_on_server_death(tmp_path):
 
     # Orchestrator returns partial result instead of raising
     assert len(results) == 1
-    assert results[0].get("partial") is True
-
-    # Partial results should have been saved
-    json_files = list(tmp_path.glob("*partial*.json"))
-    assert len(json_files) >= 1
-    saved = json.loads(json_files[0].read_text())
-    assert saved["partial"] is True
+    saved = results[0]
+    assert saved.get("partial") is True
+    # No per-shard JSON on disk anymore — daemon owns persistence.
+    assert list(tmp_path.glob("*.json")) == []
 
     # 3 complete tasks + 1 failed episode = 4 episodes total
     total_episodes = sum(len(t["episodes"]) for t in saved["tasks"])
@@ -182,9 +175,9 @@ async def test_orchestrator_sharding_deterministic_filename(echo_server, tmp_pat
         return_value=StubBenchmark,
     ):
         orch = Orchestrator(config, shard_id=0, num_shards=2)
-        await orch.run()
+        results = await orch.run()
 
-    expected = tmp_path / "fname_test_shard0of2.json"
-    assert expected.exists()
-    saved = json.loads(expected.read_text())
-    assert saved["shard"] == {"id": 0, "total": 2}
+    # No per-shard JSON on disk — daemon owns persistence. Shard metadata
+    # is still on the return value.
+    assert list(tmp_path.glob("*.json")) == []
+    assert results[0]["shard"] == {"id": 0, "total": 2}
