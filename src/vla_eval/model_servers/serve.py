@@ -38,6 +38,7 @@ import anyio
 from anyio.to_thread import run_sync as _run_in_thread
 import websockets
 
+from vla_eval import recording
 from vla_eval.model_servers.base import ModelServer, SessionContext
 from vla_eval.types import Action
 from vla_eval.protocol.messages import Message, MessageType, make_hello_payload, pack_message, unpack_message
@@ -119,10 +120,23 @@ async def _handle_connection(
                 continue
 
             elif msg.type == MessageType.EPISODE_START:
-                episode_id = str(uuid.uuid4())
-                ctx = SessionContext(session_id=session_id, episode_id=episode_id, mode="sync")
+                # Harness-supplied (sid, eid) so daemon bucket keys match across processes.
+                rec = msg.payload.get("recording") or {}
+                effective_sid = rec.get("sid") or session_id
+                episode_id = rec.get("eid") or str(uuid.uuid4())
+                ctx = SessionContext(session_id=effective_sid, episode_id=episode_id, mode="sync")
                 ctx._send_action_fn = send_action
-                logger.info("EPISODE_START session=%s episode=%s", session_id[:8], episode_id[:8])
+                logger.info("EPISODE_START session=%s episode=%s", effective_sid[:8], episode_id[:8])
+                emitter = recording.installed_emitter()
+                if emitter is not None and rec:
+                    emitter.push_episode_start(
+                        eval_id=rec.get("eval_id"),
+                        sid=effective_sid,
+                        eid=episode_id,
+                        output_dir=rec.get("output_dir", ""),
+                        filename_template=rec.get("filename_template", ""),
+                        context=rec.get("context") or {},
+                    )
                 try:
                     await model_server.on_episode_start(msg.payload, ctx)
                     in_episode = True
@@ -170,6 +184,9 @@ async def _handle_connection(
                     await model_server.on_episode_end(msg.payload, ctx)
                 except Exception:
                     logger.exception("Error in on_episode_end session=%s", session_id[:8])
+                emitter = recording.installed_emitter()
+                if emitter is not None and ctx.episode_id:
+                    emitter.push_episode_end(sid=ctx.session_id, eid=ctx.episode_id)
                 in_episode = False
 
             elif msg.type == MessageType.ERROR:
@@ -396,12 +413,18 @@ def run_server(server_cls: type[ModelServer]) -> None:
     parser.add_argument("--address", default=None, help="Bind address as host:port (e.g. 0.0.0.0:8001)")
     parser.add_argument("--host", default="0.0.0.0", help="Bind host (prefer --address)")
     parser.add_argument("--port", type=int, default=8000, help="Bind port (prefer --address)")
+    parser.add_argument(
+        "--recording-daemon-url",
+        default=None,
+        help="WebSocket URL of the recording daemon. If set, RECORD_COMMIT / EPISODE_START / EPISODE_END "
+        "are pushed there (see vla_eval.recording_daemon).",
+    )
     parser.add_argument("--verbose", "-v", action="store_true", help="Debug logging")
 
     import typing
 
     _EMPTY = inspect.Parameter.empty
-    _SERVE_KEYS = {"address", "host", "port", "verbose"}
+    _SERVE_KEYS = {"address", "host", "port", "verbose", "recording_daemon_url"}
     seen = {"self"} | _SERVE_KEYS
 
     for cls in server_cls.__mro__:
@@ -456,6 +479,12 @@ def run_server(server_cls: type[ModelServer]) -> None:
 
     ctor_kwargs = {k: v for k, v in vars(args).items() if k not in _SERVE_KEYS}
     server = server_cls(**ctor_kwargs)
+
+    if args.recording_daemon_url:
+        from vla_eval.recording_daemon.emitter import RecordingEmitter
+
+        recording.install_emitter(RecordingEmitter(args.recording_daemon_url))
+        logger.info("Recording daemon emitter installed: %s", args.recording_daemon_url)
 
     load_model = getattr(server, "_load_model", None)
     if callable(load_model):
