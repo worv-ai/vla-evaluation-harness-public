@@ -19,11 +19,16 @@ class MessageType(str, enum.Enum):
     EPISODE_START = "episode_start"
     EPISODE_END = "episode_end"
     ERROR = "error"
-    RECORD = "record"
+    RECORD_COMMIT = "record_commit"
 
 
-def make_record_payload(session_id: str, fields: dict[str, Any]) -> dict[str, Any]:
-    return {"session_id": session_id, "fields": fields}
+def make_record_commit_payload(session_id: str, step_id: int, fields: dict[str, Any]) -> dict[str, Any]:
+    """Build the payload for one atomic RECORD_COMMIT frame.
+
+    Exactly one frame per (session_id, step_id); harness merges the fields
+    into the bucket for that step.
+    """
+    return {"session_id": session_id, "step_id": step_id, "fields": fields}
 
 
 PROTOCOL_VERSION = 1

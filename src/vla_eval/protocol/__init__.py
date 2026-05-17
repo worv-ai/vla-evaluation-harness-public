@@ -3,7 +3,7 @@
 from vla_eval.protocol.messages import (
     Message,
     MessageType,
-    make_record_payload,
+    make_record_commit_payload,
     pack_message,
     unpack_message,
 )
@@ -11,7 +11,7 @@ from vla_eval.protocol.messages import (
 __all__ = [
     "Message",
     "MessageType",
-    "make_record_payload",
+    "make_record_commit_payload",
     "pack_message",
     "unpack_message",
 ]

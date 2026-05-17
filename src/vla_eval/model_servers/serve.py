@@ -46,7 +46,7 @@ from vla_eval.protocol.messages import (
     Message,
     MessageType,
     make_hello_payload,
-    make_record_payload,
+    make_record_commit_payload,
     pack_message,
     unpack_message,
 )
@@ -92,18 +92,18 @@ async def _handle_connection(
 
     loop = asyncio.get_running_loop()
 
-    async def _send_record(sid: str, fields: dict[str, Any]) -> None:
-        msg = Message(type=MessageType.RECORD, payload=make_record_payload(sid, fields))
+    async def _send_record_commit(sid: str, step_id: int, fields: dict[str, Any]) -> None:
+        msg = Message(type=MessageType.RECORD_COMMIT, payload=make_record_commit_payload(sid, step_id, fields))
         try:
             await ws.send(pack_message(msg))
         except Exception:
-            logger.exception("Failed to send RECORD session=%s", sid[:8])
+            logger.exception("Failed to send RECORD_COMMIT session=%s step=%d", sid[:8], step_id)
 
-    def record_sender(sid: str, fields: dict[str, Any]) -> None:
+    def record_sender(sid: str, step_id: int, fields: dict[str, Any]) -> None:
         try:
-            asyncio.run_coroutine_threadsafe(_send_record(sid, fields), loop)
+            asyncio.run_coroutine_threadsafe(_send_record_commit(sid, step_id, fields), loop)
         except RuntimeError:
-            logger.warning("Dropping RECORD for session=%s (loop unavailable)", sid[:8])
+            logger.warning("Dropping RECORD_COMMIT for session=%s step=%d (loop unavailable)", sid[:8], step_id)
 
     recording.register_sender(session_id, record_sender)
 

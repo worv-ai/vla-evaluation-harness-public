@@ -113,10 +113,10 @@ class Connection:
         return seq
 
     async def recv(self, *, timeout: float | None = None) -> Message:
-        """Receive the next non-RECORD message from the server.
+        """Receive the next non-RECORD_COMMIT message from the server.
 
-        RECORD messages are ingested into the local recording buffer and
-        skipped — they're orthogonal to the request/response flow.
+        RECORD_COMMIT messages are ingested into the local recording buffer
+        and skipped — they're orthogonal to the request/response flow.
 
         Args:
             timeout: Max seconds to wait, or ``None`` to block indefinitely.
@@ -131,8 +131,8 @@ class Connection:
             while True:
                 data = await self._ws.recv()
                 msg = unpack_message(data)
-                if msg.type == MessageType.RECORD:
-                    _ingest_record(msg)
+                if msg.type == MessageType.RECORD_COMMIT:
+                    _ingest_record_commit(msg)
                     continue
                 return msg
 
@@ -299,11 +299,12 @@ class Connection:
         await self.close()
 
 
-def _ingest_record(msg: Message) -> None:
+def _ingest_record_commit(msg: Message) -> None:
     payload = msg.payload or {}
     sid = payload.get("session_id")
+    step_id = payload.get("step_id")
     fields = payload.get("fields")
-    if not isinstance(sid, str) or not isinstance(fields, dict):
-        logger.warning("Ignoring malformed RECORD payload: keys=%s", list(payload.keys()))
+    if not isinstance(sid, str) or not isinstance(step_id, int) or not isinstance(fields, dict):
+        logger.warning("Ignoring malformed RECORD_COMMIT payload: keys=%s", list(payload.keys()))
         return
-    recording.ingest(sid, fields)
+    recording.ingest(sid, step_id, fields)
