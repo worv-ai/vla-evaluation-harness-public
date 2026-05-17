@@ -127,7 +127,7 @@ class EpisodeRecorder:
                     "record_step: dropping recording field(s) that collide with benchmark schema: %s",
                     collisions,
                 )
-            row = {**{k: v for k, v in extras.items() if k not in data}, **data}
+            row = {**extras, **data}
         else:
             row = dict(data)
         self._staged_rows.append(row)
