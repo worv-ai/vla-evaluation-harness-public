@@ -812,6 +812,11 @@ examples:
     merge_parser.add_argument("--verbose", "-v", action="store_true")
     merge_parser.set_defaults(func=cmd_merge)
 
+    # recording-daemon command
+    from vla_eval.recording_daemon.cli import add_subparser as _add_recording_daemon_subparser
+
+    _add_recording_daemon_subparser(sub)
+
     # test command
     test_parser = sub.add_parser(
         "test",
