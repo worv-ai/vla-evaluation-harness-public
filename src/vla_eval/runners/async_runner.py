@@ -60,6 +60,7 @@ class AsyncEpisodeRunner(EpisodeRunner):
         conn: Any,  # Connection
         *,
         max_steps: int | None = None,
+        recording_payload: dict | None = None,
     ) -> EpisodeResult:
         """Run a single real-time episode.
 
@@ -77,7 +78,10 @@ class AsyncEpisodeRunner(EpisodeRunner):
         obs_dict = await benchmark.get_observation()
 
         task_info = {k: v for k, v in task.items() if isinstance(v, (str, int, float, bool, list))}
-        await conn.start_episode({"task": task_info, "mode": "realtime"})
+        ep_payload: dict[str, Any] = {"task": task_info, "mode": "realtime"}
+        if recording_payload:
+            ep_payload["recording"] = recording_payload
+        await conn.start_episode(ep_payload)
 
         action_buffer = ActionBuffer(
             hold_policy=self.hold_policy,

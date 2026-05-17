@@ -9,6 +9,7 @@ import math
 import re
 import time
 import traceback
+import uuid
 from pathlib import Path
 from typing import Any, cast
 
@@ -62,6 +63,8 @@ class Orchestrator:
         config: dict[str, Any],
         shard_id: int | None = None,
         num_shards: int | None = None,
+        recording_daemon_url: str | None = None,
+        eval_id: str | None = None,
     ) -> None:
         self.config = config
         self._server_cfg = ServerConfig.from_dict(config.get("server"))
@@ -69,6 +72,9 @@ class Orchestrator:
         self.num_shards = num_shards
         self._output_file_lock: FileLock | None = None
         self._progress_path: Path | None = None
+        self._recording_daemon_url = recording_daemon_url
+        self._eval_id = eval_id or str(uuid.uuid4())
+        self._emitter: Any | None = None
 
     @property
     def _output_dir(self) -> Path:
@@ -87,11 +93,26 @@ class Orchestrator:
         benchmark_configs = self.config.get("benchmarks", [])
         all_results = []
 
-        for bench_cfg in benchmark_configs:
-            result = await self._run_benchmark(bench_cfg)
-            all_results.append(result)
+        self._maybe_install_emitter()
+        try:
+            for bench_cfg in benchmark_configs:
+                result = await self._run_benchmark(bench_cfg)
+                all_results.append(result)
+        finally:
+            if self._emitter is not None:
+                self._emitter.close()
 
         return all_results
+
+    def _maybe_install_emitter(self) -> None:
+        if not self._recording_daemon_url:
+            return
+        from vla_eval import recording
+        from vla_eval.recording_daemon.emitter import RecordingEmitter
+
+        self._emitter = RecordingEmitter(self._recording_daemon_url)
+        recording.install_emitter(self._emitter)
+        logger.info("Orchestrator recording emitter installed: %s", self._recording_daemon_url)
 
     def _release_file_lock(self) -> None:
         """Release the shard output file lock (lock file is auto-deleted by filelock)."""
@@ -241,6 +262,16 @@ class Orchestrator:
         total_items = len(work_items)
         self._update_progress(0, total_items, 0)
 
+        # Recording daemon: announce this eval before any episode emits.
+        sid = str(uuid.uuid4())  # one (sid) per orchestrator/shard process.
+        if self._emitter is not None:
+            self._emitter.push_eval_start(
+                eval_id=self._eval_id,
+                output_dir=str(self._output_dir),
+                aggregate_filename=f"{safe_name}_aggregate.json",
+                expected_count=total_items,
+            )
+
         def record_failure(reason: str, detail: str) -> None:
             collector.record(
                 task_name,
@@ -262,11 +293,16 @@ class Orchestrator:
                     if cfg.throughput_mode and max_ep is not None:
                         episode_idx = ep % max_ep
                     task = {**task, "episode_idx": episode_idx}
-                    raw = await runner.run_episode(benchmark, task, conn, max_steps=max_steps)
+                    eid = str(uuid.uuid4())
+                    recording_payload = self._push_episode_start(benchmark, task, sid, eid)
+                    raw = await runner.run_episode(
+                        benchmark, task, conn, max_steps=max_steps, recording_payload=recording_payload
+                    )
                     raw["episode_id"] = ep
                     ep_result = cast(EpisodeResult, raw)
                     collector.record(task_name, ep_result)
                     status = "SUCCESS" if ep_result.get("metrics", {}).get("success") else "FAIL"
+                    self._push_episode_close(sid, eid, ep_result, recording_payload is not None)
                     logger.info(
                         "  [%d/%d] %s ep%d: %s (steps=%d)",
                         item_idx + 1,
@@ -339,6 +375,57 @@ class Orchestrator:
             await conn.close()
 
         return self._save_results(collector, cfg, safe_name, partial=False, server_info=conn.server_info)
+
+    def _push_episode_start(
+        self,
+        benchmark: Any,
+        task: dict[str, Any],
+        sid: str,
+        eid: str,
+    ) -> dict[str, Any] | None:
+        """Push EPISODE_START to the daemon and return the wire payload (or None)."""
+        if self._emitter is None:
+            return None
+        try:
+            rec_ctx = benchmark.get_recording_context(task)
+        except Exception:
+            logger.exception("benchmark.get_recording_context raised; skipping recording for this episode")
+            return None
+        if not rec_ctx:
+            return None
+        output_dir = rec_ctx["output_dir"]
+        filename_template = rec_ctx["filename_template"]
+        context = rec_ctx.get("context") or {}
+        self._emitter.push_episode_start(
+            eval_id=self._eval_id,
+            sid=sid,
+            eid=eid,
+            output_dir=str(output_dir),
+            filename_template=filename_template,
+            context=context,
+        )
+        return {
+            "eval_id": self._eval_id,
+            "sid": sid,
+            "eid": eid,
+            "output_dir": str(output_dir),
+            "filename_template": filename_template,
+            "context": context,
+        }
+
+    def _push_episode_close(
+        self,
+        sid: str,
+        eid: str,
+        ep_result: Any,
+        recording_active: bool,
+    ) -> None:
+        if self._emitter is None or not recording_active:
+            return
+        metrics = dict(ep_result.get("metrics") or {})
+        status = "success" if metrics.get("success") else "fail"
+        self._emitter.push_episode_result(eval_id=self._eval_id, sid=sid, eid=eid, status=status, metrics=metrics)
+        self._emitter.push_episode_end(sid=sid, eid=eid)
 
     def _save_results(
         self,

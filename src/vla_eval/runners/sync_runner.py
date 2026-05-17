@@ -32,6 +32,7 @@ class SyncEpisodeRunner(EpisodeRunner):
         conn: Any,  # Connection
         *,
         max_steps: int | None = None,
+        recording_payload: dict | None = None,
     ) -> EpisodeResult:
         """Run a synchronous episode."""
         await benchmark.start_episode(task)
@@ -39,7 +40,10 @@ class SyncEpisodeRunner(EpisodeRunner):
 
         # Send only serializable task info to the model server
         task_info = {k: v for k, v in task.items() if isinstance(v, (str, int, float, bool, list))}
-        await conn.start_episode({"task": task_info})
+        ep_payload: dict[str, Any] = {"task": task_info}
+        if recording_payload:
+            ep_payload["recording"] = recording_payload
+        await conn.start_episode(ep_payload)
 
         steps = range(max_steps) if max_steps is not None else itertools.count()
         for step in steps:

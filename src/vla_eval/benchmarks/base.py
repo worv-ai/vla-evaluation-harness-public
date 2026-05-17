@@ -139,6 +139,16 @@ class Benchmark(ABC):
         """Render current env state as image. Optional override."""
         return None
 
+    def get_recording_context(self, task: Task) -> dict[str, Any] | None:
+        """Return per-episode recording metadata for the daemon, or None to skip.
+
+        When set, the orchestrator pushes EPISODE_START / EPISODE_END to the
+        recording daemon and forwards (sid, eid) so the model server can
+        attribute its emits to the same bucket. Returned keys:
+        ``output_dir``, ``filename_template``, ``context``.
+        """
+        return None
+
 
 # ---------------------------------------------------------------------------
 # Step-based convenience subclass

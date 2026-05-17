@@ -20,5 +20,11 @@ class EpisodeRunner(ABC):
         conn: Any,  # Connection
         *,
         max_steps: int | None = None,
+        recording_payload: dict | None = None,
     ) -> EpisodeResult:
-        """Run a single episode and return the result."""
+        """Run a single episode and return the result.
+
+        ``recording_payload`` (when set) is forwarded inside the WS
+        EPISODE_START so the model server can attribute its emits to the
+        same daemon bucket as the harness.
+        """

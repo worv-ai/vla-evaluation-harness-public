@@ -107,6 +107,8 @@ def _run_via_docker(
     shard_id: int | None = None,
     num_shards: int | None = None,
     accept_license: list[str] | None = None,
+    recording_daemon_url: str | None = None,
+    eval_id: str | None = None,
 ) -> None:
     """Execute the evaluation inside a Docker container."""
     import shutil
@@ -186,6 +188,10 @@ def _run_via_docker(
     cmd.extend([docker_cfg.image, "run", "--no-docker", "--config", "/tmp/eval_config.yaml"])
     if shard_id is not None:
         cmd.extend(["--shard-id", str(shard_id), "--num-shards", str(num_shards)])
+    if recording_daemon_url:
+        cmd.extend(["--recording-daemon-url", recording_daemon_url])
+    if eval_id:
+        cmd.extend(["--eval-id", eval_id])
 
     logger.info("Running via Docker: %s", " ".join(cmd))
     try:
@@ -255,12 +261,20 @@ def cmd_run(args: argparse.Namespace) -> None:
             shard_id=shard_id,
             num_shards=num_shards,
             accept_license=getattr(args, "accept_license", None),
+            recording_daemon_url=getattr(args, "recording_daemon_url", None),
+            eval_id=getattr(args, "eval_id", None),
         )
         return
 
     import anyio
 
-    orchestrator = Orchestrator(config, shard_id=shard_id, num_shards=num_shards)
+    orchestrator = Orchestrator(
+        config,
+        shard_id=shard_id,
+        num_shards=num_shards,
+        recording_daemon_url=getattr(args, "recording_daemon_url", None),
+        eval_id=getattr(args, "eval_id", None),
+    )
     results = anyio.run(orchestrator.run)
 
     # Print final summary
@@ -752,6 +766,17 @@ execution flow:
     )
     run_parser.add_argument(
         "--dev", action="store_true", help="Mount local src/ into the container (skip image rebuild on code changes)"
+    )
+    run_parser.add_argument(
+        "--recording-daemon-url",
+        default=None,
+        help="WebSocket URL of the recording daemon (e.g. ws://host:9001). When set, the orchestrator "
+        "pushes per-episode artefacts via vla_eval.recording_daemon.",
+    )
+    run_parser.add_argument(
+        "--eval-id",
+        default=None,
+        help="Eval identifier used to group shards into one aggregate result. Auto-generated if absent.",
     )
     run_parser.add_argument("--verbose", "-v", action="store_true")
     run_parser.set_defaults(func=cmd_run)
