@@ -10,6 +10,12 @@ Typical usage::
     recorder.record_frame(front_rgb)
     recorder.record_step({"step": n, "gt_subgoal": "pick up cube", ...})
     recorder.save(status="fail")
+
+Per-step jsonl is staged in memory and written atomically once at
+``save()``: by then all server-side ``RECORD_COMMIT`` frames for the
+episode have either landed in their ``(sid, step_id)`` bucket or are
+discarded with a WARNING.  This eliminates the prior race where late
+RECORD frames were mis-attributed to the next step.
 """
 
 from __future__ import annotations
@@ -29,6 +35,12 @@ from vla_eval import recording as _recording
 from vla_eval.benchmarks.recording import EpisodeVideoRecorder
 
 logger = logging.getLogger(__name__)
+
+# Brief wait for a matching RECORD_COMMIT to land in the bucket before
+# record_step gives up and emits the row without server-side extras.
+# Sync mode never hits the wait (commits arrive before ACTION); realtime
+# mode occasionally needs it under inversion.
+_RECORD_COMMIT_WAIT_SEC: float = 0.1
 
 
 @dataclass
@@ -64,8 +76,8 @@ class EpisodeRecorder:
         )
         self._data_dir = out if record_step else None
         self._data_filename = filename_stem + ".jsonl"
-        self._data_fh: Any | None = None
-        self._data_working: Path | None = None
+        self._staged_rows: list[dict[str, Any]] = []
+        self._episode_active = False
         self._context: dict[str, Any] = {}
         self._required_context = tuple(
             bare
@@ -77,7 +89,7 @@ class EpisodeRecorder:
 
     @property
     def active(self) -> bool:
-        return (self._video is not None and self._video.active) or self._data_fh is not None
+        return (self._video is not None and self._video.active) or self._episode_active
 
     def start(self, context: Mapping[str, Any]) -> None:
         missing = [k for k in self._required_context if k not in context]
@@ -87,20 +99,27 @@ class EpisodeRecorder:
         if self._video is not None:
             self._video.start(context)
         if self._data_dir is not None:
-            if self._data_fh is not None:
-                self._discard_data()
-            uid = uuid.uuid4().hex[:12]
-            self._data_working = self._data_dir / f".data-{uid}.jsonl"
-            self._data_fh = open(self._data_working, "w", encoding="utf-8")  # noqa: SIM115
+            self._staged_rows = []
+            self._episode_active = True
 
     def record_frame(self, frame: np.ndarray) -> None:
         if self._video is not None:
             self._video.record(frame)
 
     def record_step(self, data: dict[str, Any]) -> None:
-        if self._data_fh is None:
+        if not self._episode_active:
             return
-        extras = _recording.get_default().drain_current()
+        step_id = data.get("step")
+        if not isinstance(step_id, int):
+            raise ValueError(
+                f"EpisodeRecorder.record_step: data must include integer 'step' key for "
+                f"(session, step) bucket matching; got step={step_id!r}"
+            )
+        rec = _recording.get_default()
+        sid = rec.current_session()
+        extras: dict[str, Any] = {}
+        if sid is not None:
+            extras = rec.drain_step(sid, step_id, timeout=_RECORD_COMMIT_WAIT_SEC)
         if extras:
             collisions = sorted(set(data) & set(extras))
             if collisions:
@@ -110,38 +129,33 @@ class EpisodeRecorder:
                 )
             row = {**{k: v for k, v in extras.items() if k not in data}, **data}
         else:
-            row = data
-        self._data_fh.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")
+            row = dict(data)
+        self._staged_rows.append(row)
 
     def save(self, **extra: Any) -> None:
         status_kwargs = {**self._context, **extra}
         if self._video is not None:
             self._video.save(**extra)
-        if self._data_fh is not None:
-            self._data_fh.close()
-            self._data_fh = None
+        if self._episode_active and self._data_dir is not None:
             try:
                 final_name = self._data_filename.format(**status_kwargs)
-                if self._data_dir is None or self._data_working is None:
-                    return
                 final_path = self._data_dir / final_name
+                uid = uuid.uuid4().hex[:12]
+                working = self._data_dir / f".data-{uid}.jsonl"
+                with open(working, "w", encoding="utf-8") as fh:
+                    for row in self._staged_rows:
+                        fh.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")
                 if final_path.exists():
                     final_path.unlink()
-                self._data_working.rename(final_path)
-                logger.info("Saved episode data: %s", final_path)
+                working.rename(final_path)
+                logger.info("Saved episode data: %s (%d rows)", final_path, len(self._staged_rows))
             except Exception:
                 logger.warning("Failed to save episode data", exc_info=True)
-            self._data_working = None
+        self._episode_active = False
+        self._staged_rows = []
 
     def discard(self) -> None:
         if self._video is not None:
             self._video.discard()
-        self._discard_data()
-
-    def _discard_data(self) -> None:
-        if self._data_fh is not None:
-            self._data_fh.close()
-            self._data_fh = None
-        if self._data_working is not None and self._data_working.exists():
-            self._data_working.unlink()
-        self._data_working = None
+        self._episode_active = False
+        self._staged_rows = []
