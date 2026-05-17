@@ -58,13 +58,13 @@ recording_daemon/  ── optional sidecar (`vla-eval recording-daemon`); sole w
 - **Episode-level error isolation**: One episode failure never aborts the entire evaluation.
 - **anyio-based async**: asyncio-compatible, not trio. Use anyio primitives for new async code.
 - **Parallel evaluation**: Environment parallelism via episode sharding + inference parallelism via batch forward passes.
-- **Recording is opt-in via daemon URL**: without `--recording-daemon-url`, the orchestrator writes per-shard JSON itself (use `vla-eval merge` to combine). With a daemon URL, the daemon is the sole disk writer for jsonl + aggregate and there is no merge step.
+- **Recording daemon is the sole result sink**: `vla-eval run` requires either `--recording-daemon-url` (daemon writes jsonl + aggregate) or `--no-recording` (in-memory summary only, nothing on disk). The orchestrator itself never writes result JSON.
 
-### Recording daemon (opt-in)
+### Recording daemon
 
 `vla-eval recording-daemon --bind ws://0.0.0.0:9001` runs as a sidecar.
-The orchestrator and (optionally) model-server-side code push three message
-types to it:
+The orchestrator (and any external code inside the model server, e.g.
+reflex-train) pushes three message types to it:
 
 - `STEP {sid, eid, step_id, fields}` — accumulates per-episode rows.
 - `RESULT {eval_id, sid, eid, status, metrics, context, jsonl_path,
@@ -86,5 +86,8 @@ local video file (one mp4 per episode, written directly to its final
 path) and forwards `record_step(...)` calls to the daemon.
 
 Use `scripts/run_sharded.sh` to spawn the daemon + N shards in one go.
+For a one-off local check that doesn't need persisted results, pass
+`vla-eval run --no-recording` — the run prints its summary and writes
+nothing.
 
 Read `CONTRIBUTING.md` before any integration work (adding benchmarks/model servers, recording, PR workflow).

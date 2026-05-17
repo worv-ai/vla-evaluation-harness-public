@@ -7,13 +7,10 @@ import json
 import logging
 import math
 import re
-import time
 import traceback
 import uuid
 from pathlib import Path
 from typing import Any, cast
-
-from filelock import FileLock, Timeout
 
 import websockets
 
@@ -57,15 +54,12 @@ class Orchestrator:
         - Other exceptions: marks the episode as failed and continues.
 
     Result files:
-        Without ``--recording-daemon-url`` the orchestrator writes per-shard /
-        non-sharded JSON itself:
-        - Non-sharded: ``{name}_{partial|sync}_{unix_timestamp}.json``
-        - Sharded:     ``{name}_shard{id}of{total}.json`` (deterministic).
-
-        With ``--recording-daemon-url`` the recording daemon is the sole disk
-        writer for per-episode jsonl + per-eval aggregate JSON. The
-        orchestrator skips the per-shard JSON write (the daemon's aggregate
-        replaces it) but still prints the in-memory summary.
+        With ``--recording-daemon-url`` the recording daemon is the sole
+        writer of per-episode jsonl and per-eval aggregate JSON. Without a
+        daemon URL the orchestrator writes nothing — it prints an in-memory
+        summary and returns the result dict for callers that want it.
+        Multi-shard runs that omit the daemon URL cannot be combined; the
+        ``vla-eval merge`` workflow has been retired.
     """
 
     def __init__(
@@ -80,7 +74,6 @@ class Orchestrator:
         self._server_cfg = ServerConfig.from_dict(config.get("server"))
         self.shard_id = shard_id
         self.num_shards = num_shards
-        self._output_file_lock: FileLock | None = None
         self._progress_path: Path | None = None
         self._recording_daemon_url = recording_daemon_url
         self._eval_id = eval_id or str(uuid.uuid4())
@@ -126,12 +119,6 @@ class Orchestrator:
         recording.set_client(self._client)
         logger.info("Recording emitter installed: %s", self._recording_daemon_url)
 
-    def _release_file_lock(self) -> None:
-        """Release the shard output file lock (lock file is auto-deleted by filelock)."""
-        if self._output_file_lock is not None:
-            self._output_file_lock.release()
-            self._output_file_lock = None
-
     def _update_progress(self, completed: int, total: int, errors: int) -> None:
         """Write a lightweight progress file for live monitoring.
 
@@ -156,26 +143,7 @@ class Orchestrator:
         safe_name = _SAFE_NAME_RE.sub("_", name)
 
         logger.info("Starting benchmark: %s (mode=%s)", name, cfg.mode)
-
-        # Fail fast: claim the output path via file lock (shard mode, no daemon).
-        self._output_file_lock = None
-        if self._client is None and self.num_shards is not None and self.shard_id is not None:
-            output_path = self._output_dir / f"{self._shard_stem(safe_name)}.json"
-            if output_path.exists():
-                raise FileExistsError(
-                    f"Result file already exists: {output_path}\nRemove it or use a different output_dir."
-                )
-            lock = FileLock(str(output_path) + ".lock", timeout=0)
-            try:
-                lock.acquire()
-                self._output_file_lock = lock
-            except Timeout:
-                raise FileExistsError(f"Another eval is already writing to {output_path}")
-
-        try:
-            return await self._run_benchmark_inner(cfg, name, safe_name)
-        finally:
-            self._release_file_lock()
+        return await self._run_benchmark_inner(cfg, name, safe_name)
 
     async def _run_benchmark_inner(self, cfg: EvalConfig, name: str, safe_name: str) -> dict[str, Any]:
         """Run benchmark episodes, collect results, and save."""
@@ -444,7 +412,12 @@ class Orchestrator:
         partial: bool,
         server_info: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Print in-memory summary, push EVAL_END (daemon mode) or write per-shard JSON (otherwise)."""
+        """Print in-memory summary and (in daemon mode) push EVAL_END.
+
+        The orchestrator never writes per-shard / aggregate JSON itself —
+        with a daemon, the daemon does it; without one, the run is in-memory
+        only and the caller gets the result dict from :meth:`run`.
+        """
         collector.print_summary()
 
         output: dict[str, Any] = {**collector.get_benchmark_result(config=cfg.to_dict())}
@@ -456,20 +429,10 @@ class Orchestrator:
             output["shard"] = {"id": self.shard_id, "total": self.num_shards}
 
         if self._client is not None:
-            # Daemon owns disk. Tell it to flush the aggregate for this benchmark.
             try:
                 self._client.eval_end(bench_eval_id)
             except Exception:
                 logger.exception("Failed to push EVAL_END for %s", bench_eval_id)
-        else:
-            # No daemon: write per-shard / non-sharded JSON ourselves.
-            if self.num_shards is not None and self.shard_id is not None:
-                output_path = self._output_dir / f"{self._shard_stem(safe_name)}.json"
-            else:
-                tag = "partial" if partial else cfg.mode
-                output_path = self._output_dir / f"{safe_name}_{tag}_{int(time.time())}.json"
-            output_path.write_text(json.dumps(output, indent=2, default=str))
-            logger.info("Results saved to %s", output_path)
 
         if self._progress_path is not None and self._progress_path.exists():
             self._progress_path.unlink()

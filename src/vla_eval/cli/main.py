@@ -109,6 +109,7 @@ def _run_via_docker(
     accept_license: list[str] | None = None,
     recording_daemon_url: str | None = None,
     eval_id: str | None = None,
+    no_recording: bool = False,
 ) -> None:
     """Execute the evaluation inside a Docker container."""
     import shutil
@@ -190,6 +191,8 @@ def _run_via_docker(
         cmd.extend(["--shard-id", str(shard_id), "--num-shards", str(num_shards)])
     if recording_daemon_url:
         cmd.extend(["--recording-daemon-url", recording_daemon_url])
+    if no_recording:
+        cmd.append("--no-recording")
     if eval_id:
         cmd.extend(["--eval-id", eval_id])
 
@@ -255,6 +258,16 @@ def cmd_run(args: argparse.Namespace) -> None:
 
     recording_daemon_url = getattr(args, "recording_daemon_url", None)
     eval_id = getattr(args, "eval_id", None)
+    no_recording = getattr(args, "no_recording", False)
+
+    if not recording_daemon_url and not no_recording:
+        _stderr_console().print(
+            "[red]ERROR: pass --recording-daemon-url ws://host:port to persist results, "
+            "or --no-recording to print an in-memory summary only.[/red]\n"
+            "[red]The recording daemon is the sole writer of per-episode jsonl and "
+            "per-eval aggregate JSON; without it there is nowhere to put results on disk.[/red]"
+        )
+        sys.exit(1)
 
     if use_docker:
         _run_via_docker(
@@ -266,6 +279,7 @@ def cmd_run(args: argparse.Namespace) -> None:
             accept_license=getattr(args, "accept_license", None),
             recording_daemon_url=recording_daemon_url,
             eval_id=eval_id,
+            no_recording=no_recording,
         )
         return
 
@@ -343,116 +357,6 @@ def cmd_serve(args: argparse.Namespace) -> None:
 
     logger.info("Running: %s", " ".join(cmd))
     _exec_subprocess(cmd)
-
-
-def _discover_shard_groups(config_path: str) -> dict[str, list[Path]]:
-    """Auto-discover shard files from a config YAML, grouped by benchmark name.
-
-    Returns a dict mapping ``safe_name`` to its shard file paths.
-    """
-    import re
-
-    from vla_eval.config import EvalConfig
-
-    config = _load_config(config_path)
-    output_dir = Path(config.get("output_dir", "./results"))
-
-    groups: dict[str, list[Path]] = {}
-    for bench_cfg in config.get("benchmarks", []):
-        cfg = EvalConfig.from_dict(bench_cfg)
-        safe_name = re.sub(r"[^\w\-.]", "_", cfg.resolved_name())
-        if safe_name in groups:
-            continue
-        matched = sorted(output_dir.glob(f"{safe_name}_shard*of*.json"))
-        if not matched:
-            _stderr_console().print(f"[yellow]WARNING: no shard files found for {safe_name} in {output_dir}[/yellow]")
-        groups[safe_name] = matched
-    return groups
-
-
-def cmd_merge(args: argparse.Namespace) -> None:
-    """Merge shard result files."""
-    import glob
-    import json
-
-    from vla_eval.results.merge import load_shard_files, merge_shards, print_merge_report
-
-    if not args.files and not args.config:
-        _stderr_console().print("[red]ERROR: provide shard files or --config/-c to auto-discover[/red]")
-        sys.exit(1)
-
-    # When --config is given, merge each sub-benchmark separately.
-    if args.config:
-        groups = _discover_shard_groups(args.config)
-        # Also include any explicitly passed files as an extra group
-        if args.files:
-            extra: list[Path] = []
-            for pattern in args.files:
-                extra.extend(Path(p) for p in sorted(glob.glob(pattern)))
-            if extra:
-                groups["_extra"] = extra
-
-        if not any(groups.values()):
-            _stderr_console().print("[red]ERROR: no shard files found[/red]")
-            sys.exit(1)
-
-        output_base = Path(args.output) if args.output else None
-        merged_count = 0
-        for name, paths in groups.items():
-            if not paths:
-                continue
-            try:
-                shards = load_shard_files(paths)
-                merged = merge_shards(shards)
-            except ValueError as e:
-                _stderr_console().print(f"[red]ERROR ({name}): {e}[/red]")
-                sys.exit(1)
-            print_merge_report(merged)
-            if output_base:
-                if len(groups) == 1:
-                    out = output_base
-                else:
-                    out = output_base.parent / f"{output_base.stem}_{name}{output_base.suffix}"
-                out.parent.mkdir(parents=True, exist_ok=True)
-                out.write_text(json.dumps(merged, indent=2, default=str))
-                _stderr_console().print(f"Merged result saved to {out}")
-            else:
-                print(json.dumps(merged, indent=2, default=str))
-            merged_count += 1
-
-        if merged_count == 0:
-            _stderr_console().print("[red]ERROR: no shard files found[/red]")
-            sys.exit(1)
-        return
-
-    # Legacy path: positional file args only
-    paths: list[Path] = []
-    for pattern in args.files:
-        matched = sorted(glob.glob(pattern))
-        if not matched:
-            _stderr_console().print(f"[yellow]WARNING: no files matched: {pattern}[/yellow]")
-        paths.extend(Path(p) for p in matched)
-
-    if not paths:
-        _stderr_console().print("[red]ERROR: no shard files found[/red]")
-        sys.exit(1)
-
-    try:
-        shards = load_shard_files(paths)
-        merged = merge_shards(shards)
-    except ValueError as e:
-        _stderr_console().print(f"[red]ERROR: {e}[/red]")
-        sys.exit(1)
-
-    print_merge_report(merged)
-
-    output = Path(args.output) if args.output else None
-    if output:
-        output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_text(json.dumps(merged, indent=2, default=str))
-        _stderr_console().print(f"Merged result saved to {output}")
-    else:
-        print(json.dumps(merged, indent=2, default=str))
 
 
 def cmd_test(args: argparse.Namespace) -> None:
@@ -774,10 +678,18 @@ execution flow:
         "--recording-daemon-url",
         default=None,
         help=(
-            "WebSocket URL of the recording daemon (e.g. ws://127.0.0.1:9001). When set, "
-            "per-episode jsonl and per-eval aggregate JSON are written by the daemon "
-            "(see `vla-eval recording-daemon`). Without this flag the orchestrator writes "
-            "per-shard JSON itself as before."
+            "WebSocket URL of the recording daemon (e.g. ws://127.0.0.1:9001). Required "
+            "unless --no-recording is given. The daemon is the sole writer of per-episode "
+            "jsonl and per-eval aggregate JSON (see `vla-eval recording-daemon`)."
+        ),
+    )
+    run_parser.add_argument(
+        "--no-recording",
+        action="store_true",
+        help=(
+            "Skip the recording daemon entirely. The run prints an in-memory summary to "
+            "stdout and writes nothing to disk. Use this for quick local checks; for any "
+            "persistent results pass --recording-daemon-url instead."
         ),
     )
     run_parser.add_argument(
@@ -820,32 +732,6 @@ Bool args become flags (--use_text_template), others become --key value.
     )
     serve_parser.add_argument("--verbose", "-v", action="store_true")
     serve_parser.set_defaults(func=cmd_serve)
-
-    # merge command
-    merge_parser = sub.add_parser(
-        "merge",
-        help="Merge shard result files",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""\
-Combines shard JSON files produced by --shard-id/--num-shards runs.
-
-  Expects files named {name}_shard{id}of{total}.json.
-  Missing shards are allowed — the merged result is marked partial.
-  Duplicate episode IDs across shards: last file wins (a warning is logged).
-
-examples:
-  vla-eval merge -c configs/benchmarks/libero/spatial.yaml -o results/libero_spatial.json
-  vla-eval merge results/LIBEROBenchmark_shard*of4.json -o merged.json
-  vla-eval merge results/*.json  # merges all shard files found
-""",
-    )
-    merge_parser.add_argument("files", nargs="*", help="Shard result JSON files (supports glob patterns)")
-    merge_parser.add_argument(
-        "--config", "-c", default=None, help="Config YAML — auto-discover shard files from output_dir"
-    )
-    merge_parser.add_argument("--output", "-o", default=None, help="Output path for merged JSON (default: stdout)")
-    merge_parser.add_argument("--verbose", "-v", action="store_true")
-    merge_parser.set_defaults(func=cmd_merge)
 
     # test command
     test_parser = sub.add_parser(

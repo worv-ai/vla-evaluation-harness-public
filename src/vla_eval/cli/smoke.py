@@ -596,7 +596,9 @@ def run_benchmark_test(test: SmokeTest, timeout: int = 600, *, gpu_id: str | Non
         docker_cmd.extend(["-v", vol])
     for env_str in docker_cfg.env:
         docker_cmd.extend(["-e", env_str])
-    docker_cmd.extend([docker_cfg.image, "run", "--no-docker", "--config", "/tmp/eval_config.yaml"])
+    # Smoke benchmarks exercise the harness end-to-end; we don't want to require
+    # a recording daemon for them, so pass --no-recording explicitly.
+    docker_cmd.extend([docker_cfg.image, "run", "--no-docker", "--config", "/tmp/eval_config.yaml", "--no-recording"])
 
     try:
         result = subprocess.run(docker_cmd, capture_output=True, text=True, timeout=timeout)

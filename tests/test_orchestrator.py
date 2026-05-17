@@ -1,8 +1,13 @@
-"""Tests for Orchestrator: integration and error handling paths."""
+"""Tests for Orchestrator: integration and error handling paths.
+
+The orchestrator no longer writes per-shard JSON or any other artefact —
+the recording daemon owns disk in daemon mode, and without ``--recording-
+daemon-url`` the run is in-memory only. These tests therefore exercise
+the return value rather than the filesystem.
+"""
 
 from __future__ import annotations
 
-import json
 from unittest.mock import patch
 
 import numpy as np
@@ -16,7 +21,7 @@ from tests.conftest import StubBenchmark
 
 @pytest.mark.anyio
 async def test_orchestrator_runs_to_completion(echo_server, tmp_path):
-    """Full integration: echo server + stub benchmark → results saved."""
+    """Echo server + stub benchmark → orchestrator returns a complete result."""
     config = {
         "server": {"url": echo_server},
         "output_dir": str(tmp_path),
@@ -42,17 +47,14 @@ async def test_orchestrator_runs_to_completion(echo_server, tmp_path):
     result = results[0]
     assert result.get("mean_success") == pytest.approx(1.0)
     assert len(result["tasks"]) == 2
-
-    # Verify file was saved
-    json_files = list(tmp_path.glob("*.json"))
-    assert len(json_files) == 1
-    saved = json.loads(json_files[0].read_text())
-    assert "partial" not in saved
+    assert "partial" not in result
+    # Orchestrator never writes JSON itself — daemon-less runs are in-memory only.
+    assert list(tmp_path.glob("*.json")) == []
 
 
 @pytest.mark.anyio
-async def test_orchestrator_saves_partial_on_server_death(tmp_path):
-    """When connection fails mid-run, partial results are saved."""
+async def test_orchestrator_returns_partial_on_server_death(tmp_path):
+    """When the connection fails mid-run, the return value carries partial=True."""
 
     call_count = 0
 
@@ -78,7 +80,7 @@ async def test_orchestrator_saves_partial_on_server_death(tmp_path):
         async def act(self, obs):
             nonlocal call_count
             call_count += 1
-            # Fail on 10th call (after 3 complete tasks × 3 steps each)
+            # Fail on 10th call (after 3 complete tasks × 3 steps each).
             if call_count >= 10:
                 raise websockets.exceptions.ConnectionClosed(None, None)
             return {"actions": np.ones(7, dtype=np.float32)}
@@ -110,18 +112,10 @@ async def test_orchestrator_saves_partial_on_server_death(tmp_path):
         orchestrator = Orchestrator(config)
         results = await orchestrator.run()
 
-    # Orchestrator returns partial result instead of raising
     assert len(results) == 1
     assert results[0].get("partial") is True
-
-    # Partial results should have been saved
-    json_files = list(tmp_path.glob("*partial*.json"))
-    assert len(json_files) >= 1
-    saved = json.loads(json_files[0].read_text())
-    assert saved["partial"] is True
-
     # 3 complete tasks + 1 failed episode = 4 episodes total
-    total_episodes = sum(len(t["episodes"]) for t in saved["tasks"])
+    total_episodes = sum(len(t["episodes"]) for t in results[0]["tasks"])
     assert total_episodes == 4
 
 
@@ -161,8 +155,8 @@ async def test_orchestrator_sharding_splits_work(echo_server, tmp_path):
 
 
 @pytest.mark.anyio
-async def test_orchestrator_sharding_deterministic_filename(echo_server, tmp_path):
-    """Sharded result uses deterministic filename (no timestamp)."""
+async def test_orchestrator_shard_metadata_on_return_value(echo_server, tmp_path):
+    """Sharded run result carries ``shard: {id, total}`` for downstream consumers."""
     config = {
         "server": {"url": echo_server},
         "output_dir": str(tmp_path),
@@ -182,9 +176,7 @@ async def test_orchestrator_sharding_deterministic_filename(echo_server, tmp_pat
         return_value=StubBenchmark,
     ):
         orch = Orchestrator(config, shard_id=0, num_shards=2)
-        await orch.run()
+        results = await orch.run()
 
-    expected = tmp_path / "fname_test_shard0of2.json"
-    assert expected.exists()
-    saved = json.loads(expected.read_text())
-    assert saved["shard"] == {"id": 0, "total": 2}
+    assert results[0]["shard"] == {"id": 0, "total": 2}
+    assert list(tmp_path.glob("*.json")) == []
