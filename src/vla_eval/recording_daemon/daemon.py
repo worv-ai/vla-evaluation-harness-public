@@ -40,6 +40,7 @@ import websockets
 
 from vla_eval.recording_daemon.config import RecordingDaemonConfig
 from vla_eval.recording_daemon.messages import RecMessageType, RecordingFrame, unpack_frame
+from vla_eval.results.collector import _aggregate_metrics, _build_task_result, _extract_seed
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +63,12 @@ class _Eval:
     eval_id: str
     aggregate_dir: Path
     aggregate_filename: str
-    rows: list[dict[str, Any]] = field(default_factory=list)
+    # task_name → list of EpisodeResult-shaped dicts (the same shape ResultCollector
+    # builds in-memory, so we can reuse collector helpers to compute aggregates).
+    tasks: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+    # Filled in on first RESULT for this eval_id; subsequent RESULTs ignore it
+    # (all shards send the same benchmark-level metadata).
+    metadata: dict[str, Any] = field(default_factory=dict)
     last_activity: float = field(default_factory=time.monotonic)
 
     def touch(self) -> None:
@@ -169,8 +175,14 @@ class RecordingDaemon:
     async def _handle_connection(self, ws: Any) -> None:
         try:
             async for raw in ws:
+                # websockets yields either bytes (binary frames) or str (text);
+                # our wire format is msgpack binary only, so guard against an
+                # accidentally text-encoded frame from a misconfigured client.
+                if not isinstance(raw, (bytes, bytearray)):
+                    logger.warning("Discarding non-binary recording frame (%s)", type(raw).__name__)
+                    continue
                 try:
-                    frame = unpack_frame(raw)
+                    frame = unpack_frame(bytes(raw))
                 except ValueError as exc:
                     logger.warning("Discarding malformed recording frame: %s", exc)
                     continue
@@ -210,14 +222,24 @@ class RecordingDaemon:
         sid, eid = payload["sid"], payload["eid"]
         eval_id = payload["eval_id"]
         bucket = self._buckets.pop((sid, eid), None)
-        rows = dict(bucket.rows) if bucket is not None else {}
 
-        jsonl_path = Path(payload["jsonl_path"])
-        try:
-            await asyncio.to_thread(_write_jsonl_atomic, jsonl_path, rows)
-            logger.info("Flushed episode jsonl: %s (%d rows)", jsonl_path, len(rows))
-        except Exception:
-            logger.exception("Failed to write episode jsonl: %s", jsonl_path)
+        # Skip the jsonl write when no step rows accumulated. Two cases:
+        #   - duplicate RESULT for an already-flushed episode (defensive — the
+        #     happy path's single orchestrator owner shouldn't produce this)
+        #   - the episode failed before any STEP arrived (e.g. benchmark.reset
+        #     raised; orchestrator pushed RESULT with status="error"). The
+        #     aggregate row still captures the failure; an empty jsonl is just
+        #     noise on disk and could clobber a real file from a duplicate.
+        if bucket is None or not bucket.rows:
+            if bucket is None:
+                logger.warning("RESULT for unknown bucket sid=%s eid=%s; skipping jsonl write", sid, eid)
+        else:
+            jsonl_path = Path(payload["jsonl_path"])
+            try:
+                await asyncio.to_thread(_write_jsonl_atomic, jsonl_path, dict(bucket.rows))
+                logger.info("Flushed episode jsonl: %s (%d rows)", jsonl_path, len(bucket.rows))
+            except Exception:
+                logger.exception("Failed to write episode jsonl: %s", jsonl_path)
 
         agg = self._evals.get(eval_id)
         if agg is None:
@@ -225,17 +247,33 @@ class RecordingDaemon:
                 eval_id=eval_id,
                 aggregate_dir=Path(payload["aggregate_dir"]),
                 aggregate_filename=payload["aggregate_filename"],
+                metadata=dict(payload.get("bench_metadata") or {}),
             )
             self._evals[eval_id] = agg
-        agg.rows.append(
-            {
-                "sid": sid,
-                "eid": eid,
-                "status": payload.get("status"),
-                "metrics": dict(payload.get("metrics") or {}),
-                **(payload.get("context") or {}),
-            }
-        )
+        elif not agg.metadata:
+            # First arrival had no metadata (e.g. an external caller); accept
+            # whatever this RESULT carries as the canonical metadata.
+            agg.metadata = dict(payload.get("bench_metadata") or {})
+
+        # Build the EpisodeResult shape that ResultCollector / _build_task_result
+        # expect. Daemon-only context fields (sid, eid) are preserved alongside
+        # so per-episode rows remain identifiable.
+        episode_row: dict[str, Any] = {
+            "sid": sid,
+            "eid": eid,
+            "episode_id": payload.get("episode_id", 0),
+            "metrics": dict(payload.get("metrics") or {}),
+            "steps": payload.get("steps", 0),
+            "elapsed_sec": payload.get("elapsed_sec", 0.0),
+            **(payload.get("context") or {}),
+        }
+        if payload.get("failure_reason"):
+            episode_row["failure_reason"] = payload["failure_reason"]
+        if payload.get("failure_detail"):
+            episode_row["failure_detail"] = payload["failure_detail"]
+
+        task_name = str(payload.get("task_name") or "_unknown")
+        agg.tasks.setdefault(task_name, []).append(episode_row)
         agg.touch()
 
     async def _on_eval_end(self, payload: dict[str, Any]) -> None:
@@ -257,16 +295,50 @@ class RecordingDaemon:
                 stem, ext = agg.aggregate_filename, "json"
             suffix = "_unclosed" if unclosed else ""
             final = agg.aggregate_dir / f"{stem}{suffix}.{ext}"
-            body = {
-                "eval_id": agg.eval_id,
-                "count": len(agg.rows),
-                "results": agg.rows,
-                "unclosed": unclosed,
-            }
+            body = self._build_aggregate(agg, unclosed=unclosed)
             await asyncio.to_thread(_write_json_atomic, final, body)
-            logger.info("Flushed eval aggregate: %s (%d rows)", final, len(agg.rows))
+            total = sum(len(eps) for eps in agg.tasks.values())
+            logger.info("Flushed eval aggregate: %s (%d episodes)", final, total)
         except Exception:
             logger.exception("Failed to flush eval %s", agg.eval_id)
+
+    @staticmethod
+    def _build_aggregate(agg: _Eval, *, unclosed: bool) -> dict[str, Any]:
+        """Construct the on-disk BenchmarkResult-shaped aggregate.
+
+        Mirrors what :meth:`vla_eval.results.collector.ResultCollector.get_benchmark_result`
+        produces in-memory — same shape so downstream tooling (leaderboard
+        scripts, manual inspection) keys off the same fields whether the
+        result came from the daemon or from a `vla-eval run --no-save`
+        in-memory return value.
+        """
+        metric_keys = dict(agg.metadata.get("metric_keys") or {})
+        all_episodes: list[dict[str, Any]] = []
+        tasks_out: list[Any] = []  # TaskResult is a TypedDict; widen for json
+        for task_name in sorted(agg.tasks):
+            episodes = agg.tasks[task_name]
+            all_episodes.extend(episodes)
+            tasks_out.append(_build_task_result(task_name, episodes, metric_keys))
+
+        body: dict[str, Any] = {
+            "benchmark": agg.metadata.get("benchmark", agg.eval_id),
+            "mode": agg.metadata.get("mode"),
+            "harness_version": agg.metadata.get("harness_version"),
+            "tasks": tasks_out,
+            "config": agg.metadata.get("config") or {},
+            "eval_id": agg.eval_id,
+        }
+        if "server_info" in agg.metadata:
+            body["server_info"] = agg.metadata["server_info"]
+        seed = _extract_seed(body["config"])
+        if seed is not None:
+            body["seed"] = seed
+        if metric_keys:
+            body["metric_keys"] = metric_keys
+            _aggregate_metrics(body, all_episodes, metric_keys)
+        if unclosed:
+            body["unclosed"] = True
+        return body
 
     async def _flush_orphan_bucket(self, bucket: _Bucket) -> None:
         """Bucket that aged out without a RESULT — no jsonl_path on the wire.

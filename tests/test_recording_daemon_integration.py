@@ -84,12 +84,23 @@ def test_end_to_end_run_via_subprocess_daemon(tmp_path: Path) -> None:
                 eval_id="ev",
                 sid=sid,
                 eid=eid,
+                task_name="demo_task",
+                episode_id=0,
                 status="success",
                 metrics={"success": True},
+                steps=2,
+                elapsed_sec=0.0,
                 context={"env_id": "demo", "episode_idx": 0},
                 jsonl_path=str(tmp_path / "demo_ep0000_success.jsonl"),
                 aggregate_dir=str(tmp_path),
                 aggregate_filename="demo_aggregate.json",
+                bench_metadata={
+                    "benchmark": "demo",
+                    "mode": "sync",
+                    "metric_keys": {"success": "mean"},
+                    "config": {},
+                    "harness_version": "test",
+                },
             )
             client.eval_end("ev")
         finally:
@@ -102,8 +113,10 @@ def test_end_to_end_run_via_subprocess_daemon(tmp_path: Path) -> None:
         rows = [json.loads(line) for line in jsonl.read_text().splitlines()]
         assert [r["step"] for r in rows] == [0, 1]
         body = json.loads(agg.read_text())
-        assert body["count"] == 1
-        assert body["results"][0]["env_id"] == "demo"
+        assert body["benchmark"] == "demo"
+        assert body["mean_success"] == pytest.approx(1.0)
+        assert [t["task"] for t in body["tasks"]] == ["demo_task"]
+        assert body["tasks"][0]["episodes"][0]["env_id"] == "demo"
     finally:
         proc.send_signal(signal.SIGTERM)
         proc.wait(timeout=5)
@@ -177,12 +190,23 @@ def test_two_shard_emitters_fan_in(tmp_path: Path) -> None:
                     eval_id="merged",
                     sid=sid,
                     eid="ep",
+                    task_name="t",
+                    episode_id=0,
                     status="success",
                     metrics={"success": True},
+                    steps=1,
+                    elapsed_sec=0.0,
                     context={"env_id": "x", "episode_idx": 0},
                     jsonl_path=str(tmp_path / f"{sid}_ep.jsonl"),
                     aggregate_dir=str(tmp_path),
                     aggregate_filename="merged.json",
+                    bench_metadata={
+                        "benchmark": "fan-in",
+                        "mode": "sync",
+                        "metric_keys": {"success": "mean"},
+                        "config": {},
+                        "harness_version": "test",
+                    },
                 )
         finally:
             # Drain both shards before declaring the eval done.
@@ -198,8 +222,10 @@ def test_two_shard_emitters_fan_in(tmp_path: Path) -> None:
         agg = tmp_path / "merged.json"
         assert _wait_for_path(agg)
         body = json.loads(agg.read_text())
-        assert body["count"] == 2
-        assert {r["sid"] for r in body["results"]} == {"shard-A", "shard-B"}
+        assert body["benchmark"] == "fan-in"
+        assert body["mean_success"] == pytest.approx(1.0)
+        all_sids = {ep["sid"] for t in body["tasks"] for ep in t["episodes"]}
+        assert all_sids == {"shard-A", "shard-B"}
     finally:
         proc.send_signal(signal.SIGTERM)
         proc.wait(timeout=5)

@@ -1,4 +1,4 @@
-"""``vla-eval recording-daemon`` subcommand."""
+"""``vla-eval recording-daemon`` + ``vla-eval end-eval`` subcommands."""
 
 from __future__ import annotations
 
@@ -34,6 +34,19 @@ def add_subparser(sub: argparse._SubParsersAction[Any]) -> None:
     parser.add_argument("--verbose", "-v", action="store_true")
     parser.set_defaults(func=cmd_recording_daemon)
 
+    end_eval_parser = sub.add_parser(
+        "end-eval",
+        help="Send EVAL_END to a running recording daemon (used by run_sharded.sh after all shards finish)",
+    )
+    end_eval_parser.add_argument(
+        "--recording-daemon-url",
+        required=True,
+        help="WebSocket URL of the running recording daemon (e.g. ws://127.0.0.1:9001)",
+    )
+    end_eval_parser.add_argument("--eval-id", required=True, help="The eval id to close")
+    end_eval_parser.add_argument("--verbose", "-v", action="store_true")
+    end_eval_parser.set_defaults(func=cmd_end_eval)
+
 
 def cmd_recording_daemon(args: argparse.Namespace) -> None:
     logging.basicConfig(
@@ -46,6 +59,22 @@ def cmd_recording_daemon(args: argparse.Namespace) -> None:
         idle_timeout_sec=args.idle_timeout_sec,
     )
     asyncio.run(_run(cfg))
+
+
+def cmd_end_eval(args: argparse.Namespace) -> None:
+    """Push EVAL_END to a daemon — used by external coordinators (run_sharded.sh)
+    that need to close an eval whose RESULTs came from N shard processes."""
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
+    )
+    from vla_eval.recording_daemon.client import RecordingClient
+
+    client = RecordingClient(args.recording_daemon_url)
+    try:
+        client.eval_end(args.eval_id)
+    finally:
+        client.close()
 
 
 async def _run(cfg: RecordingDaemonConfig) -> None:

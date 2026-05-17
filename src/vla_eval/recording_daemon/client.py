@@ -71,17 +71,29 @@ class RecordingClient:
         eval_id: str,
         sid: str,
         eid: str,
+        task_name: str,
+        episode_id: int,
         status: str,
         metrics: dict[str, Any],
+        steps: int,
+        elapsed_sec: float,
         context: dict[str, Any],
         jsonl_path: str,
         aggregate_dir: str,
         aggregate_filename: str,
+        bench_metadata: dict[str, Any],
+        failure_reason: str | None = None,
+        failure_detail: str | None = None,
     ) -> None:
         """Push episode result. Daemon writes the bucket's rows to ``jsonl_path``
-        and appends ``{sid, eid, status, metrics, **context}`` to the eval aggregate.
-        ``aggregate_dir``/``aggregate_filename`` tell the daemon where ``EVAL_END``
-        will eventually flush the aggregate JSON.
+        and appends an :class:`EpisodeResult`-shaped row to the per-task aggregate
+        under ``eval_id``. ``aggregate_dir``/``aggregate_filename`` tell the daemon
+        where ``EVAL_END`` will eventually flush the aggregate JSON.
+
+        ``bench_metadata`` carries the benchmark-level fields the daemon needs
+        to assemble a full :class:`BenchmarkResult` (``benchmark``, ``mode``,
+        ``metric_keys``, ``config``, ``harness_version``, ``server_info``).
+        First-RESULT-wins on the daemon side; subsequent RESULTs ignore it.
         """
         self._enqueue(
             RecMessageType.RESULT,
@@ -89,12 +101,19 @@ class RecordingClient:
                 "eval_id": eval_id,
                 "sid": sid,
                 "eid": eid,
+                "task_name": task_name,
+                "episode_id": episode_id,
                 "status": status,
                 "metrics": metrics,
+                "steps": steps,
+                "elapsed_sec": elapsed_sec,
                 "context": context,
                 "jsonl_path": jsonl_path,
                 "aggregate_dir": aggregate_dir,
                 "aggregate_filename": aggregate_filename,
+                "bench_metadata": bench_metadata,
+                "failure_reason": failure_reason,
+                "failure_detail": failure_detail,
             },
         )
 

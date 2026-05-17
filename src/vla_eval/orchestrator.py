@@ -14,7 +14,7 @@ from typing import Any, cast
 
 import websockets
 
-from vla_eval import recording
+from vla_eval import __version__, recording
 from vla_eval.config import EvalConfig, ServerConfig
 from vla_eval.connection import Connection
 from vla_eval.recording import EpisodeRecorder, EpisodeStatus, NullEpisodeRecorder, RecordingContext
@@ -236,25 +236,43 @@ class Orchestrator:
         # Per-benchmark eval_id, deterministic from run-level eval_id + benchmark name.
         bench_eval_id = f"{self._eval_id}-{safe_name}"
         aggregate_filename = f"{safe_name}_aggregate.json"
+        bench_metadata = {
+            "benchmark": name,
+            "mode": cfg.mode,
+            "config": cfg.to_dict(),
+            "metric_keys": benchmark.get_metric_keys(),
+            "harness_version": __version__,
+            "server_info": conn.server_info,
+        }
 
-        def record_failure(reason: str, detail: str) -> None:
-            collector.record(
-                task_name,
-                {
-                    "episode_id": ep,
-                    "metrics": {"success": False},
-                    "failure_reason": reason,
-                    "failure_detail": detail,
-                },
-            )
+        def record_failure(reason: str, detail: str) -> dict[str, Any]:
+            fail_result: dict[str, Any] = {
+                "episode_id": ep,
+                "metrics": {"success": False},
+                "failure_reason": reason,
+                "failure_detail": detail,
+            }
+            collector.record(task_name, cast(EpisodeResult, fail_result))
             self._update_progress(item_idx + 1, total_items, collector.error_count)
+            return fail_result
+
+        def close_recorder(ep_dict: dict[str, Any], status: EpisodeStatus) -> None:
+            recorder.close(
+                status=status,
+                metrics=ep_dict.get("metrics") or {},
+                task_name=task_name,
+                episode_id=int(ep_dict.get("episode_id", ep)),
+                steps=int(ep_dict.get("steps", 0)),
+                elapsed_sec=float(ep_dict.get("elapsed_sec", 0.0)),
+                bench_metadata=bench_metadata,
+                failure_reason=ep_dict.get("failure_reason"),
+                failure_detail=ep_dict.get("failure_detail"),
+            )
 
         try:
             for item_idx, (task, ep) in enumerate(work_items):
                 task_name = task.get("name", str(task))
                 recorder: EpisodeRecorder = NullEpisodeRecorder()
-                ep_status: EpisodeStatus = "fail"
-                ep_metrics: dict[str, Any] = {"success": False}
                 try:
                     episode_idx = ep
                     max_ep = metadata.get("max_episodes_per_task")
@@ -266,19 +284,20 @@ class Orchestrator:
                     raw["episode_id"] = ep
                     ep_result = cast(EpisodeResult, raw)
                     collector.record(task_name, ep_result)
-                    ep_metrics = dict(ep_result.get("metrics") or {})
-                    ep_status = "success" if ep_metrics.get("success") else "fail"
-                    status_log = "SUCCESS" if ep_metrics.get("success") else "FAIL"
+                    ep_dict = dict(ep_result)
+                    success = bool((ep_dict.get("metrics") or {}).get("success"))
                     logger.info(
                         "  [%d/%d] %s ep%d: %s (steps=%d)",
                         item_idx + 1,
                         total_items,
                         task_name,
                         ep,
-                        status_log,
-                        ep_result.get("steps", 0),
+                        "SUCCESS" if success else "FAIL",
+                        ep_dict.get("steps", 0),
                     )
                     self._update_progress(item_idx + 1, total_items, collector.error_count)
+                    close_recorder(ep_dict, "success" if success else "fail")
+                    continue
                 except ConnectionError as exc:
                     logger.error(
                         "  [%d/%d] %s ep%d: server unreachable, aborting benchmark",
@@ -287,9 +306,8 @@ class Orchestrator:
                         task_name,
                         ep,
                     )
-                    record_failure("server_unreachable", str(exc))
-                    ep_status = "error"
-                    recorder.close(status=ep_status, metrics=ep_metrics)
+                    fail = record_failure("server_unreachable", str(exc))
+                    close_recorder(fail, "error")
                     return self._finalize_benchmark(
                         collector, cfg, safe_name, bench_eval_id, partial=True, server_info=conn.server_info
                     )
@@ -305,9 +323,8 @@ class Orchestrator:
                         close_code,
                         close_reason,
                     )
-                    record_failure("connection_closed", f"code={close_code} reason={close_reason}")
-                    ep_status = "error"
-                    recorder.close(status=ep_status, metrics=ep_metrics)
+                    fail = record_failure("connection_closed", f"code={close_code} reason={close_reason}")
+                    close_recorder(fail, "error")
                     try:
                         await conn.reconnect()
                     except Exception:
@@ -325,9 +342,8 @@ class Orchestrator:
                         ep,
                         self._server_cfg.timeout,
                     )
-                    record_failure("timeout", f"timeout={self._server_cfg.timeout}s: {exc}")
-                    ep_status = "error"
-                    recorder.close(status=ep_status, metrics=ep_metrics)
+                    fail = record_failure("timeout", f"timeout={self._server_cfg.timeout}s: {exc}")
+                    close_recorder(fail, "error")
                     try:
                         await conn.reconnect()
                     except Exception:
@@ -344,13 +360,9 @@ class Orchestrator:
                         task_name,
                         ep,
                     )
-                    record_failure("exception", traceback.format_exc())
-                    ep_status = "error"
-                    recorder.close(status=ep_status, metrics=ep_metrics)
+                    fail = record_failure("exception", traceback.format_exc())
+                    close_recorder(fail, "error")
                     continue
-
-                # Happy path close
-                recorder.close(status=ep_status, metrics=ep_metrics)
         finally:
             benchmark.cleanup()
             await conn.close()
@@ -428,7 +440,15 @@ class Orchestrator:
         if self.num_shards is not None and self.shard_id is not None:
             output["shard"] = {"id": self.shard_id, "total": self.num_shards}
 
-        if self._client is not None:
+        # EVAL_END ownership:
+        #   - Non-sharded run: this orchestrator is the only producer, so it
+        #     closes the eval here.
+        #   - Sharded run: every shard would call eval_end with the same
+        #     bench_eval_id, and the daemon pops on the first arrival —
+        #     subsequent shards would silently land in a fresh bucket and lose
+        #     their aggregate rows. The launcher (run_sharded.sh →
+        #     `vla-eval end-eval`) owns the close in that mode instead.
+        if self._client is not None and self.shard_id is None:
             try:
                 self._client.eval_end(bench_eval_id)
             except Exception:

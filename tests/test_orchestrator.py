@@ -180,3 +180,68 @@ async def test_orchestrator_shard_metadata_on_return_value(echo_server, tmp_path
 
     assert results[0]["shard"] == {"id": 0, "total": 2}
     assert list(tmp_path.glob("*.json")) == []
+
+
+@pytest.mark.anyio
+async def test_orchestrator_sharded_does_not_push_eval_end(echo_server, tmp_path):
+    """Sharded orchestrators must skip EVAL_END so the daemon's aggregate isn't
+    flushed by the first shard to finish (which would drop later shards' rows).
+    The launcher (run_sharded.sh / `vla-eval end-eval`) closes the eval instead."""
+    config = {
+        "server": {"url": echo_server},
+        "output_dir": str(tmp_path),
+        "benchmarks": [
+            {
+                "benchmark": "tests.conftest:StubBenchmark",
+                "name": "shard_close_test",
+                "episodes_per_task": 1,
+                "max_steps": 50,
+                "params": {"done_at_step": 2, "num_tasks": 1},
+            }
+        ],
+    }
+
+    class _FakeClient:
+        def __init__(self) -> None:
+            self.eval_end_calls: list[str] = []
+
+        def step(self, *a, **kw) -> None: ...
+
+        def result(self, *a, **kw) -> None: ...
+
+        def eval_end(self, eval_id: str) -> None:
+            self.eval_end_calls.append(eval_id)
+
+        def close(self, *a, **kw) -> None: ...
+
+    fake = _FakeClient()
+    with patch(
+        "vla_eval.orchestrator.resolve_import_string",
+        return_value=StubBenchmark,
+    ), patch(
+        "vla_eval.orchestrator.RecordingClient",
+        return_value=fake,
+    ):
+        # Non-sharded: orchestrator IS the only producer → pushes EVAL_END.
+        non_sharded = Orchestrator(config, recording_daemon_url="ws://127.0.0.1:0", eval_id="solo")
+        await non_sharded.run()
+        assert fake.eval_end_calls == ["solo-shard_close_test"], "non-sharded orchestrator must push EVAL_END"
+
+    fake2 = _FakeClient()
+    with patch(
+        "vla_eval.orchestrator.resolve_import_string",
+        return_value=StubBenchmark,
+    ), patch(
+        "vla_eval.orchestrator.RecordingClient",
+        return_value=fake2,
+    ):
+        # Sharded: orchestrator must NOT push EVAL_END (race fix).
+        sharded = Orchestrator(
+            config,
+            shard_id=0,
+            num_shards=4,
+            recording_daemon_url="ws://127.0.0.1:0",
+            eval_id="run",
+        )
+        await sharded.run()
+        assert fake2.eval_end_calls == [], "sharded orchestrator must defer EVAL_END to the launcher"

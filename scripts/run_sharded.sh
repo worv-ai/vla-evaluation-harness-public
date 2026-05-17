@@ -100,6 +100,18 @@ if [[ "$failed" -gt 0 ]]; then
   echo "ERROR: $failed of $NUM_SHARDS shards failed." >&2
 fi
 
+# All shards share one eval_id, so every shard would push EVAL_END and the
+# first arrival would flush a partial aggregate. The launcher owns the close
+# in sharded mode; shards skip EVAL_END themselves.
+# The brief sleep gives the daemon a window to finish dispatching late RESULT
+# frames that were still being read off shard connections when those shards
+# exited — without it the EVAL_END can race past them and the aggregate misses
+# rows from whichever shard's connection was being drained last.
+sleep 1
+echo "Sending EVAL_END for eval=$EVAL_ID..."
+vla-eval end-eval --recording-daemon-url "$DAEMON_URL" --eval-id "$EVAL_ID" || \
+  echo "WARNING: end-eval push failed; daemon will produce _unclosed aggregate after age-out" >&2
+
 echo "Done. Per-episode artefacts and aggregate JSON in $OUTPUT"
 
 if [[ "$failed" -gt 0 ]]; then

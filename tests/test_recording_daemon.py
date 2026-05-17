@@ -58,6 +58,48 @@ async def _wait_path(path: Path, deadline: float = 3.0) -> bool:
     return False
 
 
+def _push_result(
+    client: RecordingClient,
+    *,
+    eval_id: str,
+    sid: str,
+    eid: str,
+    status: str,
+    metrics: dict,
+    jsonl_path: Path,
+    aggregate_dir: Path,
+    aggregate_filename: str,
+    task_name: str = "default",
+    episode_id: int = 0,
+    context: dict | None = None,
+    bench_metadata: dict | None = None,
+) -> None:
+    """Helper that fills in the now-mandatory RESULT fields with sensible defaults."""
+    client.result(
+        eval_id=eval_id,
+        sid=sid,
+        eid=eid,
+        task_name=task_name,
+        episode_id=episode_id,
+        status=status,
+        metrics=metrics,
+        steps=len(metrics) * 0,  # exact count doesn't matter for these tests
+        elapsed_sec=0.0,
+        context=context or {},
+        jsonl_path=str(jsonl_path),
+        aggregate_dir=str(aggregate_dir),
+        aggregate_filename=aggregate_filename,
+        bench_metadata=bench_metadata
+        or {
+            "benchmark": "demo",
+            "mode": "sync",
+            "metric_keys": {"success": "mean"},
+            "config": {},
+            "harness_version": "test",
+        },
+    )
+
+
 async def _start_daemon(
     port: int, out_dir: Path, idle_timeout: float = 600.0
 ) -> tuple[RecordingDaemon, str, asyncio.Task]:
@@ -131,15 +173,16 @@ async def test_implicit_bucket_creation_and_result_flush(
         client.step(sid, eid, 0, {"reward": 0.1})
         client.step(sid, eid, 1, {"reward": 0.2})
         client.step(sid, eid, 2, {"reward": 0.3})
-        client.result(
+        _push_result(
+            client,
             eval_id="eval-x",
             sid=sid,
             eid=eid,
             status="success",
             metrics={"success": True},
             context={"env_id": "demo", "episode_idx": 0},
-            jsonl_path=str(jsonl_path),
-            aggregate_dir=str(tmp),
+            jsonl_path=jsonl_path,
+            aggregate_dir=tmp,
             aggregate_filename="agg.json",
         )
         # Wait for the daemon to flush.
@@ -162,23 +205,37 @@ async def test_implicit_bucket_creation_and_result_flush(
 async def test_eval_end_flushes_aggregate(
     daemon: tuple[RecordingDaemon, str, Path],
 ) -> None:
+    """EVAL_END produces a BenchmarkResult-shaped JSON with metadata,
+    per-task aggregation, and global mean_success."""
     d, url, tmp = daemon
     agg_path = tmp / "agg.json"
     client = RecordingClient(url)
+    bench_metadata = {
+        "benchmark": "demo",
+        "mode": "sync",
+        "metric_keys": {"success": "mean"},
+        "config": {"params": {"seed": 7}},
+        "harness_version": "test-version",
+        "server_info": {"model_server": "EchoServer"},
+    }
     try:
         for i in range(3):
             sid, eid = "shard-0", f"ep-{i}"
             client.step(sid, eid, 0, {"reward": float(i)})
-            client.result(
+            _push_result(
+                client,
                 eval_id="eval-x",
                 sid=sid,
                 eid=eid,
                 status="success" if i % 2 == 0 else "fail",
                 metrics={"success": i % 2 == 0},
                 context={"env_id": "demo", "episode_idx": i},
-                jsonl_path=str(tmp / f"ep{i}.jsonl"),
-                aggregate_dir=str(tmp),
+                jsonl_path=tmp / f"ep{i}.jsonl",
+                aggregate_dir=tmp,
                 aggregate_filename="agg.json",
+                task_name="demo_task",
+                episode_id=i,
+                bench_metadata=bench_metadata,
             )
         client.eval_end("eval-x")
         assert await _wait_path(agg_path), f"aggregate never appeared at {agg_path}"
@@ -186,11 +243,24 @@ async def test_eval_end_flushes_aggregate(
         client.close()
 
     body = json.loads(agg_path.read_text())
+    # Metadata round-trip.
+    assert body["benchmark"] == "demo"
+    assert body["mode"] == "sync"
+    assert body["harness_version"] == "test-version"
+    assert body["server_info"] == {"model_server": "EchoServer"}
+    assert body["seed"] == 7
+    assert body["metric_keys"] == {"success": "mean"}
     assert body["eval_id"] == "eval-x"
-    assert body["count"] == 3
-    assert body["unclosed"] is False
-    assert {r["eid"] for r in body["results"]} == {"ep-0", "ep-1", "ep-2"}
-    assert {r["env_id"] for r in body["results"]} == {"demo"}
+    assert "unclosed" not in body  # happy path
+
+    # Per-task structure with aggregation.
+    assert [t["task"] for t in body["tasks"]] == ["demo_task"]
+    task = body["tasks"][0]
+    assert task["num_episodes"] == 3
+    # 2 successes out of 3.
+    assert task["mean_success"] == pytest.approx(2 / 3, abs=1e-4)
+    assert body["mean_success"] == pytest.approx(2 / 3, abs=1e-4)
+    assert {ep["eid"] for ep in task["episodes"]} == {"ep-0", "ep-1", "ep-2"}
     assert d.eval_count == 0
 
 
@@ -229,15 +299,16 @@ async def test_two_emitters_merge_into_same_bucket(
         # Small yield so the daemon's loop drains the connection's last frames.
         await asyncio.sleep(0.1)
         # Orchestrator declares the episode done
-        e_orch.result(
+        _push_result(
+            e_orch,
             eval_id="eval-merge",
             sid=sid,
             eid=eid,
             status="success",
             metrics={"success": True},
             context={"env_id": "merge"},
-            jsonl_path=str(jsonl_path),
-            aggregate_dir=str(tmp),
+            jsonl_path=jsonl_path,
+            aggregate_dir=tmp,
             aggregate_filename="agg.json",
         )
         assert await _wait_path(jsonl_path)
@@ -266,15 +337,15 @@ async def test_late_step_after_result_dropped(
     client = RecordingClient(url)
     try:
         client.step(sid, eid, 0, {"a": 1})
-        client.result(
+        _push_result(
+            client,
             eval_id="e",
             sid=sid,
             eid=eid,
             status="success",
             metrics={},
-            context={},
-            jsonl_path=str(jsonl_path),
-            aggregate_dir=str(tmp),
+            jsonl_path=jsonl_path,
+            aggregate_dir=tmp,
             aggregate_filename="agg.json",
         )
         assert await _wait_path(jsonl_path)
@@ -320,15 +391,15 @@ async def test_eval_age_out_to_unclosed_aggregate(free_port: int, tmp_path: Path
     try:
         client = RecordingClient(url)
         # One RESULT opens the eval but no EVAL_END follows.
-        client.result(
+        _push_result(
+            client,
             eval_id="ev-age",
             sid="s",
             eid="e",
             status="success",
             metrics={},
-            context={},
-            jsonl_path=str(tmp_path / "e.jsonl"),
-            aggregate_dir=str(tmp_path),
+            jsonl_path=tmp_path / "e.jsonl",
+            aggregate_dir=tmp_path,
             aggregate_filename="age.json",
         )
         await asyncio.sleep(0.1)
@@ -338,7 +409,8 @@ async def test_eval_age_out_to_unclosed_aggregate(free_port: int, tmp_path: Path
         assert await _wait_path(agg)
         body = json.loads(agg.read_text())
         assert body["unclosed"] is True
-        assert body["count"] == 1
+        # One episode landed under the default task name from _push_result.
+        assert sum(len(t["episodes"]) for t in body["tasks"]) == 1
     finally:
         await _stop_daemon(d, task)
 
@@ -353,15 +425,15 @@ def test_emitter_with_no_daemon_drops_silently(free_port: int) -> None:
     client = RecordingClient(f"ws://127.0.0.1:{free_port}")
     try:
         client.step("s", "e", 0, {"x": 1})
-        client.result(
+        _push_result(
+            client,
             eval_id="e",
             sid="s",
             eid="e",
             status="success",
             metrics={},
-            context={},
-            jsonl_path="/tmp/x.jsonl",
-            aggregate_dir="/tmp",
+            jsonl_path=Path("/tmp/x.jsonl"),
+            aggregate_dir=Path("/tmp"),
             aggregate_filename="a.json",
         )
         client.eval_end("e")

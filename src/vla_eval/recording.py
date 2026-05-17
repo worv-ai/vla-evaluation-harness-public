@@ -197,7 +197,19 @@ class EpisodeRecorder:
     # Close (orchestrator owns this — happy and exception paths)
     # ------------------------------------------------------------------
 
-    def close(self, *, status: EpisodeStatus, metrics: dict[str, Any]) -> None:
+    def close(
+        self,
+        *,
+        status: EpisodeStatus,
+        metrics: dict[str, Any],
+        task_name: str = "",
+        episode_id: int = 0,
+        steps: int = 0,
+        elapsed_sec: float = 0.0,
+        bench_metadata: dict[str, Any] | None = None,
+        failure_reason: str | None = None,
+        failure_detail: str | None = None,
+    ) -> None:
         if self._closed:
             return
         self._closed = True
@@ -221,12 +233,19 @@ class EpisodeRecorder:
                 eval_id=self._eval_id,
                 sid=self._sid,
                 eid=self._eid,
+                task_name=task_name,
+                episode_id=episode_id,
                 status=status,
                 metrics=metrics,
+                steps=steps,
+                elapsed_sec=elapsed_sec,
                 context=self._context,
                 jsonl_path=jsonl_path,
                 aggregate_dir=self._aggregate_dir,
                 aggregate_filename=self._aggregate_filename,
+                bench_metadata=bench_metadata or {},
+                failure_reason=failure_reason,
+                failure_detail=failure_detail,
             )
         except Exception:
             logger.exception("EpisodeRecorder.close: failed to push RESULT")
@@ -269,5 +288,17 @@ class NullEpisodeRecorder(EpisodeRecorder):
     def record_step(self, row: dict[str, Any]) -> None:  # type: ignore[override]
         pass
 
-    def close(self, *, status: EpisodeStatus, metrics: dict[str, Any]) -> None:  # type: ignore[override]
+    def close(  # type: ignore[override]
+        self,
+        *,
+        status: EpisodeStatus,
+        metrics: dict[str, Any],
+        task_name: str = "",
+        episode_id: int = 0,
+        steps: int = 0,
+        elapsed_sec: float = 0.0,
+        bench_metadata: dict[str, Any] | None = None,
+        failure_reason: str | None = None,
+        failure_detail: str | None = None,
+    ) -> None:
         pass
