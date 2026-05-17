@@ -119,10 +119,22 @@ async def _handle_connection(
                 continue
 
             elif msg.type == MessageType.EPISODE_START:
-                episode_id = str(uuid.uuid4())
-                ctx = SessionContext(session_id=session_id, episode_id=episode_id, mode="sync")
+                # Harness-supplied (sid, eid, eval_id, db_path) in the payload's
+                # `recording` field so model-server-side code (e.g. reflex-train)
+                # can attach a StepRecorder against the same SQLite the harness
+                # uses, with field-union semantics on shared step_ids.
+                rec = msg.payload.get("recording") or {}
+                effective_sid = rec.get("sid") or session_id
+                episode_id = rec.get("eid") or str(uuid.uuid4())
+                ctx = SessionContext(
+                    session_id=effective_sid,
+                    episode_id=episode_id,
+                    mode="sync",
+                    eval_id=rec.get("eval_id") or "",
+                    recording_db_path=rec.get("db_path") or "",
+                )
                 ctx._send_action_fn = send_action
-                logger.info("EPISODE_START session=%s episode=%s", session_id[:8], episode_id[:8])
+                logger.info("EPISODE_START session=%s episode=%s", effective_sid[:8], episode_id[:8])
                 try:
                     await model_server.on_episode_start(msg.payload, ctx)
                     in_episode = True

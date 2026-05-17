@@ -20,6 +20,7 @@ from vla_eval.specs import DimSpec
 
 import numpy as np
 
+from vla_eval.recording import EpisodeRecorder, NullEpisodeRecorder, RecordingContext
 from vla_eval.types import Action, EpisodeResult, Observation, Task
 
 
@@ -67,8 +68,16 @@ class Benchmark(ABC):
     # -- abstract: commands -----------------------------------------------
 
     @abstractmethod
-    async def start_episode(self, task: Task) -> None:
-        """Initialise an episode (env stored internally)."""
+    async def start_episode(self, task: Task, recorder: EpisodeRecorder | None = None) -> None:
+        """Initialise an episode (env stored internally).
+
+        When recording is enabled, the orchestrator passes a live
+        :class:`EpisodeRecorder` here so the benchmark can capture video
+        frames and step rows during ``reset`` / ``step``. When recording
+        is disabled the orchestrator passes a :class:`NullEpisodeRecorder`,
+        so subclasses can call ``recorder.record_video(...)`` /
+        ``recorder.record_step(...)`` unconditionally without guards.
+        """
 
     @abstractmethod
     async def apply_action(self, action: Action) -> None:
@@ -139,6 +148,21 @@ class Benchmark(ABC):
         """Render current env state as image. Optional override."""
         return None
 
+    def get_recording_context(self, task: Task) -> RecordingContext | None:
+        """Per-episode recording metadata for the orchestrator, or ``None`` to opt out.
+
+        Override when the benchmark supports per-episode mp4 / jsonl
+        recording. Return a :class:`RecordingContext` describing where
+        artefacts land and how filenames are templated; the orchestrator
+        builds an :class:`EpisodeRecorder` from it and passes the recorder
+        back to ``start_episode``.
+
+        Default returns ``None`` — the orchestrator hands a
+        :class:`NullEpisodeRecorder` to ``start_episode`` and the benchmark
+        sees no-ops on every recorder call.
+        """
+        return None
+
 
 # ---------------------------------------------------------------------------
 # Step-based convenience subclass
@@ -195,9 +219,10 @@ class StepBenchmark(Benchmark, ABC):
     # a dedicated CapacityLimiter is needed to avoid starvation
     # (see _DECODE_LIMITER in serve.py for an example).
 
-    async def start_episode(self, task: Task) -> None:
+    async def start_episode(self, task: Task, recorder: EpisodeRecorder | None = None) -> None:
         self._t0 = time.monotonic()
         self._task = task
+        self._recorder: EpisodeRecorder = recorder or NullEpisodeRecorder()
         raw_obs = self.reset(task)
         self._last_result = StepResult(obs=raw_obs, reward=0.0, done=False, info={})
 
