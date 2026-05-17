@@ -149,6 +149,14 @@ class Benchmark(ABC):
         """
         return None
 
+    def set_recording_target(self, sid: str, eid: str) -> None:
+        """Tell the benchmark which daemon bucket key to push to for the next episode.
+
+        Orchestrator calls this right before ``start_episode`` when the daemon
+        is enabled.  Benchmarks that own an ``EpisodeRecorder`` route the
+        ``(sid, eid)`` into it.  Default is a no-op.
+        """
+
 
 # ---------------------------------------------------------------------------
 # Step-based convenience subclass

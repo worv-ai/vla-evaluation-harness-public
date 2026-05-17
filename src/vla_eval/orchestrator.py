@@ -295,6 +295,8 @@ class Orchestrator:
                     task = {**task, "episode_idx": episode_idx}
                     eid = str(uuid.uuid4())
                     recording_payload = self._push_episode_start(benchmark, task, sid, eid)
+                    if recording_payload is not None:
+                        benchmark.set_recording_target(sid, eid)
                     raw = await runner.run_episode(
                         benchmark, task, conn, max_steps=max_steps, recording_payload=recording_payload
                     )

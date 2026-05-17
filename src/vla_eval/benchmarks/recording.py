@@ -258,6 +258,31 @@ class EpisodeVideoRecorder:
         logger.info("Saved episode video: %s (%d frames)", final_path, frames_written)
         return final_path
 
+    def close_keep_working_path(self) -> Path | None:
+        """Close the writer, leave the working mp4 in place, return its path.
+
+        Used by daemon-mode flow: the daemon owns the rename-to-final
+        (``os.rename`` in the daemon process) so the recorder must NOT move
+        the file.  Returns ``None`` if no episode was in progress or the
+        writer couldn't be closed cleanly.
+        """
+        if not self.active:
+            return None
+        writer = self._writer
+        self._writer = None
+        self._context = None
+        self._frames_written = 0
+        self._record_failed = False
+        try:
+            writer.close()
+        except Exception as e:
+            logger.warning("close_keep_working_path: writer close failed: %s", e)
+            _safe_unlink(self._working_path)
+            return None
+        if not self._working_path.exists():
+            return None
+        return self._working_path
+
     def discard(self) -> None:
         """Abandon the in-flight episode without producing an mp4.
 

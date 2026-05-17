@@ -542,3 +542,23 @@ class RoboMMEBenchmark(StepBenchmark):
         self._video_frames = []
         self._wrist_video_frames = []
         self._task = None
+
+    def get_recording_context(self, task: Task) -> dict[str, Any] | None:
+        if self._recorder is None:
+            return None
+        episode_idx = task.get("episode_idx", 0)
+        out_dir = self._recorder._data_dir
+        if out_dir is None and self._recorder._video is not None:
+            out_dir = self._recorder._video.output_dir
+        return {
+            "output_dir": str(out_dir) if out_dir is not None else "",
+            "filename_template": "{env_id}_ep{episode_idx:04d}_{status}",
+            "context": {"env_id": task["env_id"], "episode_idx": int(episode_idx)},
+        }
+
+    def set_recording_target(self, sid: str, eid: str) -> None:
+        if self._recorder is not None:
+            from vla_eval import recording
+
+            emitter = recording.installed_emitter()
+            self._recorder.set_emitter_target(emitter, sid, eid)
