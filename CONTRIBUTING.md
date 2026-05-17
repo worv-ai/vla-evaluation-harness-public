@@ -118,6 +118,18 @@ YAML configs are parsed into typed dataclasses in `config.py`. When adding confi
 - Update `from_dict()` if the field needs special handling
 - Keep `params` as `dict[str, Any]` — it's benchmark-specific and passed through as-is
 
+## Recording Daemon
+
+Optional sidecar that collects per-episode artefacts (jsonl + mp4) and a per-eval aggregate JSON. Replaces the old `vla-eval merge` step — shards push directly into the daemon.
+
+Launch standalone: `vla-eval recording-daemon --bind ws://0.0.0.0:9001 --out-dir /path/to/out`.
+
+Sharded eval with daemon-managed lifecycle: `scripts/run_sharded.sh -c <config> -n <num_shards>` spawns the daemon, runs shards with `--recording-daemon-url` + `--eval-id`, pushes `EVAL_END` after `wait`. Pass `--no-daemon` to fall back to legacy per-shard JSON output.
+
+Model server side: pass `--recording-daemon-url ws://...` to `run_server` to install the emitter; the WS `EPISODE_START` / `EPISODE_END` handlers forward to the daemon.
+
+Benchmark side: override `Benchmark.get_recording_context(task)` to opt into per-episode collection and `Benchmark.set_recording_target(sid, eid)` to wire the bucket key into the benchmark's `EpisodeRecorder`.
+
 ## PR Workflow
 
 1. Branch from `main`

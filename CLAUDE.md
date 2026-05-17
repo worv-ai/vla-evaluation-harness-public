@@ -44,6 +44,8 @@ CLI (cli/main.py)
      │   └─ EpisodeRunner (runners/)    ── sync or async (Sim2Live)
      │       └─ Connection (connection.py) ←─ WebSocket/msgpack ─→ ModelServer (model_servers/base.py)
      └─ ResultCollector (results/collector.py)
+
+recording_daemon/  ── optional sidecar; collects per-episode jsonl + mp4 + per-eval aggregate JSON over its own WS.
 ```
 
 ### Key design decisions
@@ -51,5 +53,13 @@ CLI (cli/main.py)
 - **Episode-level error isolation**: One episode failure never aborts the entire evaluation.
 - **anyio-based async**: asyncio-compatible, not trio. Use anyio primitives for new async code.
 - **Parallel evaluation**: Environment parallelism via episode sharding + inference parallelism via batch forward passes.
+
+### Recording daemon (optional)
+
+`vla-eval recording-daemon` runs as a sidecar on the eval host. Model server (`--recording-daemon-url ws://...`) and harness shards (`--recording-daemon-url`, `--eval-id`) push per-step / per-episode artefacts to it; the daemon writes jsonl + mp4 + aggregate JSON.
+
+Use `scripts/run_sharded.sh` to spawn the daemon, run N shards, and push EVAL_END automatically. `scripts/run_sharded.sh --no-daemon` disables the daemon flow if you only need per-shard JSON (legacy).
+
+The daemon owns disk writes — local-mode `EpisodeRecorder` still works when no emitter is installed; daemon-mode kicks in once the orchestrator installs an emitter and calls `Benchmark.set_recording_target(sid, eid)`.
 
 Read `CONTRIBUTING.md` before any integration work (adding benchmarks/model servers, PR workflow).
