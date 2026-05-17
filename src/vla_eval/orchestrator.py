@@ -7,13 +7,10 @@ import json
 import logging
 import math
 import re
-import time
 import traceback
 import uuid
 from pathlib import Path
 from typing import Any, cast
-
-from filelock import FileLock, Timeout
 
 import websockets
 
@@ -53,9 +50,9 @@ class Orchestrator:
           attempts reconnection, and continues with the next episode.
         - Other exceptions: marks the episode as failed and continues.
 
-    Result files:
-        - Non-sharded: ``{name}_{partial|sync}_{unix_timestamp}.json``
-        - Sharded: ``{name}_shard{id}of{total}.json`` (deterministic, no timestamp).
+    Results are emitted to the recording daemon when ``--recording-daemon-url`` is set
+    (per-episode jsonl / mp4 / aggregate JSON owned by the daemon). Without a daemon URL,
+    nothing is written to disk — only printed to the console at end of run.
     """
 
     def __init__(
@@ -70,7 +67,6 @@ class Orchestrator:
         self._server_cfg = ServerConfig.from_dict(config.get("server"))
         self.shard_id = shard_id
         self.num_shards = num_shards
-        self._output_file_lock: FileLock | None = None
         self._progress_path: Path | None = None
         self._recording_daemon_url = recording_daemon_url
         self._eval_id = eval_id or str(uuid.uuid4())
@@ -114,12 +110,6 @@ class Orchestrator:
         recording.set_client(self._client)
         logger.info("Orchestrator recording emitter installed: %s", self._recording_daemon_url)
 
-    def _release_file_lock(self) -> None:
-        """Release the shard output file lock (lock file is auto-deleted by filelock)."""
-        if self._output_file_lock is not None:
-            self._output_file_lock.release()
-            self._output_file_lock = None
-
     def _update_progress(self, completed: int, total: int, errors: int) -> None:
         """Write a lightweight progress file for live monitoring."""
         if self._progress_path is None:
@@ -135,26 +125,7 @@ class Orchestrator:
         safe_name = _SAFE_NAME_RE.sub("_", name)
 
         logger.info("Starting benchmark: %s (mode=%s)", name, cfg.mode)
-
-        # Fail fast: claim the output path via file lock (shard mode).
-        self._output_file_lock = None
-        if self.num_shards is not None and self.shard_id is not None:
-            output_path = self._output_dir / f"{self._shard_stem(safe_name)}.json"
-            if output_path.exists():
-                raise FileExistsError(
-                    f"Result file already exists: {output_path}\nRemove it or use a different output_dir."
-                )
-            lock = FileLock(str(output_path) + ".lock", timeout=0)
-            try:
-                lock.acquire()
-                self._output_file_lock = lock
-            except Timeout:
-                raise FileExistsError(f"Another eval is already writing to {output_path}")
-
-        try:
-            return await self._run_benchmark_inner(cfg, name, safe_name)
-        finally:
-            self._release_file_lock()
+        return await self._run_benchmark_inner(cfg, name, safe_name)
 
     async def _run_benchmark_inner(self, cfg: EvalConfig, name: str, safe_name: str) -> dict[str, Any]:
         """Run benchmark episodes, collect results, and save."""
@@ -438,30 +409,18 @@ class Orchestrator:
         partial: bool,
         server_info: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Save results to disk. Marks output as partial when the run was interrupted."""
+        """Print summary, build the return-value dict. Per-episode/aggregate disk writes
+        are owned by the recording daemon; nothing is written here."""
         collector.print_summary()
 
         output: dict[str, Any] = {**collector.get_benchmark_result(config=cfg.to_dict())}
-
         if server_info is not None:
             output["server_info"] = server_info
-
         if partial:
             output["partial"] = True
-
-        # Add shard metadata
         if self.num_shards is not None and self.shard_id is not None:
             output["shard"] = {"id": self.shard_id, "total": self.num_shards}
-            output_path = self._output_dir / f"{self._shard_stem(safe_name)}.json"
-        else:
-            tag = "partial" if partial else cfg.mode
-            output_path = self._output_dir / f"{safe_name}_{tag}_{int(time.time())}.json"
 
-        output_path.write_text(json.dumps(output, indent=2, default=str))
-        logger.info("Results saved to %s", output_path)
-
-        # Remove progress file — the result JSON replaces it
         if self._progress_path is not None and self._progress_path.exists():
             self._progress_path.unlink()
-
         return output
