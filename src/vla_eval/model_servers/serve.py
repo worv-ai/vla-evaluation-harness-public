@@ -119,10 +119,21 @@ async def _handle_connection(
                 continue
 
             elif msg.type == MessageType.EPISODE_START:
-                episode_id = str(uuid.uuid4())
-                ctx = SessionContext(session_id=session_id, episode_id=episode_id, mode="sync")
+                # Harness-supplied (sid, eid, eval_id) so external recording emits
+                # (e.g. reflex-train) land in the same daemon bucket the
+                # orchestrator opened. Falls back to fresh WS-level ids when absent.
+                rec = msg.payload.get("recording") or {}
+                effective_sid = rec.get("sid") or session_id
+                episode_id = rec.get("eid") or str(uuid.uuid4())
+                eval_id = rec.get("eval_id") or ""
+                ctx = SessionContext(
+                    session_id=effective_sid,
+                    episode_id=episode_id,
+                    mode="sync",
+                    eval_id=eval_id,
+                )
                 ctx._send_action_fn = send_action
-                logger.info("EPISODE_START session=%s episode=%s", session_id[:8], episode_id[:8])
+                logger.info("EPISODE_START session=%s episode=%s", effective_sid[:8], episode_id[:8])
                 try:
                     await model_server.on_episode_start(msg.payload, ctx)
                     in_episode = True
@@ -396,12 +407,22 @@ def run_server(server_cls: type[ModelServer]) -> None:
     parser.add_argument("--address", default=None, help="Bind address as host:port (e.g. 0.0.0.0:8001)")
     parser.add_argument("--host", default="0.0.0.0", help="Bind host (prefer --address)")
     parser.add_argument("--port", type=int, default=8000, help="Bind port (prefer --address)")
+    parser.add_argument(
+        "--recording-daemon-url",
+        default=None,
+        help=(
+            "WebSocket URL of the recording daemon (ws://host:port). When set, external "
+            "callers inside this process can push step rows via recording.client().step(...). "
+            "The orchestrator forwards (sid, eid, eval_id) on EPISODE_START so emits are "
+            "attributed to the same daemon bucket the harness opened."
+        ),
+    )
     parser.add_argument("--verbose", "-v", action="store_true", help="Debug logging")
 
     import typing
 
     _EMPTY = inspect.Parameter.empty
-    _SERVE_KEYS = {"address", "host", "port", "verbose"}
+    _SERVE_KEYS = {"address", "host", "port", "verbose", "recording_daemon_url"}
     seen = {"self"} | _SERVE_KEYS
 
     for cls in server_cls.__mro__:
@@ -456,6 +477,13 @@ def run_server(server_cls: type[ModelServer]) -> None:
 
     ctor_kwargs = {k: v for k, v in vars(args).items() if k not in _SERVE_KEYS}
     server = server_cls(**ctor_kwargs)
+
+    if args.recording_daemon_url:
+        from vla_eval import recording
+        from vla_eval.recording_daemon.client import RecordingClient
+
+        recording.set_client(RecordingClient(args.recording_daemon_url))
+        logger.info("Recording emitter installed: %s", args.recording_daemon_url)
 
     load_model = getattr(server, "_load_model", None)
     if callable(load_model):

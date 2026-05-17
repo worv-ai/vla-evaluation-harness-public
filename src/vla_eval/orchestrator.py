@@ -9,6 +9,7 @@ import math
 import re
 import time
 import traceback
+import uuid
 from pathlib import Path
 from typing import Any, cast
 
@@ -16,8 +17,10 @@ from filelock import FileLock, Timeout
 
 import websockets
 
+from vla_eval import recording
 from vla_eval.config import EvalConfig, ServerConfig
 from vla_eval.connection import Connection
+from vla_eval.recording import EpisodeRecorder, NullEpisodeRecorder, RecordingContext
 from vla_eval.registry import resolve_import_string
 from vla_eval.specs import DimSpec, check_specs
 from vla_eval.results.collector import EpisodeResult, ResultCollector
@@ -53,8 +56,15 @@ class Orchestrator:
         - Other exceptions: marks the episode as failed and continues.
 
     Result files:
+        Without ``--recording-daemon-url`` the orchestrator writes per-shard /
+        non-sharded JSON itself:
         - Non-sharded: ``{name}_{partial|sync}_{unix_timestamp}.json``
-        - Sharded: ``{name}_shard{id}of{total}.json`` (deterministic, no timestamp).
+        - Sharded:     ``{name}_shard{id}of{total}.json`` (deterministic).
+
+        With ``--recording-daemon-url`` the recording daemon is the sole disk
+        writer for per-episode jsonl + per-eval aggregate JSON. The
+        orchestrator skips the per-shard JSON write (the daemon's aggregate
+        replaces it) but still prints the in-memory summary.
     """
 
     def __init__(
@@ -62,6 +72,8 @@ class Orchestrator:
         config: dict[str, Any],
         shard_id: int | None = None,
         num_shards: int | None = None,
+        recording_daemon_url: str | None = None,
+        eval_id: str | None = None,
     ) -> None:
         self.config = config
         self._server_cfg = ServerConfig.from_dict(config.get("server"))
@@ -69,6 +81,11 @@ class Orchestrator:
         self.num_shards = num_shards
         self._output_file_lock: FileLock | None = None
         self._progress_path: Path | None = None
+        self._recording_daemon_url = recording_daemon_url
+        self._eval_id = eval_id or str(uuid.uuid4())
+        self._client: Any = None  # RecordingClient | None — lazy-loaded
+        # One sid per orchestrator/shard process; episodes within get fresh eids.
+        self._sid = str(uuid.uuid4())
 
     @property
     def _output_dir(self) -> Path:
@@ -87,11 +104,27 @@ class Orchestrator:
         benchmark_configs = self.config.get("benchmarks", [])
         all_results = []
 
-        for bench_cfg in benchmark_configs:
-            result = await self._run_benchmark(bench_cfg)
-            all_results.append(result)
+        self._install_recording_client()
+        try:
+            for bench_cfg in benchmark_configs:
+                result = await self._run_benchmark(bench_cfg)
+                all_results.append(result)
+        finally:
+            if self._client is not None:
+                self._client.close()
+                recording.set_client(None)
+                self._client = None
 
         return all_results
+
+    def _install_recording_client(self) -> None:
+        if not self._recording_daemon_url:
+            return
+        from vla_eval.recording_daemon.client import RecordingClient
+
+        self._client = RecordingClient(self._recording_daemon_url)
+        recording.set_client(self._client)
+        logger.info("Recording emitter installed: %s", self._recording_daemon_url)
 
     def _release_file_lock(self) -> None:
         """Release the shard output file lock (lock file is auto-deleted by filelock)."""
@@ -115,9 +148,9 @@ class Orchestrator:
 
         logger.info("Starting benchmark: %s (mode=%s)", name, cfg.mode)
 
-        # Fail fast: claim the output path via file lock (shard mode).
+        # Fail fast: claim the output path via file lock (shard mode, no daemon).
         self._output_file_lock = None
-        if self.num_shards is not None and self.shard_id is not None:
+        if self._client is None and self.num_shards is not None and self.shard_id is not None:
             output_path = self._output_dir / f"{self._shard_stem(safe_name)}.json"
             if output_path.exists():
                 raise FileExistsError(
@@ -137,19 +170,14 @@ class Orchestrator:
 
     async def _run_benchmark_inner(self, cfg: EvalConfig, name: str, safe_name: str) -> dict[str, Any]:
         """Run benchmark episodes, collect results, and save."""
-        # Set up progress file for live monitoring
         self._progress_path = self._output_dir / f"{self._shard_stem(safe_name)}.progress"
 
-        # Connect to model server FIRST to get observation requirements
         conn = Connection(self._server_cfg.url, timeout=self._server_cfg.timeout)
         await conn.connect(benchmark=cfg.benchmark)
 
-        # Resolve benchmark class and inspect its __init__ signature once
         benchmark_cls = resolve_import_string(cfg.benchmark)
         sig = inspect.signature(benchmark_cls.__init__)
 
-        # Merge server's observation_params into benchmark config.
-        # Only fills in keys not already set (--param / YAML values take precedence).
         obs_params = conn.server_info.get("observation_params", {})
         merged_params = dict(cfg.params)
         if obs_params:
@@ -164,7 +192,7 @@ class Orchestrator:
             await conn.close()
             raise
 
-        # Cross-validate action/observation specs between server and benchmark.
+        # Spec cross-validation
         try:
             bench_action_spec: dict[str, DimSpec] = {}
             bench_obs_spec: dict[str, DimSpec] = {}
@@ -175,7 +203,6 @@ class Orchestrator:
                 bench_obs_spec = benchmark.get_observation_spec()
             except NotImplementedError:
                 logger.debug("Benchmark %s does not implement specs yet", name)
-            # Deserialize server specs from HELLO handshake
             for key, raw in conn.server_info.get("action_spec", {}).items():
                 server_action_spec[key] = DimSpec.from_dict(raw)
             for key, raw in conn.server_info.get("observation_spec", {}).items():
@@ -189,7 +216,6 @@ class Orchestrator:
         except Exception as exc:
             logger.warning("Spec validation failed: %s", exc)
 
-        # Warn if benchmark supports seeding but config doesn't specify one
         if "seed" in sig.parameters and "seed" not in merged_params:
             default = sig.parameters["seed"].default
             logger.warning(
@@ -200,11 +226,8 @@ class Orchestrator:
             )
 
         metadata = benchmark.get_metadata()
-
-        # max_steps: config value wins; otherwise benchmark metadata; otherwise 300.
         max_steps = cfg.max_steps if cfg.max_steps is not None else metadata.get("max_steps", 300)
 
-        # Create runner
         if cfg.mode.startswith("realtime"):
             runner = AsyncEpisodeRunner(
                 hz=cfg.hz,
@@ -216,30 +239,25 @@ class Orchestrator:
         else:
             runner = SyncEpisodeRunner()
 
-        # Get tasks
         tasks = benchmark.get_tasks()
         if cfg.tasks:
             tasks = [t for t in tasks if t.get("suite") in cfg.tasks or t.get("name") in cfg.tasks]
         if cfg.max_tasks:
             tasks = tasks[: cfg.max_tasks]
 
-        # Build flat work-item list and apply sharding
         work_items = [(task, ep) for task in tasks for ep in range(cfg.episodes_per_task)]
         if self.num_shards is not None and self.shard_id is not None:
-            # Sharding: round-robin by work-item index, not by task.
-            # E.g. 2 tasks × 3 episodes = 6 items → shard 0 gets items 0,2,4.
             work_items = [w for i, w in enumerate(work_items) if i % self.num_shards == self.shard_id]
-            logger.info(
-                "Shard %d/%d: %d episodes assigned",
-                self.shard_id,
-                self.num_shards,
-                len(work_items),
-            )
+            logger.info("Shard %d/%d: %d episodes assigned", self.shard_id, self.num_shards, len(work_items))
 
         collector = ResultCollector(benchmark_name=name, mode=cfg.mode, metric_keys=benchmark.get_metric_keys())
 
         total_items = len(work_items)
         self._update_progress(0, total_items, 0)
+
+        # Per-benchmark eval_id, deterministic from run-level eval_id + benchmark name.
+        bench_eval_id = f"{self._eval_id}-{safe_name}"
+        aggregate_filename = f"{safe_name}_aggregate.json"
 
         def record_failure(reason: str, detail: str) -> None:
             collector.record(
@@ -256,29 +274,34 @@ class Orchestrator:
         try:
             for item_idx, (task, ep) in enumerate(work_items):
                 task_name = task.get("name", str(task))
+                recorder: EpisodeRecorder = NullEpisodeRecorder()
+                ep_status = "fail"
+                ep_metrics: dict[str, Any] = {"success": False}
                 try:
                     episode_idx = ep
                     max_ep = metadata.get("max_episodes_per_task")
                     if cfg.throughput_mode and max_ep is not None:
                         episode_idx = ep % max_ep
                     task = {**task, "episode_idx": episode_idx}
-                    raw = await runner.run_episode(benchmark, task, conn, max_steps=max_steps)
+                    recorder = self._build_recorder(benchmark, task, bench_eval_id, aggregate_filename)
+                    raw = await runner.run_episode(benchmark, task, conn, max_steps=max_steps, recorder=recorder)
                     raw["episode_id"] = ep
                     ep_result = cast(EpisodeResult, raw)
                     collector.record(task_name, ep_result)
-                    status = "SUCCESS" if ep_result.get("metrics", {}).get("success") else "FAIL"
+                    ep_metrics = dict(ep_result.get("metrics") or {})
+                    ep_status = "success" if ep_metrics.get("success") else "fail"
+                    status_log = "SUCCESS" if ep_metrics.get("success") else "FAIL"
                     logger.info(
                         "  [%d/%d] %s ep%d: %s (steps=%d)",
                         item_idx + 1,
                         total_items,
                         task_name,
                         ep,
-                        status,
+                        status_log,
                         ep_result.get("steps", 0),
                     )
                     self._update_progress(item_idx + 1, total_items, collector.error_count)
                 except ConnectionError as exc:
-                    # Server unreachable after all retries — save partial and abort
                     logger.error(
                         "  [%d/%d] %s ep%d: server unreachable, aborting benchmark",
                         item_idx + 1,
@@ -287,7 +310,11 @@ class Orchestrator:
                         ep,
                     )
                     record_failure("server_unreachable", str(exc))
-                    return self._save_results(collector, cfg, safe_name, partial=True, server_info=conn.server_info)
+                    ep_status = "error"
+                    recorder.close(status=ep_status, metrics=ep_metrics)
+                    return self._finalize_benchmark(
+                        collector, cfg, safe_name, bench_eval_id, partial=True, server_info=conn.server_info
+                    )
                 except websockets.exceptions.ConnectionClosed as exc:
                     close_code = exc.rcvd.code if exc.rcvd else None
                     close_reason = exc.rcvd.reason if exc.rcvd else None
@@ -301,13 +328,16 @@ class Orchestrator:
                         close_reason,
                     )
                     record_failure("connection_closed", f"code={close_code} reason={close_reason}")
+                    ep_status = "error"
+                    recorder.close(status=ep_status, metrics=ep_metrics)
                     try:
                         await conn.reconnect()
                     except Exception:
                         logger.exception("Reconnect failed, aborting benchmark")
-                        return self._save_results(
-                            collector, cfg, safe_name, partial=True, server_info=conn.server_info
+                        return self._finalize_benchmark(
+                            collector, cfg, safe_name, bench_eval_id, partial=True, server_info=conn.server_info
                         )
+                    continue
                 except TimeoutError as exc:
                     logger.warning(
                         "  [%d/%d] %s ep%d: TimeoutError (act timeout=%ss)",
@@ -318,13 +348,16 @@ class Orchestrator:
                         self._server_cfg.timeout,
                     )
                     record_failure("timeout", f"timeout={self._server_cfg.timeout}s: {exc}")
+                    ep_status = "error"
+                    recorder.close(status=ep_status, metrics=ep_metrics)
                     try:
                         await conn.reconnect()
                     except Exception:
                         logger.exception("Reconnect failed, aborting benchmark")
-                        return self._save_results(
-                            collector, cfg, safe_name, partial=True, server_info=conn.server_info
+                        return self._finalize_benchmark(
+                            collector, cfg, safe_name, bench_eval_id, partial=True, server_info=conn.server_info
                         )
+                    continue
                 except Exception:
                     logger.exception(
                         "  [%d/%d] %s ep%d: ERROR",
@@ -334,44 +367,100 @@ class Orchestrator:
                         ep,
                     )
                     record_failure("exception", traceback.format_exc())
+                    ep_status = "error"
+                    recorder.close(status=ep_status, metrics=ep_metrics)
+                    continue
+
+                # Happy path close
+                recorder.close(status=ep_status, metrics=ep_metrics)
         finally:
             benchmark.cleanup()
             await conn.close()
 
-        return self._save_results(collector, cfg, safe_name, partial=False, server_info=conn.server_info)
+        return self._finalize_benchmark(
+            collector, cfg, safe_name, bench_eval_id, partial=False, server_info=conn.server_info
+        )
 
-    def _save_results(
+    def _build_recorder(
+        self,
+        benchmark: Any,
+        task: dict[str, Any],
+        bench_eval_id: str,
+        aggregate_filename: str,
+    ) -> EpisodeRecorder:
+        """Construct the per-episode recorder.
+
+        Returns :class:`NullEpisodeRecorder` when the daemon is disabled or
+        the benchmark opts out (``get_recording_context`` returns ``None``).
+        """
+        if self._client is None:
+            return NullEpisodeRecorder()
+        try:
+            ctx = benchmark.get_recording_context(task)
+        except Exception:
+            logger.exception("benchmark.get_recording_context raised; skipping recording for this episode")
+            return NullEpisodeRecorder()
+        if ctx is None:
+            return NullEpisodeRecorder()
+        if not isinstance(ctx, RecordingContext):
+            logger.warning(
+                "get_recording_context returned %s, expected RecordingContext — skipping",
+                type(ctx).__name__,
+            )
+            return NullEpisodeRecorder()
+        eid = str(uuid.uuid4())
+        return EpisodeRecorder(
+            client=self._client,
+            sid=self._sid,
+            eid=eid,
+            eval_id=bench_eval_id,
+            output_dir=ctx.output_dir,
+            filename_stem=ctx.filename_stem,
+            context=ctx.context,
+            aggregate_dir=self._output_dir,
+            aggregate_filename=aggregate_filename,
+            record_video=ctx.record_video,
+            record_step=ctx.record_step,
+            video_fps=ctx.video_fps,
+        )
+
+    def _finalize_benchmark(
         self,
         collector: ResultCollector,
         cfg: EvalConfig,
         safe_name: str,
+        bench_eval_id: str,
         *,
         partial: bool,
         server_info: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Save results to disk. Marks output as partial when the run was interrupted."""
+        """Print in-memory summary, push EVAL_END (daemon mode) or write per-shard JSON (otherwise)."""
         collector.print_summary()
 
         output: dict[str, Any] = {**collector.get_benchmark_result(config=cfg.to_dict())}
-
         if server_info is not None:
             output["server_info"] = server_info
-
         if partial:
             output["partial"] = True
-
-        # Add shard metadata
         if self.num_shards is not None and self.shard_id is not None:
             output["shard"] = {"id": self.shard_id, "total": self.num_shards}
-            output_path = self._output_dir / f"{self._shard_stem(safe_name)}.json"
+
+        if self._client is not None:
+            # Daemon owns disk. Tell it to flush the aggregate for this benchmark.
+            try:
+                self._client.eval_end(bench_eval_id)
+            except Exception:
+                logger.exception("Failed to push EVAL_END for %s", bench_eval_id)
         else:
-            tag = "partial" if partial else cfg.mode
-            output_path = self._output_dir / f"{safe_name}_{tag}_{int(time.time())}.json"
+            # No daemon: write per-shard / non-sharded JSON ourselves.
+            if self.num_shards is not None and self.shard_id is not None:
+                output_path = self._output_dir / f"{self._shard_stem(safe_name)}.json"
+            else:
+                tag = "partial" if partial else cfg.mode
+                output_path = self._output_dir / f"{safe_name}_{tag}_{int(time.time())}.json"
+            output_path.write_text(json.dumps(output, indent=2, default=str))
+            logger.info("Results saved to %s", output_path)
 
-        output_path.write_text(json.dumps(output, indent=2, default=str))
-        logger.info("Results saved to %s", output_path)
-
-        # Remove progress file — the result JSON replaces it
         if self._progress_path is not None and self._progress_path.exists():
             self._progress_path.unlink()
 

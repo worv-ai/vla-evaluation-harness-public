@@ -6,6 +6,7 @@ from abc import ABC, abstractmethod
 from typing import Any
 
 from vla_eval.benchmarks.base import Benchmark
+from vla_eval.recording import EpisodeRecorder
 from vla_eval.types import EpisodeResult, Task
 
 
@@ -20,5 +21,13 @@ class EpisodeRunner(ABC):
         conn: Any,  # Connection
         *,
         max_steps: int | None = None,
+        recorder: EpisodeRecorder | None = None,
     ) -> EpisodeResult:
-        """Run a single episode and return the result."""
+        """Run a single episode and return the result.
+
+        ``recorder`` (when supplied) is forwarded to
+        ``benchmark.start_episode`` so video / step capture works. The
+        runner additionally bundles ``{sid, eid, eval_id}`` into the WS
+        ``EPISODE_START`` payload so the model server can tag any external
+        step pushes (e.g. reflex-train) with the same bucket key.
+        """

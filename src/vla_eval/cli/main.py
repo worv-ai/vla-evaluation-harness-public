@@ -107,6 +107,8 @@ def _run_via_docker(
     shard_id: int | None = None,
     num_shards: int | None = None,
     accept_license: list[str] | None = None,
+    recording_daemon_url: str | None = None,
+    eval_id: str | None = None,
 ) -> None:
     """Execute the evaluation inside a Docker container."""
     import shutil
@@ -186,6 +188,10 @@ def _run_via_docker(
     cmd.extend([docker_cfg.image, "run", "--no-docker", "--config", "/tmp/eval_config.yaml"])
     if shard_id is not None:
         cmd.extend(["--shard-id", str(shard_id), "--num-shards", str(num_shards)])
+    if recording_daemon_url:
+        cmd.extend(["--recording-daemon-url", recording_daemon_url])
+    if eval_id:
+        cmd.extend(["--eval-id", eval_id])
 
     logger.info("Running via Docker: %s", " ".join(cmd))
     try:
@@ -247,6 +253,9 @@ def cmd_run(args: argparse.Namespace) -> None:
     docker_cfg = DockerConfig.from_dict(config.get("docker"))
     use_docker = bool(docker_cfg.image) and not getattr(args, "no_docker", False) and not _inside_docker()
 
+    recording_daemon_url = getattr(args, "recording_daemon_url", None)
+    eval_id = getattr(args, "eval_id", None)
+
     if use_docker:
         _run_via_docker(
             config,
@@ -255,12 +264,20 @@ def cmd_run(args: argparse.Namespace) -> None:
             shard_id=shard_id,
             num_shards=num_shards,
             accept_license=getattr(args, "accept_license", None),
+            recording_daemon_url=recording_daemon_url,
+            eval_id=eval_id,
         )
         return
 
     import anyio
 
-    orchestrator = Orchestrator(config, shard_id=shard_id, num_shards=num_shards)
+    orchestrator = Orchestrator(
+        config,
+        shard_id=shard_id,
+        num_shards=num_shards,
+        recording_daemon_url=recording_daemon_url,
+        eval_id=eval_id,
+    )
     results = anyio.run(orchestrator.run)
 
     # Print final summary
@@ -753,6 +770,24 @@ execution flow:
     run_parser.add_argument(
         "--dev", action="store_true", help="Mount local src/ into the container (skip image rebuild on code changes)"
     )
+    run_parser.add_argument(
+        "--recording-daemon-url",
+        default=None,
+        help=(
+            "WebSocket URL of the recording daemon (e.g. ws://127.0.0.1:9001). When set, "
+            "per-episode jsonl and per-eval aggregate JSON are written by the daemon "
+            "(see `vla-eval recording-daemon`). Without this flag the orchestrator writes "
+            "per-shard JSON itself as before."
+        ),
+    )
+    run_parser.add_argument(
+        "--eval-id",
+        default=None,
+        help=(
+            "Run-level identifier shared across shards of the same evaluation. Per-benchmark "
+            "eval ids are derived as '{eval-id}-{benchmark}'. Defaults to a fresh uuid."
+        ),
+    )
     run_parser.add_argument("--verbose", "-v", action="store_true")
     run_parser.set_defaults(func=cmd_run)
 
@@ -870,6 +905,11 @@ examples:
     test_parser.add_argument("-x", "--fail-fast", action="store_true", help="Stop at first failure")
     test_parser.add_argument("--verbose", "-v", action="store_true")
     test_parser.set_defaults(func=cmd_test)
+
+    # recording-daemon command
+    from vla_eval.recording_daemon.cli import add_subparser as _add_recording_daemon_subparser
+
+    _add_recording_daemon_subparser(sub)
 
     args = parser.parse_args()
     _setup_logging(getattr(args, "verbose", False))
