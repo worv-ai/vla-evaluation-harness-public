@@ -253,18 +253,23 @@ class Orchestrator:
                     "failure_detail": detail,
                 },
             )
+            # Flush the daemon bucket for this aborted episode so we don't wait
+            # for the 600s age-out and end up with an _unclosed suffix.
+            if recording_payload is not None:
+                self._push_episode_close(sid, eid, {"metrics": {"success": False}}, True)
             self._update_progress(item_idx + 1, total_items, collector.error_count)
 
         try:
             for item_idx, (task, ep) in enumerate(work_items):
                 task_name = task.get("name", str(task))
+                eid = str(uuid.uuid4())
+                recording_payload: dict[str, Any] | None = None
                 try:
                     episode_idx = ep
                     max_ep = metadata.get("max_episodes_per_task")
                     if cfg.throughput_mode and max_ep is not None:
                         episode_idx = ep % max_ep
                     task = {**task, "episode_idx": episode_idx}
-                    eid = str(uuid.uuid4())
                     recording_payload = self._start_episode(benchmark, task, sid, eid)
                     if recording_payload is not None:
                         benchmark.set_recording_target(sid, eid)

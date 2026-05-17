@@ -153,8 +153,9 @@ class Benchmark(ABC):
         """Tell the benchmark which daemon bucket key to push to for the next episode.
 
         Orchestrator calls this right before ``start_episode`` when the daemon
-        is enabled.  Benchmarks that own an ``EpisodeRecorder`` route the
-        ``(sid, eid)`` into it.  Default is a no-op.
+        is enabled. Benchmarks store ``(sid, eid)`` and pass it to
+        ``recording.client()`` calls made from their step / reset hooks.
+        Default is a no-op.
         """
 
 

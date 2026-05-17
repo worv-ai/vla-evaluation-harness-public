@@ -16,8 +16,8 @@ from typing import Any, Literal
 
 import numpy as np
 
+from vla_eval import recording
 from vla_eval.benchmarks.base import StepBenchmark, StepResult
-from vla_eval.benchmarks.data_recording import EpisodeRecorder, RecordingConfig
 from vla_eval.specs import IMAGE_RGB, LANGUAGE, RAW, DimSpec
 from vla_eval.types import Action, EpisodeResult, Observation, Task
 
@@ -154,11 +154,15 @@ class RoboMMEBenchmark(StepBenchmark):
             ``info['simple_subgoal_online']`` (no coords).  Both come from
             ``DemonstrationWrapper`` in the upstream robomme env.  ``"grounded"``
             falls back to simple if grounded is empty.
-        recording: A ``RecordingConfig`` dict (or ``None`` to disable).
-            Controls per-episode video + JSONL data recording.
+        recording: Dict that enables per-episode daemon recording. Keys:
+            ``output_dir`` (str), ``record_video`` (bool, default True),
+            ``record_step`` (bool, default True), ``step_fields``
+            (list[str], default all). ``None`` disables recording for this
+            benchmark; the daemon only receives frames when it is enabled.
     """
 
     _ALL_RECORD_FIELDS = frozenset({"gt_subgoal", "grounded_subgoal", "reward", "robot_state", "terminated"})
+    _RECORD_FILENAME_TEMPLATE = "{env_id}_ep{episode_idx:04d}_{status}"
 
     _rendering_configured: bool = False
 
@@ -187,19 +191,27 @@ class RoboMMEBenchmark(StepBenchmark):
         self.send_video_history = send_video_history
         self.send_subgoal = send_subgoal
         self.subgoal_mode = subgoal_mode
-        rec = RecordingConfig(**recording) if recording else None
-        if rec and rec.step_fields:
-            unknown = set(rec.step_fields) - self._ALL_RECORD_FIELDS
+
+        rec_cfg = dict(recording) if recording else None
+        if rec_cfg is not None:
+            step_fields = rec_cfg.get("step_fields") or []
+            unknown = set(step_fields) - self._ALL_RECORD_FIELDS
             if unknown:
                 raise ValueError(f"Unknown step_fields: {unknown}. Valid: {sorted(self._ALL_RECORD_FIELDS)}")
-        self._record_fields: set[str] = (
-            set(rec.step_fields) if rec and rec.step_fields else set(self._ALL_RECORD_FIELDS)
-        )
-        self._recorder: EpisodeRecorder | None = (
-            EpisodeRecorder(output_dir=rec.output_dir, record_video=rec.record_video, record_step=rec.record_step)
-            if rec
-            else None
-        )
+            self._record_enabled: bool = True
+            self._record_output_dir: str = str(rec_cfg.get("output_dir", "/workspace/results/episodes"))
+            self._record_video_enabled: bool = bool(rec_cfg.get("record_video", True))
+            self._record_step_enabled: bool = bool(rec_cfg.get("record_step", True))
+            self._record_fields: set[str] = set(step_fields) if step_fields else set(self._ALL_RECORD_FIELDS)
+        else:
+            self._record_enabled = False
+            self._record_output_dir = ""
+            self._record_video_enabled = False
+            self._record_step_enabled = False
+            self._record_fields = set()
+
+        self._sid: str | None = None
+        self._eid: str | None = None
         self._step_counter: int = 0
 
         self._env: Any = None
@@ -391,12 +403,13 @@ class RoboMMEBenchmark(StepBenchmark):
         if self.send_subgoal:
             self._current_subgoal = self._extract_subgoal(info_flat)
 
-        if self._recorder is not None:
-            self._recorder.start({"env_id": task["env_id"], "episode_idx": episode_idx})
+        self._step_counter = 0
+        bound = self._recording_bound()
+        if bound is not None and self._record_video_enabled:
+            client, sid, eid = bound
             front_list = obs_batch.get("front_rgb_list", [])
             if front_list:
-                self._recorder.record_frame(front_list[-1])
-        self._step_counter = 0
+                client.video_frame(sid, eid, front_list[-1])
 
         return obs_batch
 
@@ -415,17 +428,20 @@ class RoboMMEBenchmark(StepBenchmark):
         if self.send_subgoal:
             self._current_subgoal = self._extract_subgoal(info)
 
-        if self._recorder is not None and obs:
+        bound = self._recording_bound()
+        if bound is not None and self._record_video_enabled and obs:
+            client, sid, eid = bound
             front_list = obs.get("front_rgb_list", [])
             if front_list:
-                self._recorder.record_frame(front_list[-1])
+                client.video_frame(sid, eid, front_list[-1])
 
         terminated = bool(terminated)
         truncated = bool(truncated)
         reward = float(reward)
         done = terminated or truncated or info.get("status") == "error"
 
-        if self._recorder is not None and self._recorder.active:
+        if bound is not None and self._record_step_enabled:
+            client, sid, eid = bound
             fields = self._record_fields
             row: dict[str, Any] = {"step": self._step_counter}
             if "gt_subgoal" in fields:
@@ -440,7 +456,7 @@ class RoboMMEBenchmark(StepBenchmark):
                     row["robot_state"] = state.tolist() if hasattr(state, "tolist") else list(state)
             if "terminated" in fields:
                 row["terminated"] = terminated
-            self._recorder.record_step(row)
+            client.record(sid, eid, self._step_counter, row)
         self._step_counter += 1
 
         return StepResult(obs=obs, reward=reward, done=done, info=info)
@@ -506,9 +522,6 @@ class RoboMMEBenchmark(StepBenchmark):
 
     def get_step_result(self, step_result: StepResult) -> EpisodeResult:
         success = step_result.info.get("status") == "success"
-        status = "success" if success else "fail"
-        if self._recorder is not None:
-            self._recorder.save(status=status)
         return {"success": success}
 
     def get_metadata(self) -> dict[str, Any]:
@@ -537,22 +550,28 @@ class RoboMMEBenchmark(StepBenchmark):
             except Exception:
                 pass
             self._env = None
-        if self._recorder is not None:
-            self._recorder.discard()
         self._video_frames = []
         self._wrist_video_frames = []
         self._task = None
 
+    def _recording_bound(self) -> tuple[Any, str, str] | None:
+        if not self._record_enabled or self._sid is None or self._eid is None:
+            return None
+        c = recording.client()
+        if c is None:
+            return None
+        return c, self._sid, self._eid
+
     def get_recording_context(self, task: Task) -> dict[str, Any] | None:
-        if self._recorder is None:
+        if not self._record_enabled:
             return None
         episode_idx = task.get("episode_idx", 0)
         return {
-            "output_dir": self._recorder.output_dir,
-            "filename_template": self._recorder.filename_template,
+            "output_dir": self._record_output_dir,
+            "filename_template": self._RECORD_FILENAME_TEMPLATE,
             "context": {"env_id": task["env_id"], "episode_idx": int(episode_idx)},
         }
 
     def set_recording_target(self, sid: str, eid: str) -> None:
-        if self._recorder is not None:
-            self._recorder.bind(sid, eid)
+        self._sid = sid
+        self._eid = eid
