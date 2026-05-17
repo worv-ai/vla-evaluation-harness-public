@@ -117,9 +117,7 @@ async def test_episode_lifecycle(daemon: tuple) -> None:
     emitter = RecordingClient(url)
     try:
         emitter.start_eval("e1", str(out_dir), "agg.json", expected_count=1)
-        emitter.start_episode(
-            "e1", "s1", "ep1", str(out_dir), "{task}_ep{idx:04d}_{status}", {"task": "T", "idx": 0}
-        )
+        emitter.start_episode("e1", "s1", "ep1", str(out_dir), "{task}_ep{idx:04d}_{status}", {"task": "T", "idx": 0})
         for step in range(3):
             emitter.record("s1", "ep1", step, {"reward": float(step)})
         working = out_dir / ".recorder-fake.mp4"

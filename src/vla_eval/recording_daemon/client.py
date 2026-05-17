@@ -11,12 +11,18 @@ from __future__ import annotations
 import asyncio
 import logging
 import queue
+import tempfile
 import threading
-from typing import Any
+import uuid
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 import websockets
 
 from vla_eval.recording_daemon.messages import RecordingFrame, RecordingMessageType, pack_frame
+
+if TYPE_CHECKING:
+    import numpy as np
 
 logger = logging.getLogger(__name__)
 
@@ -31,10 +37,46 @@ _RECONNECT_INITIAL_SEC = 0.1
 _RECONNECT_MAX_SEC = 5.0
 
 
-class RecordingClient:
-    """Thread-safe emitter that sends frames to a recording daemon over WS."""
+class _VideoStream:
+    """Per-(sid, eid) ffmpeg pipe owned by the client; writes a working mp4 on local disk."""
 
-    def __init__(self, daemon_url: str, queue_size: int = _DEFAULT_QUEUE_SIZE) -> None:
+    def __init__(self, path: Path, fps: int = 20) -> None:
+        self.path = path
+        self.fps = fps
+        self._writer: Any = None
+
+    def write(self, frame: "np.ndarray") -> None:
+        if self._writer is None:
+            import imageio
+
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self._writer = imageio.get_writer(str(self.path), fps=self.fps)
+        self._writer.append_data(frame)
+
+    def close(self) -> None:
+        if self._writer is not None:
+            try:
+                self._writer.close()
+            except Exception:
+                logger.exception("video writer close failed for %s", self.path)
+            self._writer = None
+
+
+class RecordingClient:
+    """Thread-safe client that sends frames to a recording daemon over WS.
+
+    Video frames are written to local disk by ``video_frame()`` (one mp4 working
+    file per ``(sid, eid)``); on ``end_episode`` the path is sent over the wire
+    so the daemon can rename it into place — binary never crosses the network.
+    """
+
+    def __init__(
+        self,
+        daemon_url: str,
+        queue_size: int = _DEFAULT_QUEUE_SIZE,
+        video_tmp_dir: str | Path | None = None,
+        video_fps: int = 20,
+    ) -> None:
         self._url = daemon_url
         self._queue: queue.Queue[bytes | None] = queue.Queue(maxsize=queue_size)
         self._drop_count = 0
@@ -43,6 +85,11 @@ class RecordingClient:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
         self._closed = False
+        self._video_tmp_dir = (
+            Path(video_tmp_dir) if video_tmp_dir else Path(tempfile.gettempdir()) / "recording-client"
+        )
+        self._video_fps = video_fps
+        self._video_streams: dict[tuple[str, str], _VideoStream] = {}
         self._start()
 
     # ------------------------------------------------------------------
@@ -100,12 +147,39 @@ class RecordingClient:
         )
 
     def video(self, sid: str, eid: str, working_path: str) -> None:
+        """Low-level: push an existing working-file path. Caller manages the mp4 lifecycle."""
         self._enqueue(
             RecordingMessageType.VIDEO_ARTIFACT,
             {"sid": sid, "eid": eid, "working_path": working_path},
         )
 
+    def video_frame(self, sid: str, eid: str, frame: "np.ndarray") -> None:
+        """Append a frame to this episode's local working mp4 (no wire traffic)."""
+        if self._closed:
+            return
+        key = (sid, eid)
+        stream = self._video_streams.get(key)
+        if stream is None:
+            path = self._video_tmp_dir / f"recording-{sid}-{eid}-{uuid.uuid4().hex[:8]}.mp4"
+            stream = _VideoStream(path, fps=self._video_fps)
+            self._video_streams[key] = stream
+        try:
+            stream.write(frame)
+        except Exception:
+            logger.exception(
+                "video_frame failed for sid=%s eid=%s; dropping further frames for this episode", sid, eid
+            )
+            self._video_streams.pop(key, None)
+
     def end_episode(self, sid: str, eid: str) -> None:
+        """Close the local working video (if any), send VIDEO_ARTIFACT then EPISODE_END."""
+        stream = self._video_streams.pop((sid, eid), None)
+        if stream is not None:
+            stream.close()
+            self._enqueue(
+                RecordingMessageType.VIDEO_ARTIFACT,
+                {"sid": sid, "eid": eid, "working_path": str(stream.path)},
+            )
         self._enqueue(RecordingMessageType.EPISODE_END, {"sid": sid, "eid": eid})
 
     def end_eval(self, eval_id: str) -> None:
