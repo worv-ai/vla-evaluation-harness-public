@@ -109,7 +109,7 @@ def _run_via_docker(
     accept_license: list[str] | None = None,
     recording_daemon_url: str | None = None,
     eval_id: str | None = None,
-    no_recording: bool = False,
+    no_save: bool = False,
 ) -> None:
     """Execute the evaluation inside a Docker container."""
     import shutil
@@ -191,8 +191,8 @@ def _run_via_docker(
         cmd.extend(["--shard-id", str(shard_id), "--num-shards", str(num_shards)])
     if recording_daemon_url:
         cmd.extend(["--recording-daemon-url", recording_daemon_url])
-    if no_recording:
-        cmd.append("--no-recording")
+    if no_save:
+        cmd.append("--no-save")
     if eval_id:
         cmd.extend(["--eval-id", eval_id])
 
@@ -258,14 +258,13 @@ def cmd_run(args: argparse.Namespace) -> None:
 
     recording_daemon_url = getattr(args, "recording_daemon_url", None)
     eval_id = getattr(args, "eval_id", None)
-    no_recording = getattr(args, "no_recording", False)
+    no_save = getattr(args, "no_save", False)
 
-    if not recording_daemon_url and not no_recording:
+    if not recording_daemon_url and not no_save:
         _stderr_console().print(
-            "[red]ERROR: pass --recording-daemon-url ws://host:port to persist results, "
-            "or --no-recording to print an in-memory summary only.[/red]\n"
-            "[red]The recording daemon is the sole writer of per-episode jsonl and "
-            "per-eval aggregate JSON; without it there is nowhere to put results on disk.[/red]"
+            "[red]ERROR: pass --recording-daemon-url ws://host:port to write per-episode "
+            "jsonl + aggregate JSON via the recording daemon, or --no-save to run the eval "
+            "without writing anything to disk (in-memory summary only).[/red]"
         )
         sys.exit(1)
 
@@ -279,7 +278,7 @@ def cmd_run(args: argparse.Namespace) -> None:
             accept_license=getattr(args, "accept_license", None),
             recording_daemon_url=recording_daemon_url,
             eval_id=eval_id,
-            no_recording=no_recording,
+            no_save=no_save,
         )
         return
 
@@ -679,17 +678,18 @@ execution flow:
         default=None,
         help=(
             "WebSocket URL of the recording daemon (e.g. ws://127.0.0.1:9001). Required "
-            "unless --no-recording is given. The daemon is the sole writer of per-episode "
+            "unless --no-save is given. The daemon is the sole writer of per-episode "
             "jsonl and per-eval aggregate JSON (see `vla-eval recording-daemon`)."
         ),
     )
     run_parser.add_argument(
-        "--no-recording",
+        "--no-save",
         action="store_true",
         help=(
-            "Skip the recording daemon entirely. The run prints an in-memory summary to "
-            "stdout and writes nothing to disk. Use this for quick local checks; for any "
-            "persistent results pass --recording-daemon-url instead."
+            "Run without writing anything to disk: no per-episode mp4 / jsonl, "
+            "no aggregate JSON. The eval still executes and prints its summary to "
+            "stdout. Use for quick local checks; for persisted results pass "
+            "--recording-daemon-url instead."
         ),
     )
     run_parser.add_argument(
