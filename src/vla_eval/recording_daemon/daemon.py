@@ -241,7 +241,7 @@ class RecordingDaemon:
     def _flush_bucket(self, bucket: _EpisodeBucket, *, unclosed: bool) -> None:
         try:
             bucket.output_dir.mkdir(parents=True, exist_ok=True)
-            status = bucket.status or ("unknown" if not unclosed else "unknown")
+            status = bucket.status or "unknown"
             stem_ctx = {**bucket.context, "status": status}
             try:
                 stem = bucket.filename_template.format(**stem_ctx)
@@ -299,7 +299,7 @@ class RecordingDaemon:
     @staticmethod
     def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
         tmp = path.with_suffix(path.suffix + ".tmp")
-        tmp.write_text(json.dumps(payload, indent=2, default=str))
+        tmp.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
         os.replace(str(tmp), str(path))
 
     # ------------------------------------------------------------------

@@ -103,11 +103,9 @@ fi
 echo "Sending EVAL_END to recording daemon..."
 python3 -c "
 from vla_eval.recording_daemon.client import RecordingClient
-import time
 c = RecordingClient('$DAEMON_URL')
 c.end_eval('$EVAL_ID')
-time.sleep(1.0)  # let the queue drain over WS
-c.close()
+c.close()  # drains the queue + joins the sender thread (5s timeout)
 "
 echo "Done. Per-episode artefacts and aggregate JSON in $OUTPUT"
 
