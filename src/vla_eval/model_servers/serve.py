@@ -228,7 +228,11 @@ def _make_process_request(model_server: ModelServer) -> Any:
     def process_request(connection: Any, request: Any) -> Any:
         parsed = urlparse(request.path)
         if parsed.path == "/health":
-            return connection.respond(HTTPStatus.OK, '{"status": "ok"}\n')
+            resp = connection.respond(HTTPStatus.OK, '{"status": "ok"}\n')
+            # respond() defaults Content-Type to text/plain; replace with JSON.
+            del resp.headers["Content-Type"]
+            resp.headers["Content-Type"] = "application/json"
+            return resp
         if parsed.path != "/config":
             return None  # proceed with WebSocket handshake
 

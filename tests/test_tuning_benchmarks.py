@@ -90,10 +90,17 @@ async def echo_server_url(free_port: int):
 
 @pytest.mark.anyio
 async def test_health_returns_ok(echo_server_url: str):
-    """GET /health is the readiness probe — 200 with a small JSON body."""
+    """GET /health is the readiness probe — 200 with a JSON body + Content-Type."""
     http_url = echo_server_url.replace("ws://", "http://")
-    data = await asyncio.to_thread(_http_get, f"{http_url}/health")
-    assert data == {"status": "ok"}
+
+    def _probe():
+        with urllib.request.urlopen(f"{http_url}/health", timeout=5) as resp:
+            return resp.status, resp.headers.get("Content-Type"), json.loads(resp.read())
+
+    status, content_type, body = await asyncio.to_thread(_probe)
+    assert status == 200
+    assert content_type == "application/json"
+    assert body == {"status": "ok"}
 
 
 @pytest.mark.anyio
