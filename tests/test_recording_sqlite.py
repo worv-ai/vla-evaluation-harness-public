@@ -89,6 +89,60 @@ def test_store_step_upsert_field_union(tmp_path: Path) -> None:
     assert json.loads(rows[2]) == {"reward": 0.9}
 
 
+def test_step_rows_handle_numpy(tmp_path: Path) -> None:
+    """numpy arrays/scalars must round-trip as JSON arrays/numbers, not as strings.
+
+    Regression: an earlier draft used ``json.dumps(..., default=str)`` which
+    encoded ``np.array([1.5, 2.5])`` as the unparseable string ``"[1.5 2.5]"``.
+    """
+    db = tmp_path / "recording.sqlite"
+    s = RecordingStore(db)
+    try:
+        s.upsert_step_rows(
+            "s",
+            "e",
+            {
+                0: {
+                    "robot_state": np.array([0.1, 0.2, 0.3], dtype=np.float32),
+                    "reward": np.float32(0.75),
+                    "step_count": np.int64(7),
+                },
+            },
+        )
+    finally:
+        s.close()
+
+    conn = sqlite3.connect(str(db))
+    fields = json.loads(conn.execute("SELECT fields FROM step_rows WHERE sid='s' AND eid='e'").fetchone()[0])
+    conn.close()
+    assert fields["robot_state"] == pytest.approx([0.1, 0.2, 0.3])
+    assert fields["reward"] == pytest.approx(0.75)
+    assert fields["step_count"] == 7
+
+
+def test_record_step_does_not_mutate_caller_dict(tmp_path: Path) -> None:
+    """``record_step`` must not pop ``"step"`` from the caller's dict."""
+    db = tmp_path / "recording.sqlite"
+    store = RecordingStore(db)
+    rec = EpisodeRecorder(
+        store=store,
+        sid="s",
+        eid="e",
+        eval_id="ev",
+        output_dir=str(tmp_path),
+        filename_stem="ep_{status}",
+        context={},
+        record_video=False,
+    )
+    try:
+        row = {"step": 0, "reward": 0.5}
+        rec.record_step(row)
+        assert row == {"step": 0, "reward": 0.5}, "caller's dict was mutated"
+    finally:
+        rec.close(status="success", metrics={})
+        store.close()
+
+
 # ---------------------------------------------------------------------------
 # Multi-writer: orchestrator + model server -style fan-in
 # ---------------------------------------------------------------------------

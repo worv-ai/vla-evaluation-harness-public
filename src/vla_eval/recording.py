@@ -15,7 +15,26 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+# ``json_patch`` was added in SQLite 3.38.0 (Feb 2022). Check once at import
+# rather than at first write so old libsqlite3 fails fast with a useful message
+# (Ubuntu 22.04 ships 3.37.2; uv-bundled Python ships a much newer sqlite).
+_MIN_SQLITE = (3, 38, 0)
+if sqlite3.sqlite_version_info < _MIN_SQLITE:
+    raise RuntimeError(
+        f"vla_eval.recording requires SQLite >= {'.'.join(map(str, _MIN_SQLITE))} "
+        f"(json_patch); detected {sqlite3.sqlite_version}. "
+        "Upgrade libsqlite3 or run via uv-bundled Python."
+    )
+
+
 EpisodeStatus = Literal["success", "fail", "error"]
+
+
+def _json_default(obj: Any) -> Any:
+    """JSON fallback that turns numpy arrays/scalars into native Python via ``.tolist()``."""
+    if hasattr(obj, "tolist"):
+        return obj.tolist()
+    return str(obj)
 
 
 SCHEMA_SQL = """
@@ -99,7 +118,7 @@ class RecordingStore:
         with self._conn:
             self._conn.execute(
                 "INSERT OR IGNORE INTO eval_metadata (eval_id, safe_name, metadata) VALUES (?, ?, ?)",
-                (eval_id, safe_name, json.dumps(metadata, default=str)),
+                (eval_id, safe_name, json.dumps(metadata, default=_json_default)),
             )
 
     def upsert_episode_result(
@@ -136,10 +155,10 @@ class RecordingStore:
                     task_name,
                     episode_id,
                     status,
-                    json.dumps(metrics, default=str),
+                    json.dumps(metrics, default=_json_default),
                     steps,
                     elapsed_sec,
-                    json.dumps(context, default=str),
+                    json.dumps(context, default=_json_default),
                     jsonl_path,
                     failure_reason,
                     failure_detail,
@@ -150,7 +169,7 @@ class RecordingStore:
         """Multi-writer field-union UPSERT via ``json_patch`` (per-key last-writer-wins)."""
         if not rows:
             return
-        payload = [(sid, eid, step_id, json.dumps(fields, default=str)) for step_id, fields in rows.items()]
+        payload = [(sid, eid, step_id, json.dumps(fields, default=_json_default)) for step_id, fields in rows.items()]
         with self._conn:
             self._conn.executemany(
                 """
@@ -242,10 +261,10 @@ class EpisodeRecorder:
     def record_step(self, row: dict[str, Any]) -> None:
         if not self._record_step:
             return
-        step_id = int(row.pop("step", self._next_step))
+        step_id = int(row.get("step", self._next_step))
         self._next_step = step_id + 1
         existing = self._steps.setdefault(step_id, {})
-        existing.update(row)
+        existing.update((k, v) for k, v in row.items() if k != "step")
 
     # -- Close (orchestrator) ---------------------------------------------
 
@@ -376,10 +395,10 @@ class StepRecorder:
         self._closed = False
 
     def record(self, row: dict[str, Any]) -> None:
-        step_id = int(row.pop("step", self._next_step))
+        step_id = int(row.get("step", self._next_step))
         self._next_step = step_id + 1
         existing = self._steps.setdefault(step_id, {})
-        existing.update(row)
+        existing.update((k, v) for k, v in row.items() if k != "step")
 
     def close(self) -> None:
         if self._closed:
