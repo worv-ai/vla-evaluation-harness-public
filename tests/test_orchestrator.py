@@ -242,7 +242,7 @@ async def test_orchestrator_records_steps_from_yaml_recording_block(echo_server,
     conn.close()
     assert step_count == 3  # done_at_step=3 → 3 steps recorded
     assert episode_count == 1
-    assert jsonl_path.endswith("/episodes/task_0_ep0000_success.jsonl")
+    assert jsonl_path == "episodes/task_0_ep0000_success.jsonl"
 
 
 @pytest.mark.anyio

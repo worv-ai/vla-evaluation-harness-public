@@ -47,7 +47,7 @@ def merge_db(db_path: Path, output_dir: Path) -> list[dict[str, Any]]:
             eval_id = row["eval_id"]
             safe_name = row["safe_name"]
             metadata = json.loads(row["metadata"])
-            aggregate = _build_aggregate(conn, eval_id, safe_name, metadata)
+            aggregate = _build_aggregate(conn, eval_id, safe_name, metadata, output_dir)
             agg_path = output_dir / f"{safe_name}_aggregate.json"
             _write_json_atomic(agg_path, aggregate)
             logger.info("Wrote aggregate: %s (%d episodes)", agg_path, aggregate.get("num_episodes_total", 0))
@@ -62,6 +62,7 @@ def _build_aggregate(
     eval_id: str,
     safe_name: str,
     metadata: dict[str, Any],
+    output_dir: Path,
 ) -> dict[str, Any]:
     """For one benchmark: walk its episodes, write per-episode jsonl, build aggregate."""
     metric_keys = dict(metadata.get("metric_keys") or {})
@@ -103,7 +104,10 @@ def _build_aggregate(
         episode_count += 1
 
         if er["jsonl_path"]:
-            _write_episode_jsonl(conn, er["sid"], er["eid"], Path(er["jsonl_path"]))
+            jsonl_p = Path(er["jsonl_path"])
+            if not jsonl_p.is_absolute():
+                jsonl_p = output_dir / jsonl_p
+            _write_episode_jsonl(conn, er["sid"], er["eid"], jsonl_p)
 
     tasks_out: list[Any] = []
     for task_name in sorted(tasks_acc):

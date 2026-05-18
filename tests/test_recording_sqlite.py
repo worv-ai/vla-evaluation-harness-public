@@ -120,6 +120,36 @@ def test_step_rows_handle_numpy(tmp_path: Path) -> None:
     assert fields["step_count"] == 7
 
 
+def test_jsonl_path_is_relative_to_db_dir(tmp_path: Path) -> None:
+    """Regression: ``jsonl_path`` must be stored relative to the DB dir so that
+    ``vla-eval merge`` resolves it correctly when the run happened in Docker
+    (output_dir=/workspace/results) but the merge happens on the host
+    (output_dir=/mnt/host/...).
+    """
+    db_dir = tmp_path / "run"
+    episodes_dir = db_dir / "episodes"
+    db_dir.mkdir()
+    episodes_dir.mkdir()
+    store = RecordingStore(db_dir / "recording.sqlite")
+    rec = EpisodeRecorder(
+        store=store,
+        sid="s",
+        eid="e",
+        eval_id="ev",
+        output_dir=episodes_dir,
+        filename_stem="task_{status}",
+        context={},
+        record_video=False,
+    )
+    rec.close(status="success", metrics={"success": True}, task_name="t", episode_id=0, steps=0)
+    store.close()
+
+    conn = sqlite3.connect(str(db_dir / "recording.sqlite"))
+    (jsonl_path,) = conn.execute("SELECT jsonl_path FROM episode_results").fetchone()
+    conn.close()
+    assert jsonl_path == "episodes/task_success.jsonl"
+
+
 def test_record_step_does_not_mutate_caller_dict(tmp_path: Path) -> None:
     """``record_step`` must not pop ``"step"`` from the caller's dict."""
     db = tmp_path / "recording.sqlite"
@@ -282,7 +312,9 @@ def test_episode_recorder_close_writes_steps_and_result(tmp_path: Path) -> None:
 
     conn = sqlite3.connect(str(tmp_path / "recording.sqlite"))
     er = conn.execute("SELECT task_name, status, jsonl_path FROM episode_results").fetchone()
-    assert er == ("demo_task", "success", str(tmp_path / "demo_ep0003_success.jsonl"))
+    # jsonl_path is stored relative to the SQLite directory so vla-eval merge
+    # works regardless of host-vs-container path differences.
+    assert er == ("demo_task", "success", "demo_ep0003_success.jsonl")
     step_rows = [json.loads(f) for (_, f) in conn.execute("SELECT step_id, fields FROM step_rows ORDER BY step_id")]
     assert [r["reward"] for r in step_rows] == [pytest.approx(0.1), pytest.approx(0.2), pytest.approx(0.3)]
     conn.close()

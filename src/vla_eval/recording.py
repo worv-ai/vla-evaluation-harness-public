@@ -298,7 +298,16 @@ class EpisodeRecorder:
         except Exception:
             logger.exception("filename_stem render failed; using fallback name")
             jsonl_name = f"{self._sid}-{self._eid}_{status}.jsonl"
-        jsonl_path = str(self._output_dir / jsonl_name)
+        # Store the path RELATIVE to the SQLite file's directory whenever
+        # possible so that `vla-eval merge` resolves it correctly whether the
+        # run happens inside Docker (where output_dir = /workspace/results)
+        # and merge happens on the host (different absolute prefix).
+        abs_jsonl = (self._output_dir / jsonl_name).resolve()
+        db_dir = Path(self._store.db_path).resolve().parent
+        try:
+            jsonl_path = str(abs_jsonl.relative_to(db_dir))
+        except ValueError:
+            jsonl_path = str(abs_jsonl)
 
         try:
             self._store.upsert_step_rows(self._sid, self._eid, self._steps)
