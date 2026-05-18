@@ -665,8 +665,16 @@ execution flow:
 
   sharding (--shard-id / --num-shards):
     Work items (task × episode pairs) are distributed round-robin across shards.
-    Each shard writes a deterministic output file: {name}_shard{id}of{total}.json.
-    Use 'vla-eval merge' to combine shard results.
+    All shards share a single recording-<eval-id>.sqlite via WAL mode.
+    Pass the same --eval-id to every shard, then run 'vla-eval merge' once at
+    the end (scripts/run_sharded.sh does this for you).
+
+  recording:
+    Step rows + episode results + eval metadata land in
+    <output_dir>/recording-<eval-id>.sqlite. 'vla-eval merge' materialises
+    per-episode jsonl + a BenchmarkResult-shaped aggregate JSON from there.
+    Single-shard runs auto-merge. Use --no-save to skip SQLite entirely
+    (in-memory summary only).
 
   error recovery:
     Episodes are isolated — one failure does not abort the run.
