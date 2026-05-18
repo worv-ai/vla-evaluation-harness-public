@@ -46,8 +46,10 @@ REGISTRY="ghcr.io/allenai/vla-evaluation-harness"
 # Default BASE_IMAGE follows TAG unless explicitly overridden
 BASE_IMAGE="${BASE_IMAGE:-${REGISTRY}/base:${TAG}}"
 
-# Derive harness version via hatch-vcs (PEP 440 compliant)
-HARNESS_VERSION="$(uvx hatch version 2>/dev/null || echo "0.0.0")"
+# Derive harness version via hatch-vcs (PEP 440 compliant).
+# NO_COLOR=1: `uvx hatch version` writes ANSI escapes to stdout even with no TTY,
+# which corrupts the captured value and breaks setuptools-scm parsing in the build.
+HARNESS_VERSION="$(NO_COLOR=1 uvx hatch version 2>/dev/null || echo "0.0.0")"
 
 is_license_accepted() {
   local n="$1"
