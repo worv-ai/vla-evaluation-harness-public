@@ -1,0 +1,86 @@
+# Full RoboMME eval against the dispatcher server (PR #191 architecture).
+# 16 tasks × 10 episodes = 160 total. ``recording`` is per-benchmark
+# (NOT top-level — see bug 9 in PR #191) so each suite ends up with
+# step_rows, episode_results, mp4, and jsonl all wired through SQLite.
+server:
+  url: "ws://DGX-H100-6:8000"
+  timeout: 120.0  # shards drift apart over ep boundaries; widen to cover non-batched serial forwards
+
+docker:
+  image: ghcr.io/allenai/vla-evaluation-harness/robomme:dev-pr191
+  gpus: "all"
+  env:
+    - "NVIDIA_DRIVER_CAPABILITIES=all"
+  volumes:
+    - "/usr/share/vulkan/icd.d:/usr/share/vulkan/icd.d:ro"
+
+output_dir: "./results"
+
+benchmarks:
+  - benchmark: "vla_eval.benchmarks.robomme.benchmark:RoboMMEBenchmark"
+    subname: counting
+    episodes_per_task: 10
+    params:
+      tasks: [BinFill, PickXtimes, SwingXtimes, StopCube]
+      action_space: joint_angle
+      max_steps: 1300
+    recording:
+      output_dir: "./results"
+      record_step: true
+      record_video: true
+      step_fields:
+        - simple_subgoal_online
+        - grounded_subgoal_online
+        - reward
+        - terminated
+
+  - benchmark: "vla_eval.benchmarks.robomme.benchmark:RoboMMEBenchmark"
+    subname: permanence
+    episodes_per_task: 10
+    params:
+      tasks: [VideoUnmask, VideoUnmaskSwap, ButtonUnmask, ButtonUnmaskSwap]
+      action_space: joint_angle
+      max_steps: 1300
+    recording:
+      output_dir: "./results"
+      record_step: true
+      record_video: true
+      step_fields:
+        - simple_subgoal_online
+        - grounded_subgoal_online
+        - reward
+        - terminated
+
+  - benchmark: "vla_eval.benchmarks.robomme.benchmark:RoboMMEBenchmark"
+    subname: reference
+    episodes_per_task: 10
+    params:
+      tasks: [PickHighlight, VideoRepick, VideoPlaceButton, VideoPlaceOrder]
+      action_space: joint_angle
+      max_steps: 1300
+    recording:
+      output_dir: "./results"
+      record_step: true
+      record_video: true
+      step_fields:
+        - simple_subgoal_online
+        - grounded_subgoal_online
+        - reward
+        - terminated
+
+  - benchmark: "vla_eval.benchmarks.robomme.benchmark:RoboMMEBenchmark"
+    subname: imitation
+    episodes_per_task: 10
+    params:
+      tasks: [MoveCube, InsertPeg, PatternLock, RouteStick]
+      action_space: joint_angle
+      max_steps: 1300
+    recording:
+      output_dir: "./results"
+      record_step: true
+      record_video: true
+      step_fields:
+        - simple_subgoal_online
+        - grounded_subgoal_online
+        - reward
+        - terminated
