@@ -153,16 +153,13 @@ class RoboMMEBenchmark(StepBenchmark):
             ``info['simple_subgoal_online']`` (no coords).  Both come from
             ``DemonstrationWrapper`` in the upstream robomme env.  ``"grounded"``
             falls back to simple if grounded is empty.
-        step_fields: Subset of ``_ALL_RECORD_FIELDS`` to write into each step
-            row. ``None`` selects all. Recording itself (output_dir,
-            filename_stem, record_video, etc.) is configured at the
-            ``recording:`` top-level key of the benchmark's YAML — the
-            orchestrator reads that, builds the recorder, and hands it
-            here via :meth:`start_episode`. This benchmark only owns
-            *which fields go into the row*, not *where the row lands*.
+        step_fields: Subset of ``_ALL_RECORD_FIELDS`` to write into each step row.
+            ``None`` selects all.
     """
 
-    _ALL_RECORD_FIELDS = frozenset({"gt_subgoal", "grounded_subgoal", "reward", "robot_state", "terminated"})
+    _ALL_RECORD_FIELDS = frozenset(
+        {"simple_subgoal_online", "grounded_subgoal_online", "reward", "state_fq", "terminated"}
+    )
 
     _rendering_configured: bool = False
 
@@ -434,28 +431,17 @@ class RoboMMEBenchmark(StepBenchmark):
         reward: float,
         terminated: bool,
     ) -> dict[str, Any]:
-        """Build the per-step row to push to the recording store.
-
-        Returns the subset of ``_ALL_RECORD_FIELDS`` selected by ``step_fields``.
-        If the recorder is a :class:`NullEpisodeRecorder`, the orchestrator
-        will drop the row anyway, so we don't gate on that here — keep the
-        method pure.
-        """
-        fields = self._step_fields
-        row: dict[str, Any] = {}
-        if "gt_subgoal" in fields:
-            row["gt_subgoal"] = info.get("simple_subgoal_online", "")
-        if "grounded_subgoal" in fields:
-            row["grounded_subgoal"] = info.get("grounded_subgoal_online", "")
-        if "reward" in fields:
-            row["reward"] = reward
-        if "robot_state" in fields and obs:
+        sources: dict[str, Any] = {
+            "simple_subgoal_online": info.get("simple_subgoal_online", ""),
+            "grounded_subgoal_online": info.get("grounded_subgoal_online", ""),
+            "reward": reward,
+            "terminated": terminated,
+        }
+        if obs:
             state = obs.get("state_fq")
             if state is not None:
-                row["robot_state"] = state.tolist() if hasattr(state, "tolist") else list(state)
-        if "terminated" in fields:
-            row["terminated"] = terminated
-        return row
+                sources["state_fq"] = state.tolist() if hasattr(state, "tolist") else list(state)
+        return {k: sources[k] for k in self._step_fields if k in sources}
 
     def _extract_subgoal(self, info: dict[str, Any]) -> str:
         """Pick the configured subgoal text from the env's info dict.

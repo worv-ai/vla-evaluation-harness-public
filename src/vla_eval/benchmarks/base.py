@@ -69,20 +69,8 @@ class Benchmark(ABC):
 
     @abstractmethod
     async def start_episode(self, task: Task, recorder: EpisodeRecorder | None = None) -> None:
-        """Initialise an episode (env stored internally).
-
-        The orchestrator always passes a recorder — a live
-        :class:`EpisodeRecorder` when recording is enabled, or a
-        :class:`NullEpisodeRecorder` (every method no-ops) when it is not.
-        Subclasses can therefore call ``recorder.record_video(...)`` /
-        ``recorder.record_step(...)`` unconditionally without ``if`` guards.
-
-        Recording policy (where to write, filename templates, video on/off,
-        fps, etc.) is configured in the benchmark's YAML under a top-level
-        ``recording:`` key — the orchestrator reads it and builds the
-        recorder. The benchmark itself does not own that policy; it only
-        decides *what* to record (which obs frame, which step fields).
-        """
+        """Initialise an episode. ``recorder`` is always non-None (Null when recording is off),
+        so subclasses can call ``recorder.record_*`` unconditionally."""
 
     @abstractmethod
     async def apply_action(self, action: Action) -> None:

@@ -1,32 +1,4 @@
-"""Recording: per-episode step rows + episode results + per-eval metadata in SQLite.
-
-Why SQLite?
-
-The harness records two things per episode:
-
-1. **Step rows** — schema-flex JSON documents keyed by ``(sid, eid, step_id)``.
-   Both the orchestrator (running the benchmark sim) and the model server
-   (e.g. reflex-train pushing inference traces) may write rows for the same
-   ``(sid, eid, step_id)`` with **disjoint or overlapping field sets** —
-   the store must field-union them atomically. SQLite + ``json_patch``
-   UPSERT does this in one line; coordinating the same merge across two
-   processes any other way (file locks, append-only logs + post-merge,
-   running a daemon) costs significantly more code and complexity.
-
-2. **Episode results + eval metadata** — small structured records the
-   orchestrator writes once per episode / once per eval. Stable schema,
-   keyed by ``(sid, eid)`` and ``eval_id`` respectively.
-
-A *single* SQLite file per eval (``recording-<eval_id>.sqlite``) lets all
-shards on one host concurrent-write under WAL mode and lets the model
-server (a third process) join in. ``vla-eval merge`` reads the DB after
-the run and emits the human-readable jsonl + aggregate JSON downstream
-tooling expects.
-
-This file is the entire data plane. There is no daemon, no WebSocket, no
-``recording.set_client`` global emitter — external callers receive the
-DB path via the ``EPISODE_START`` payload and open their own connection.
-"""
+"""SQLite-backed per-episode step rows, episode results, and eval metadata."""
 
 from __future__ import annotations
 
@@ -90,22 +62,13 @@ CREATE TABLE IF NOT EXISTS step_rows (
 # ---------------------------------------------------------------------------
 
 
-# Default filename template used when a benchmark's ``recording`` config
-# omits ``filename_stem``. References ``episode_idx`` (orchestrator-injected
-# into every task) and ``status`` (resolved at episode end) — both are always
-# present, so this template renders for any benchmark without configuration.
+# Default when ``recording.filename_stem`` is omitted — uses only keys the
+# orchestrator always injects, so it renders for any benchmark.
 DEFAULT_FILENAME_STEM = "ep{episode_idx:04d}_{status}"
 
 
 def serializable_task_kwargs(task: dict[str, Any]) -> dict[str, Any]:
-    """Subset of *task* safe to use as ``str.format`` kwargs and to copy into
-    aggregate result rows.
-
-    The orchestrator passes the full task dict through to recording; tasks
-    may contain non-JSON-serializable objects (numpy arrays for initial
-    states, callables, etc.). Filter to JSON-friendly scalars so neither
-    filename rendering nor SQLite JSON columns trip over them.
-    """
+    """JSON-friendly subset of *task* — safe for str.format and SQLite JSON columns."""
     return {k: v for k, v in task.items() if isinstance(v, (str, int, float, bool))}
 
 
@@ -120,14 +83,7 @@ def db_path_for_eval(output_dir: str | Path, eval_id: str) -> Path:
 
 
 class RecordingStore:
-    """SQLite connection holder. One per process; multiple stores against the
-    same file are race-safe via WAL.
-
-    Used both by the orchestrator (full recorder lifecycle) and by external
-    callers — model-server code (e.g. reflex-train) receives the DB path via
-    ``EPISODE_START.recording.db_path`` and opens its own ``RecordingStore``
-    to push step rows.
-    """
+    """SQLite connection holder. One per process; same-file concurrency via WAL."""
 
     def __init__(self, db_path: str | Path) -> None:
         self.db_path = Path(db_path)
@@ -139,7 +95,7 @@ class RecordingStore:
         self._conn.close()
 
     def upsert_eval_metadata(self, eval_id: str, safe_name: str, metadata: dict[str, Any]) -> None:
-        """First-writer-wins. Subsequent shards' identical metadata is a no-op."""
+        """First-writer-wins. Repeat calls with the same eval_id are no-ops."""
         with self._conn:
             self._conn.execute(
                 "INSERT OR IGNORE INTO eval_metadata (eval_id, safe_name, metadata) VALUES (?, ?, ?)",
@@ -163,9 +119,7 @@ class RecordingStore:
         failure_reason: str | None,
         failure_detail: str | None,
     ) -> None:
-        """Replace-or-insert. Only the orchestrator writes episode_results,
-        and exactly once per episode, so the REPLACE handles a retry path
-        (e.g. orchestrator crash + restart with same eval_id)."""
+        """Insert-or-replace; safe under orchestrator retry with the same (sid, eid)."""
         with self._conn:
             self._conn.execute(
                 """
@@ -193,15 +147,7 @@ class RecordingStore:
             )
 
     def upsert_step_rows(self, sid: str, eid: str, rows: dict[int, dict[str, Any]]) -> None:
-        """Field-union UPSERT for the multi-writer case.
-
-        Two writers may concurrently insert rows for the same
-        ``(sid, eid, step_id)`` with different field sets — for example the
-        orchestrator-side benchmark records ``{reward, gt_subgoal, robot_state}``
-        while the model-server-side records ``{inference_ms, action_logits}``.
-        ``json_patch`` merges them: keys from the new value overwrite keys with
-        the same name; keys absent from the new value are preserved.
-        """
+        """Multi-writer field-union UPSERT via ``json_patch`` (per-key last-writer-wins)."""
         if not rows:
             return
         payload = [(sid, eid, step_id, json.dumps(fields, default=str)) for step_id, fields in rows.items()]
@@ -223,15 +169,7 @@ class RecordingStore:
 
 
 class EpisodeRecorder:
-    """Per-episode recorder built by the orchestrator and handed to the
-    benchmark via ``start_episode(task, recorder=...)``.
-
-    Benchmarks call ``record_video(frame)`` and ``record_step(row)``. The
-    orchestrator calls ``close(status, metrics, ...)`` exactly once (happy
-    or exception path); ``close`` flushes the in-memory step buffer to
-    SQLite in one transaction, saves the mp4 to its final path, and writes
-    the ``episode_results`` row that ``vla-eval merge`` keys off.
-    """
+    """Per-episode recorder. Benchmark records frames/steps; orchestrator calls close()."""
 
     def __init__(
         self,
@@ -369,16 +307,9 @@ class EpisodeRecorder:
 
 
 class NullEpisodeRecorder(EpisodeRecorder):
-    """No-op recorder. Benchmarks call ``record_video`` / ``record_step``
-    unconditionally; with a Null instance every call returns immediately.
-
-    Used when the orchestrator runs without recording (``--no-save``) or
-    when the benchmark opts out of recording (``get_recording_context``
-    returns ``None``).
-    """
+    """No-op recorder used when recording is off."""
 
     def __init__(self) -> None:  # type: ignore[override]
-        # Skip parent setup entirely — no store, no video, no buffer.
         self._closed = True
         self._video = None
         self._steps = {}
@@ -430,20 +361,10 @@ class NullEpisodeRecorder(EpisodeRecorder):
 
 
 class StepRecorder:
-    """Per-episode step-row writer for external callers.
+    """Per-episode step-row writer for external callers (e.g. model server).
 
-    Use case: model server code (e.g. reflex-train) wants to record per-step
-    inference traces alongside the benchmark's per-step records. The harness
-    forwards ``(sid, eid, eval_id, db_path)`` in the ``EPISODE_START`` WS
-    payload; the model server opens a :class:`StepRecorder`, accumulates
-    rows, and ``close()`` flushes them to the same SQLite the harness owns.
-
-    Field-union semantics: if the model server records
-    ``{"inference_ms": 12.3, "action_logits": [...]}`` for ``step_id=42``
-    and the benchmark records ``{"reward": 0.5, "robot_state": [...]}`` for
-    the same step, the final row contains all four fields. ``json_patch``
-    UPSERT inside the store handles this atomically regardless of which
-    process commits first.
+    Open against the ``db_path`` forwarded in ``EPISODE_START.recording``;
+    rows are field-unioned with the harness's rows via ``json_patch``.
     """
 
     def __init__(self, db_path: str | Path, sid: str, eid: str) -> None:

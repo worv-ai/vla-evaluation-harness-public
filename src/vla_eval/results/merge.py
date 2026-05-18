@@ -1,22 +1,4 @@
-"""Materialize SQLite recording → human-readable jsonl + aggregate JSON.
-
-``vla-eval merge`` runs this. The orchestrator writes raw rows to
-``<output_dir>/recording-<eval_id>.sqlite`` during the run; this module
-reads the DB and produces:
-
-- One ``<filename_stem>.jsonl`` per episode (step rows, ordered by
-  step_id), under the directory the benchmark declared in its
-  ``RecordingContext.output_dir``.
-- One ``<safe_name>_aggregate.json`` per benchmark, in
-  ``<output_dir>``, with the ``BenchmarkResult`` shape downstream tooling
-  (leaderboard, manual inspection) expects.
-
-This is the merge boundary. Multi-shard runs all hit one SQLite, so the
-output is identical regardless of how many shards produced the input.
-The only path that needs ``vla-eval merge`` invoked manually is sharded
-mode — the launcher script (``run_sharded.sh``) does it automatically.
-Single-shard ``vla-eval run`` invokes it inline.
-"""
+"""Materialize the SQLite recording → per-episode jsonl + per-benchmark aggregate JSON."""
 
 from __future__ import annotations
 

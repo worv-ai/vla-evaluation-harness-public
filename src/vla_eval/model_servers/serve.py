@@ -119,10 +119,8 @@ async def _handle_connection(
                 continue
 
             elif msg.type == MessageType.EPISODE_START:
-                # Harness-supplied (sid, eid, eval_id, db_path) in the payload's
-                # `recording` field so model-server-side code (e.g. reflex-train)
-                # can attach a StepRecorder against the same SQLite the harness
-                # uses, with field-union semantics on shared step_ids.
+                # `recording` carries (sid, eid, eval_id, db_path) so model-server-side
+                # code can open a StepRecorder against the same SQLite the harness uses.
                 rec = msg.payload.get("recording") or {}
                 effective_sid = rec.get("sid") or session_id
                 episode_id = rec.get("eid") or str(uuid.uuid4())

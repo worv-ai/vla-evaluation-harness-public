@@ -1,18 +1,4 @@
-"""Orchestrator: coordinates benchmark evaluation runs.
-
-Recording flow (only when ``--no-save`` is *not* set):
-
-- One SQLite file per eval at ``<output_dir>/recording-<eval_id>.sqlite``.
-  Shards (same eval_id) and the model server all attach to it.
-- Each episode gets an :class:`~vla_eval.recording.EpisodeRecorder` built
-  by the orchestrator and handed to the benchmark via
-  ``start_episode(task, recorder=...)``. The recorder buffers per-episode
-  step rows in memory and flushes them in a single transaction at
-  ``close()``; the episode_result row goes in the same flush.
-- After the run finishes, ``vla-eval merge`` reads the SQLite and emits
-  the human-readable per-episode jsonl files and the per-benchmark
-  aggregate JSON. Single-shard runs trigger the merge inline.
-"""
+"""Orchestrator: coordinates benchmark evaluation runs."""
 
 from __future__ import annotations
 
@@ -73,12 +59,6 @@ class Orchestrator:
           reconnect, continue.
         - Other exceptions: mark episode failed, continue.
 
-    Results:
-        With recording enabled (default), an SQLite file accumulates step
-        rows + episode_results + eval_metadata; ``vla-eval merge`` later
-        renders the human-readable jsonl + aggregate JSON. With
-        ``no_save=True``, the run is in-memory only and the return value
-        is the only output.
     """
 
     def __init__(
@@ -133,7 +113,7 @@ class Orchestrator:
         return all_results
 
     def _update_progress(self, completed: int, total: int, errors: int) -> None:
-        """Atomic per-shard progress file for live monitoring. Skips no-op writes."""
+        """Atomic per-shard progress file for live monitoring; skips no-op writes."""
         if self._progress_path is None:
             return
         snap = (completed, total, errors)
@@ -238,7 +218,6 @@ class Orchestrator:
         total_items = len(work_items)
         self._update_progress(0, total_items, 0)
 
-        # Per-benchmark eval id (one SQLite, but tagged per benchmark inside).
         bench_eval_id = f"{self._eval_id}-{safe_name}"
         bench_metadata = {
             "benchmark": name,
@@ -251,10 +230,6 @@ class Orchestrator:
         if self._store is not None:
             self._store.upsert_eval_metadata(bench_eval_id, safe_name, bench_metadata)
 
-        # Fail-fast template validation: render the configured filename_stem
-        # against the first work item before any episode runs, so a typo in
-        # the YAML (`{env_id}` vs benchmark's real key) blows up at startup
-        # rather than 1000 episodes in.
         rec_cfg = cfg.recording if self._store is not None else None
         if rec_cfg and work_items:
             self._validate_filename_stem(rec_cfg, work_items[0][0])
@@ -388,12 +363,7 @@ class Orchestrator:
         task: dict[str, Any],
         bench_eval_id: str,
     ) -> EpisodeRecorder:
-        """Construct the per-episode recorder from the benchmark's YAML
-        ``recording:`` block + the current task dict.
-
-        Returns :class:`NullEpisodeRecorder` when recording is off
-        (``--no-save``, no ``recording:`` block in the config).
-        """
+        """Build per-episode recorder from YAML config + task dict, or Null if recording is off."""
         if self._store is None or rec_cfg is None:
             return NullEpisodeRecorder()
         eid = str(uuid.uuid4())
@@ -411,12 +381,9 @@ class Orchestrator:
         )
 
     def _validate_filename_stem(self, rec_cfg: dict[str, Any], first_task: dict[str, Any]) -> None:
-        """Render the configured ``filename_stem`` once against the first task
-        + a fake status, so a missing key fails at startup rather than at the
-        end of the first episode (after benchmark setup, env reset, etc.)."""
+        """Dry-render the template so YAML key typos fail before any episode runs."""
         stem = rec_cfg.get("filename_stem") or DEFAULT_FILENAME_STEM
-        # episode_idx is injected per-loop-iteration; include it here so a
-        # template that references it doesn't trip the dry run.
+        # episode_idx is injected per-iteration by the run loop, not present on first_task itself.
         probe = {**serializable_task_kwargs(first_task), "episode_idx": 0, "status": "success"}
         try:
             stem.format(**probe)
@@ -437,13 +404,7 @@ class Orchestrator:
         partial: bool,
         server_info: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Print summary and return the in-memory benchmark result.
-
-        ``vla-eval merge`` reads the SQLite written during the run to emit
-        the on-disk per-episode jsonl + aggregate JSON; this method just
-        gives the caller the in-memory view for convenience and progress
-        cleanup.
-        """
+        """Print summary and return the in-memory benchmark result for the caller."""
         collector.print_summary()
 
         output: dict[str, Any] = {**collector.get_benchmark_result(config=cfg.to_dict())}
