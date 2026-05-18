@@ -137,6 +137,31 @@ def _run_via_docker(
 
     docker_config = dict(config)
     docker_config["output_dir"] = "/workspace/results"
+    # Also remap any per-benchmark `recording.output_dir` that points under the
+    # host results_dir — otherwise the recorder writes mp4/jsonl inside the
+    # container at the host path and they vanish when the container exits.
+    benchmarks = docker_config.get("benchmarks") or []
+    remapped_benchmarks = []
+    for entry in benchmarks:
+        rec = (entry or {}).get("recording")
+        if isinstance(rec, dict) and rec.get("output_dir"):
+            host_path = Path(rec["output_dir"]).resolve()
+            try:
+                rel = host_path.relative_to(results_dir)
+                new_entry = dict(entry)
+                new_rec = dict(rec)
+                new_rec["output_dir"] = str(Path("/workspace/results") / rel)
+                new_entry["recording"] = new_rec
+                remapped_benchmarks.append(new_entry)
+                continue
+            except ValueError:
+                logger.warning(
+                    "recording.output_dir=%s is outside output_dir=%s; container writes will not persist on the host",
+                    host_path,
+                    results_dir,
+                )
+        remapped_benchmarks.append(entry)
+    docker_config["benchmarks"] = remapped_benchmarks
     docker_config_fd, docker_config_path = tempfile.mkstemp(suffix=".yaml", prefix="vla-eval-docker-")
     try:
         with os.fdopen(docker_config_fd, "w") as f:
