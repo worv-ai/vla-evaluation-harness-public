@@ -20,7 +20,7 @@ from vla_eval.specs import DimSpec
 
 import numpy as np
 
-from vla_eval.recording import EpisodeRecorder, NullEpisodeRecorder, RecordingContext
+from vla_eval.recording import EpisodeRecorder, NullEpisodeRecorder
 from vla_eval.types import Action, EpisodeResult, Observation, Task
 
 
@@ -71,12 +71,17 @@ class Benchmark(ABC):
     async def start_episode(self, task: Task, recorder: EpisodeRecorder | None = None) -> None:
         """Initialise an episode (env stored internally).
 
-        When recording is enabled, the orchestrator passes a live
-        :class:`EpisodeRecorder` here so the benchmark can capture video
-        frames and step rows during ``reset`` / ``step``. When recording
-        is disabled the orchestrator passes a :class:`NullEpisodeRecorder`,
-        so subclasses can call ``recorder.record_video(...)`` /
-        ``recorder.record_step(...)`` unconditionally without guards.
+        The orchestrator always passes a recorder — a live
+        :class:`EpisodeRecorder` when recording is enabled, or a
+        :class:`NullEpisodeRecorder` (every method no-ops) when it is not.
+        Subclasses can therefore call ``recorder.record_video(...)`` /
+        ``recorder.record_step(...)`` unconditionally without ``if`` guards.
+
+        Recording policy (where to write, filename templates, video on/off,
+        fps, etc.) is configured in the benchmark's YAML under a top-level
+        ``recording:`` key — the orchestrator reads it and builds the
+        recorder. The benchmark itself does not own that policy; it only
+        decides *what* to record (which obs frame, which step fields).
         """
 
     @abstractmethod
@@ -146,21 +151,6 @@ class Benchmark(ABC):
 
     def render(self) -> np.ndarray | None:
         """Render current env state as image. Optional override."""
-        return None
-
-    def get_recording_context(self, task: Task) -> RecordingContext | None:
-        """Per-episode recording metadata for the orchestrator, or ``None`` to opt out.
-
-        Override when the benchmark supports per-episode mp4 / jsonl
-        recording. Return a :class:`RecordingContext` describing where
-        artefacts land and how filenames are templated; the orchestrator
-        builds an :class:`EpisodeRecorder` from it and passes the recorder
-        back to ``start_episode``.
-
-        Default returns ``None`` — the orchestrator hands a
-        :class:`NullEpisodeRecorder` to ``start_episode`` and the benchmark
-        sees no-ops on every recorder call.
-        """
         return None
 
 

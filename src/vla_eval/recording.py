@@ -33,7 +33,6 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -87,35 +86,27 @@ CREATE TABLE IF NOT EXISTS step_rows (
 
 
 # ---------------------------------------------------------------------------
-# RecordingContext — benchmark tells orchestrator how to name files
+# Recording config helpers
 # ---------------------------------------------------------------------------
 
 
-@dataclass
-class RecordingContext:
-    """Per-episode metadata the benchmark hands the orchestrator.
+# Default filename template used when a benchmark's ``recording`` config
+# omits ``filename_stem``. References ``episode_idx`` (orchestrator-injected
+# into every task) and ``status`` (resolved at episode end) — both are always
+# present, so this template renders for any benchmark without configuration.
+DEFAULT_FILENAME_STEM = "ep{episode_idx:04d}_{status}"
 
-    The orchestrator combines this with ``(sid, eid, eval_id, store)`` to
-    build the :class:`EpisodeRecorder` passed back to ``start_episode``.
 
-    Attributes:
-        output_dir: Where the final mp4 and jsonl land (after ``vla-eval merge``).
-        filename_stem: ``str.format`` template that must include ``{status}``.
-            Keys from ``context`` are also substituted. Example:
-            ``"{env_id}_ep{episode_idx:04d}_{status}"``.
-        context: Task identifiers consumed by ``filename_stem`` and copied
-            into each aggregate result row.
-        record_video: Whether to write a per-episode mp4.
-        record_step: Whether to push per-step rows to the recording DB.
-        video_fps: Frame rate for the mp4 writer.
+def serializable_task_kwargs(task: dict[str, Any]) -> dict[str, Any]:
+    """Subset of *task* safe to use as ``str.format`` kwargs and to copy into
+    aggregate result rows.
+
+    The orchestrator passes the full task dict through to recording; tasks
+    may contain non-JSON-serializable objects (numpy arrays for initial
+    states, callables, etc.). Filter to JSON-friendly scalars so neither
+    filename rendering nor SQLite JSON columns trip over them.
     """
-
-    output_dir: str | Path
-    filename_stem: str
-    context: dict[str, Any] = field(default_factory=dict)
-    record_video: bool = True
-    record_step: bool = True
-    video_fps: int = 20
+    return {k: v for k, v in task.items() if isinstance(v, (str, int, float, bool))}
 
 
 # ---------------------------------------------------------------------------

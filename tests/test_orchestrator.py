@@ -152,7 +152,8 @@ async def test_orchestrator_sharding_splits_work(echo_server, tmp_path):
 @pytest.mark.anyio
 async def test_orchestrator_writes_sqlite_when_recording(echo_server, tmp_path):
     """When ``no_save=False``, the orchestrator opens an SQLite at the expected path
-    and writes per-eval metadata even when the benchmark opts out of recording."""
+    and writes per-eval metadata regardless of whether the benchmark config has a
+    ``recording:`` block."""
     config = {
         "server": {"url": echo_server},
         "output_dir": str(tmp_path),
@@ -184,3 +185,93 @@ async def test_orchestrator_writes_sqlite_when_recording(echo_server, tmp_path):
     assert len(eval_rows) == 1
     assert eval_rows[0][0] == "ev-test-sqlite_test"
     assert eval_rows[0][1] == "sqlite_test"
+
+
+@pytest.mark.anyio
+async def test_orchestrator_records_steps_from_yaml_recording_block(echo_server, tmp_path):
+    """The ``recording:`` block in the benchmark config alone is enough to enable
+    recording — the benchmark itself doesn't need a ``get_recording_context`` (it
+    has been removed). The orchestrator builds the recorder, the benchmark just
+    calls ``recorder.record_*``."""
+
+    class StepRecordingStub(StubBenchmark):
+        """StubBenchmark that pushes one step row per env step."""
+
+        def step(self, action):
+            res = super().step(action)
+            self._recorder.record_step({"reward": float(self._step_count)})
+            return res
+
+    config = {
+        "server": {"url": echo_server},
+        "output_dir": str(tmp_path),
+        "benchmarks": [
+            {
+                "benchmark": "tests.conftest:StubBenchmark",
+                "name": "rec_test",
+                "episodes_per_task": 1,
+                "max_steps": 50,
+                "params": {"done_at_step": 3, "num_tasks": 1},
+                "recording": {
+                    "output_dir": str(tmp_path / "episodes"),
+                    "filename_stem": "{name}_ep{episode_idx:04d}_{status}",
+                    "record_video": False,  # StubBenchmark has no video
+                    "record_step": True,
+                },
+            }
+        ],
+    }
+
+    with patch(
+        "vla_eval.orchestrator.resolve_import_string",
+        return_value=StepRecordingStub,
+    ):
+        orch = Orchestrator(config, eval_id="ev-rec", no_save=False)
+        await orch.run()
+
+    import sqlite3
+
+    db = tmp_path / "recording-ev-rec.sqlite"
+    assert db.exists()
+    conn = sqlite3.connect(str(db))
+    # Steps recorded via the orchestrator-built recorder.
+    step_count = conn.execute("SELECT COUNT(*) FROM step_rows").fetchone()[0]
+    episode_count = conn.execute("SELECT COUNT(*) FROM episode_results").fetchone()[0]
+    # jsonl_path uses the template configured in YAML.
+    jsonl_path = conn.execute("SELECT jsonl_path FROM episode_results").fetchone()[0]
+    conn.close()
+    assert step_count == 3  # done_at_step=3 → 3 steps recorded
+    assert episode_count == 1
+    assert jsonl_path.endswith("/episodes/task_0_ep0000_success.jsonl")
+
+
+@pytest.mark.anyio
+async def test_orchestrator_fails_fast_on_bad_filename_template(echo_server, tmp_path):
+    """A ``filename_stem`` that references a key the task dict doesn't have must
+    fail at startup, not at the end of the first episode."""
+    config = {
+        "server": {"url": echo_server},
+        "output_dir": str(tmp_path),
+        "benchmarks": [
+            {
+                "benchmark": "tests.conftest:StubBenchmark",
+                "name": "bad_template",
+                "episodes_per_task": 1,
+                "max_steps": 50,
+                "params": {"done_at_step": 1, "num_tasks": 1},
+                "recording": {
+                    "output_dir": str(tmp_path / "episodes"),
+                    "filename_stem": "{does_not_exist}_{status}",
+                    "record_video": False,
+                },
+            }
+        ],
+    }
+
+    with patch(
+        "vla_eval.orchestrator.resolve_import_string",
+        return_value=StubBenchmark,
+    ):
+        orch = Orchestrator(config, eval_id="ev-bad", no_save=False)
+        with pytest.raises(ValueError, match="filename_stem"):
+            await orch.run()

@@ -32,12 +32,13 @@ from vla_eval import __version__
 from vla_eval.config import EvalConfig, ServerConfig
 from vla_eval.connection import Connection
 from vla_eval.recording import (
+    DEFAULT_FILENAME_STEM,
     EpisodeRecorder,
     EpisodeStatus,
     NullEpisodeRecorder,
-    RecordingContext,
     RecordingStore,
     db_path_for_eval,
+    serializable_task_kwargs,
 )
 from vla_eval.registry import resolve_import_string
 from vla_eval.specs import DimSpec, check_specs
@@ -250,6 +251,14 @@ class Orchestrator:
         if self._store is not None:
             self._store.upsert_eval_metadata(bench_eval_id, safe_name, bench_metadata)
 
+        # Fail-fast template validation: render the configured filename_stem
+        # against the first work item before any episode runs, so a typo in
+        # the YAML (`{env_id}` vs benchmark's real key) blows up at startup
+        # rather than 1000 episodes in.
+        rec_cfg = cfg.recording if self._store is not None else None
+        if rec_cfg and work_items:
+            self._validate_filename_stem(rec_cfg, work_items[0][0])
+
         def record_failure(reason: str, detail: str) -> dict[str, Any]:
             fail: dict[str, Any] = {
                 "episode_id": ep,
@@ -283,7 +292,7 @@ class Orchestrator:
                     if cfg.throughput_mode and max_ep is not None:
                         episode_idx = ep % max_ep
                     task = {**task, "episode_idx": episode_idx}
-                    recorder = self._build_recorder(benchmark, task, bench_eval_id)
+                    recorder = self._build_recorder(cfg.recording, task, bench_eval_id)
                     raw = await runner.run_episode(benchmark, task, conn, max_steps=max_steps, recorder=recorder)
                     raw["episode_id"] = ep
                     ep_result = cast(EpisodeResult, raw)
@@ -375,24 +384,17 @@ class Orchestrator:
 
     def _build_recorder(
         self,
-        benchmark: Any,
+        rec_cfg: dict[str, Any] | None,
         task: dict[str, Any],
         bench_eval_id: str,
     ) -> EpisodeRecorder:
-        if self._store is None:
-            return NullEpisodeRecorder()
-        try:
-            ctx = benchmark.get_recording_context(task)
-        except Exception:
-            logger.exception("benchmark.get_recording_context raised; skipping recording for this episode")
-            return NullEpisodeRecorder()
-        if ctx is None:
-            return NullEpisodeRecorder()
-        if not isinstance(ctx, RecordingContext):
-            logger.warning(
-                "get_recording_context returned %s, expected RecordingContext — skipping",
-                type(ctx).__name__,
-            )
+        """Construct the per-episode recorder from the benchmark's YAML
+        ``recording:`` block + the current task dict.
+
+        Returns :class:`NullEpisodeRecorder` when recording is off
+        (``--no-save``, no ``recording:`` block in the config).
+        """
+        if self._store is None or rec_cfg is None:
             return NullEpisodeRecorder()
         eid = str(uuid.uuid4())
         return EpisodeRecorder(
@@ -400,13 +402,31 @@ class Orchestrator:
             sid=self._sid,
             eid=eid,
             eval_id=bench_eval_id,
-            output_dir=ctx.output_dir,
-            filename_stem=ctx.filename_stem,
-            context=ctx.context,
-            record_video=ctx.record_video,
-            record_step=ctx.record_step,
-            video_fps=ctx.video_fps,
+            output_dir=rec_cfg.get("output_dir") or str(self._output_dir / "episodes"),
+            filename_stem=rec_cfg.get("filename_stem") or DEFAULT_FILENAME_STEM,
+            context=serializable_task_kwargs(task),
+            record_video=bool(rec_cfg.get("record_video", True)),
+            record_step=bool(rec_cfg.get("record_step", True)),
+            video_fps=int(rec_cfg.get("video_fps", 20)),
         )
+
+    def _validate_filename_stem(self, rec_cfg: dict[str, Any], first_task: dict[str, Any]) -> None:
+        """Render the configured ``filename_stem`` once against the first task
+        + a fake status, so a missing key fails at startup rather than at the
+        end of the first episode (after benchmark setup, env reset, etc.)."""
+        stem = rec_cfg.get("filename_stem") or DEFAULT_FILENAME_STEM
+        # episode_idx is injected per-loop-iteration; include it here so a
+        # template that references it doesn't trip the dry run.
+        probe = {**serializable_task_kwargs(first_task), "episode_idx": 0, "status": "success"}
+        try:
+            stem.format(**probe)
+        except KeyError as exc:
+            raise ValueError(
+                f"recording.filename_stem={stem!r} references key {exc} "
+                f"that's not in the task dict (available: {sorted(probe)})."
+            ) from None
+        except (IndexError, ValueError) as exc:
+            raise ValueError(f"recording.filename_stem={stem!r} is malformed: {exc}") from None
 
     def _finalize_benchmark(
         self,

@@ -16,9 +16,7 @@ from typing import Any, Literal
 
 import numpy as np
 
-from dataclasses import dataclass
 from vla_eval.benchmarks.base import StepBenchmark, StepResult
-from vla_eval.recording import RecordingContext
 from vla_eval.specs import IMAGE_RGB, LANGUAGE, RAW, DimSpec
 from vla_eval.types import Action, EpisodeResult, Observation, Task
 
@@ -102,22 +100,6 @@ def _resolve_lavapipe_icd() -> str | None:
     return None
 
 
-@dataclass(frozen=True)
-class _RoboMMERecCfg:
-    """Parsed/validated recording config for :class:`RoboMMEBenchmark`.
-
-    Holds only what the benchmark uses internally. The orchestrator builds a
-    full :class:`~vla_eval.recording.RecordingContext` from this plus the
-    current task via :meth:`RoboMMEBenchmark.get_recording_context`.
-    """
-
-    output_dir: str
-    record_video: bool
-    record_step: bool
-    video_fps: int
-    fields: frozenset[str]
-
-
 _DEFAULT_TASK_LIST = [
     "PickXtimes",
     "StopCube",
@@ -171,36 +153,18 @@ class RoboMMEBenchmark(StepBenchmark):
             ``info['simple_subgoal_online']`` (no coords).  Both come from
             ``DemonstrationWrapper`` in the upstream robomme env.  ``"grounded"``
             falls back to simple if grounded is empty.
-        recording: Dict that enables per-episode recording (or ``None`` to
-            disable). Keys (all optional): ``output_dir``, ``record_video``
-            (default True), ``record_step`` (default True), ``step_fields``
-            (subset of ``_ALL_RECORD_FIELDS``; default all), ``video_fps``
-            (default 20). When recording is active, the orchestrator uses
-            ``get_recording_context`` to build an
-            :class:`~vla_eval.recording.EpisodeRecorder` and hands it back
-            via ``start_episode``.
+        step_fields: Subset of ``_ALL_RECORD_FIELDS`` to write into each step
+            row. ``None`` selects all. Recording itself (output_dir,
+            filename_stem, record_video, etc.) is configured at the
+            ``recording:`` top-level key of the benchmark's YAML — the
+            orchestrator reads that, builds the recorder, and hands it
+            here via :meth:`start_episode`. This benchmark only owns
+            *which fields go into the row*, not *where the row lands*.
     """
 
     _ALL_RECORD_FIELDS = frozenset({"gt_subgoal", "grounded_subgoal", "reward", "robot_state", "terminated"})
-    _RECORD_FILENAME_STEM = "{env_id}_ep{episode_idx:04d}_{status}"
 
     _rendering_configured: bool = False
-
-    @staticmethod
-    def _parse_rec(recording: dict[str, Any] | None) -> "_RoboMMERecCfg | None":
-        if not recording:
-            return None
-        step_fields = recording.get("step_fields") or []
-        unknown = set(step_fields) - RoboMMEBenchmark._ALL_RECORD_FIELDS
-        if unknown:
-            raise ValueError(f"Unknown step_fields: {unknown}. Valid: {sorted(RoboMMEBenchmark._ALL_RECORD_FIELDS)}")
-        return _RoboMMERecCfg(
-            output_dir=str(recording.get("output_dir", "/workspace/results/episodes")),
-            record_video=bool(recording.get("record_video", True)),
-            record_step=bool(recording.get("record_step", True)),
-            video_fps=int(recording.get("video_fps", 20)),
-            fields=frozenset(step_fields) if step_fields else RoboMMEBenchmark._ALL_RECORD_FIELDS,
-        )
 
     def __init__(
         self,
@@ -213,7 +177,7 @@ class RoboMMEBenchmark(StepBenchmark):
         send_video_history: bool = True,
         send_subgoal: bool = False,
         subgoal_mode: Literal["grounded", "simple"] = "grounded",
-        recording: dict[str, Any] | None = None,
+        step_fields: list[str] | None = None,
     ) -> None:
         super().__init__()
         if subgoal_mode not in ("grounded", "simple"):
@@ -227,7 +191,17 @@ class RoboMMEBenchmark(StepBenchmark):
         self.send_video_history = send_video_history
         self.send_subgoal = send_subgoal
         self.subgoal_mode = subgoal_mode
-        self._rec_cfg = self._parse_rec(recording)
+
+        # Validate the requested field subset at construction time so a typo
+        # crashes the run before the first episode rather than silently
+        # dropping rows.
+        if step_fields is None:
+            self._step_fields: frozenset[str] = self._ALL_RECORD_FIELDS
+        else:
+            unknown = set(step_fields) - self._ALL_RECORD_FIELDS
+            if unknown:
+                raise ValueError(f"Unknown step_fields: {sorted(unknown)}. Valid: {sorted(self._ALL_RECORD_FIELDS)}")
+            self._step_fields = frozenset(step_fields) if step_fields else self._ALL_RECORD_FIELDS
 
         self._env: Any = None
         self._task: Task | None = None
@@ -462,12 +436,12 @@ class RoboMMEBenchmark(StepBenchmark):
     ) -> dict[str, Any]:
         """Build the per-step row to push to the recording store.
 
-        Returns an empty dict (which the recorder treats as a no-op) when
-        recording is disabled.
+        Returns the subset of ``_ALL_RECORD_FIELDS`` selected by ``step_fields``.
+        If the recorder is a :class:`NullEpisodeRecorder`, the orchestrator
+        will drop the row anyway, so we don't gate on that here — keep the
+        method pure.
         """
-        if self._rec_cfg is None:
-            return {}
-        fields = self._rec_cfg.fields
+        fields = self._step_fields
         row: dict[str, Any] = {}
         if "gt_subgoal" in fields:
             row["gt_subgoal"] = info.get("simple_subgoal_online", "")
@@ -545,18 +519,6 @@ class RoboMMEBenchmark(StepBenchmark):
     def get_step_result(self, step_result: StepResult) -> EpisodeResult:
         success = step_result.info.get("status") == "success"
         return {"success": success}
-
-    def get_recording_context(self, task: Task) -> RecordingContext | None:
-        if self._rec_cfg is None:
-            return None
-        return RecordingContext(
-            output_dir=self._rec_cfg.output_dir,
-            filename_stem=self._RECORD_FILENAME_STEM,
-            context={"env_id": task["env_id"], "episode_idx": int(task.get("episode_idx", 0))},
-            record_video=self._rec_cfg.record_video,
-            record_step=self._rec_cfg.record_step,
-            video_fps=self._rec_cfg.video_fps,
-        )
 
     def get_metadata(self) -> dict[str, Any]:
         return {"max_steps": self.max_steps, "action_space": self.action_space}
