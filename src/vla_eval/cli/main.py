@@ -184,6 +184,15 @@ def _run_via_docker(
     ]
     # fmt: on
 
+    # Opt-in: run the container as a non-root host user so DB / mp4 / jsonl
+    # files in results_dir are owned by that user. Required when an
+    # external process (e.g. a model server) writes into the same SQLite
+    # via field-union upsert; without this the file is root-owned mode
+    # 644 and the external writer sees "readonly database".
+    docker_user_env = os.environ.get("VLA_EVAL_DOCKER_USER")
+    if docker_user_env:
+        cmd.extend(["--user", docker_user_env])
+
     # Forward stdin/TTY for in-container licence prompts.
     cmd.extend(tty_docker_flags())
 
