@@ -75,10 +75,6 @@ Two terminals: one for the model server (GPU), one for the benchmark client.
 # Terminal 1 — model server (runs on host with GPU)
 vla-eval serve --config configs/model_servers/db_cogact/libero.yaml
 
-# Wait for readiness — the server loads weights inside __init__ and only then
-# starts listening, so `GET /config` returning HTTP 200 is the ready signal:
-until curl -fsS -o /dev/null http://localhost:8000/config; do sleep 5; done
-
 # Terminal 2 — run evaluation (benchmark runs in Docker by default)
 vla-eval run --config configs/benchmarks/libero/smoke_test.yaml
 ```
