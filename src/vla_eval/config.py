@@ -104,7 +104,7 @@ class DockerConfig:
             env=data.get("env", []),
             cpus=data.get("cpus"),
             gpus=data.get("gpus"),
-            user=data.get("user", "host"),
+            user=data.get("user") or "host",
         )
 
     def to_dict(self) -> dict[str, Any]:

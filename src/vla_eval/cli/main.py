@@ -188,10 +188,21 @@ def _run_via_docker(
     # output_dir are owned by the invoking user. External writers to the
     # same SQLite (e.g. a model server running on the host) would otherwise
     # see a root-owned file and fail with "readonly database".
-    if docker_cfg.user == "host":
+    #
+    # ``user`` semantics (see DockerConfig.user docstring):
+    #   "host"        → --user $(id -u):$(id -g) — default mapping
+    #   "<uid>:<gid>" → --user <uid>:<gid> — explicit pin (image-required uid)
+    #   "root"        → no --user; container starts as its default user (root)
+    user_str = docker_cfg.user or "host"
+    if user_str == "host":
+        if not hasattr(os, "getuid"):  # non-POSIX (Windows) — caller must pin explicitly
+            _stderr_console().print(
+                "[red]ERROR: docker.user='host' requires a POSIX host; set user: '<uid>:<gid>' explicitly.[/red]"
+            )
+            sys.exit(1)
         cmd.extend(["--user", f"{os.getuid()}:{os.getgid()}"])
-    elif docker_cfg.user not in ("", "root"):
-        cmd.extend(["--user", docker_cfg.user])
+    elif user_str != "root":
+        cmd.extend(["--user", user_str])
 
     # Forward the host-side results_dir so the orchestrator inside the
     # container can advertise a host-resolvable db_path to external writers.

@@ -199,3 +199,19 @@ def test_docker_config_user_root_opt_out():
 
     cfg = DockerConfig.from_dict({"image": "x", "user": "root"})
     assert cfg.user == "root"
+
+
+def test_docker_config_user_null_yaml_falls_back_to_host():
+    """``user: null`` in YAML must not slip through as None — fall back to 'host'."""
+    from vla_eval.config import DockerConfig
+
+    cfg = DockerConfig.from_dict({"image": "x", "user": None})
+    assert cfg.user == "host"
+
+
+def test_docker_config_user_empty_string_falls_back_to_host():
+    """Empty string ``user: ''`` also falls back to 'host' (defensive)."""
+    from vla_eval.config import DockerConfig
+
+    cfg = DockerConfig.from_dict({"image": "x", "user": ""})
+    assert cfg.user == "host"
