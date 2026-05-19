@@ -77,17 +77,9 @@ class DockerConfig:
         gpus: GPU devices for benchmark containers (e.g. ``"0,1"``).
             ``None`` or ``"all"`` exposes all GPUs.  Devices are round-robin
             distributed across shards.
-        user: Optional value forwarded to ``docker run --user``. Default
-            ``None`` lets the container start as its image-default user
-            (typically root) — combined with mode-666 on the shared
-            SQLite (see ``RecordingStore``) this is enough for external
-            processes (e.g. a model server) to co-write the recording DB
-            without permission surgery. Set to ``"host"`` to map the
-            container to ``$(id -u):$(id -g)`` of the invoking user
-            (full host-ownership of every output file, at the cost of
-            no in-container ``/etc/passwd`` entry for the runtime uid).
-            Set to an explicit ``"<uid>:<gid>"`` for images that require
-            a specific in-container uid.
+        user: Optional ``docker run --user`` value. ``None`` (default) →
+            no flag (image-default user). ``"host"`` → ``$(id -u):$(id -g)``.
+            ``"<uid>:<gid>"`` → explicit pin.
     """
 
     image: str | None = None

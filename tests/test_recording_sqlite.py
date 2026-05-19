@@ -464,7 +464,7 @@ def test_merge_handles_missing_jsonl_path(tmp_path: Path) -> None:
 
 
 def test_host_translate_no_env(monkeypatch, tmp_path):
-    """Without VLA_EVAL_HOST_OUTPUT_DIR set, path is returned unchanged."""
+    """Env unset → passthrough."""
     monkeypatch.delenv("VLA_EVAL_HOST_OUTPUT_DIR", raising=False)
     from vla_eval.recording import _host_translate
 
@@ -473,7 +473,7 @@ def test_host_translate_no_env(monkeypatch, tmp_path):
 
 
 def test_host_translate_rewrites_container_prefix(monkeypatch, tmp_path):
-    """With env set and path under /workspace/results, rewrites to host root."""
+    """Env set + container-prefix path → host root rewrite."""
     monkeypatch.setenv("VLA_EVAL_HOST_OUTPUT_DIR", str(tmp_path))
     from vla_eval.recording import _host_translate
 
@@ -483,7 +483,7 @@ def test_host_translate_rewrites_container_prefix(monkeypatch, tmp_path):
 
 
 def test_host_translate_leaves_unrelated_path_alone(monkeypatch, tmp_path):
-    """Env set but path outside /workspace/results is returned unchanged."""
+    """Env set + path outside container prefix → passthrough."""
     monkeypatch.setenv("VLA_EVAL_HOST_OUTPUT_DIR", str(tmp_path))
     from vla_eval.recording import _host_translate
 
@@ -492,9 +492,7 @@ def test_host_translate_leaves_unrelated_path_alone(monkeypatch, tmp_path):
 
 
 def test_recording_store_chmods_db_world_writable(tmp_path):
-    """RecordingStore opens the SQLite mode 666 so an external writer
-    (different uid than the shard that created the file) can co-write
-    via field-union upsert."""
+    """SQLite is mode 666 so external (different-uid) writers can upsert."""
 
     from vla_eval.recording import RecordingStore
 

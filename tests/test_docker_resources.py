@@ -178,9 +178,7 @@ class TestShardDockerFlags:
 
 
 def test_docker_config_user_default_none():
-    """``DockerConfig.user`` defaults to None — container starts as its
-    image-default user; the chmod-666 on the recording DB carries the
-    external-writer use case without uid alignment."""
+    """Default: None (image-default user)."""
     from vla_eval.config import DockerConfig
 
     cfg = DockerConfig.from_dict({"image": "x"})
@@ -188,7 +186,7 @@ def test_docker_config_user_default_none():
 
 
 def test_docker_config_user_host_opt_in():
-    """``user: host`` is the opt-in for full host-uid file ownership."""
+    """``user: host`` opt-in."""
     from vla_eval.config import DockerConfig
 
     cfg = DockerConfig.from_dict({"image": "x", "user": "host"})
@@ -196,7 +194,7 @@ def test_docker_config_user_host_opt_in():
 
 
 def test_docker_config_user_explicit_override():
-    """Operator can pin a specific in-container uid via yaml."""
+    """Explicit uid:gid pin."""
     from vla_eval.config import DockerConfig
 
     cfg = DockerConfig.from_dict({"image": "x", "user": "1234:5678"})
@@ -204,7 +202,7 @@ def test_docker_config_user_explicit_override():
 
 
 def test_docker_config_user_null_yaml_stays_none():
-    """``user: null`` in YAML is the same as 'unset'."""
+    """``user: null`` ≡ unset."""
     from vla_eval.config import DockerConfig
 
     cfg = DockerConfig.from_dict({"image": "x", "user": None})
@@ -212,7 +210,7 @@ def test_docker_config_user_null_yaml_stays_none():
 
 
 def test_docker_config_user_empty_string_stays_none():
-    """Empty string ``user: ''`` is also treated as 'unset' (defensive)."""
+    """``user: ""`` ≡ unset."""
     from vla_eval.config import DockerConfig
 
     cfg = DockerConfig.from_dict({"image": "x", "user": ""})

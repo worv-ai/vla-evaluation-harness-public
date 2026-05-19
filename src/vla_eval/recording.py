@@ -103,23 +103,14 @@ def db_path_for_eval(output_dir: str | Path, eval_id: str) -> Path:
 
 
 def _host_translate(path: Path) -> Path:
-    """Translate a container-side path under ``/workspace/results`` to the
-    host path the outer CLI mounted in. Returns ``path`` unchanged when
-    ``VLA_EVAL_HOST_OUTPUT_DIR`` is unset or ``path`` doesn't live under
-    the container's results mount.
-
-    The outer ``_run_via_docker`` exports ``VLA_EVAL_HOST_OUTPUT_DIR`` so
-    external processes (e.g. a model server running on the host) can open
-    the same SQLite the in-container orchestrator writes to.
-    """
-    import os as _os
-
-    host_root = _os.environ.get("VLA_EVAL_HOST_OUTPUT_DIR")
+    """Rewrite ``/workspace/results/...`` to the host root under
+    ``VLA_EVAL_HOST_OUTPUT_DIR`` (set by the outer CLI on ``docker run``).
+    Passes through unchanged otherwise."""
+    host_root = os.environ.get("VLA_EVAL_HOST_OUTPUT_DIR")
     if not host_root:
         return path
-    container_root = Path("/workspace/results")
     try:
-        rel = path.resolve().relative_to(container_root)
+        rel = path.resolve().relative_to(Path("/workspace/results"))
     except ValueError:
         return path
     return Path(host_root) / rel
@@ -133,13 +124,12 @@ class RecordingStore:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(str(self.db_path), isolation_level=None, timeout=30.0)
         self._conn.executescript(SCHEMA_SQL)
-        # Mode 666 so external writers (e.g. a model server on a different
-        # uid than the shard process) can co-write via field-union upsert.
-        # WAL / SHM siblings inherit perms from the main file by default.
+        # Mode 666 so external writers (different uid than the shard) can
+        # co-write via field-union upsert; WAL/SHM siblings inherit.
         try:
             os.chmod(self.db_path, 0o666)
         except OSError:
-            pass  # best-effort; non-POSIX FS may not honor it
+            pass
 
     def close(self) -> None:
         self._conn.close()
@@ -281,15 +271,7 @@ class EpisodeRecorder:
 
     @property
     def db_path(self) -> str:
-        """Host-resolvable SQLite path forwarded to model servers in EPISODE_START.
-
-        When the orchestrator runs inside Docker, the underlying
-        ``self._store.db_path`` is container-side (e.g.
-        ``/workspace/results/...``). Outer-CLI sets
-        ``VLA_EVAL_HOST_OUTPUT_DIR`` so we can translate that to the
-        host-side mount target — model servers running on the host don't
-        see the container's filesystem.
-        """
+        """Host-resolvable SQLite path (translated when orchestrator is in docker)."""
         return str(_host_translate(self._store.db_path))
 
     # -- Capture API -------------------------------------------------------

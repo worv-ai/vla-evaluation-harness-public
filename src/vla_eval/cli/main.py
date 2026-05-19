@@ -184,23 +184,18 @@ def _run_via_docker(
     ]
     # fmt: on
 
-    # Optional: ``docker.user`` (see DockerConfig.user docstring). Default
-    # is no --user flag — the container starts as its image-default user.
-    # The shared SQLite is mode-666 (see RecordingStore) so external writers
-    # can co-write without any uid alignment; per-file ownership is left to
-    # the operator via this opt-in.
+    # Opt-in --user (see DockerConfig.user).
     if docker_cfg.user == "host":
-        if not hasattr(os, "getuid"):  # non-POSIX (Windows) — caller must pin explicitly
+        if not hasattr(os, "getuid"):
             _stderr_console().print(
-                "[red]ERROR: docker.user='host' requires a POSIX host; set user: '<uid>:<gid>' explicitly.[/red]"
+                "[red]ERROR: docker.user='host' needs a POSIX host; pin user: '<uid>:<gid>' instead.[/red]"
             )
             sys.exit(1)
         cmd.extend(["--user", f"{os.getuid()}:{os.getgid()}"])
     elif docker_cfg.user:
         cmd.extend(["--user", docker_cfg.user])
 
-    # Forward the host-side results_dir so the orchestrator inside the
-    # container can advertise a host-resolvable db_path to external writers.
+    # Forward host-side results_dir for recorder._host_translate.
     cmd.extend(["-e", f"VLA_EVAL_HOST_OUTPUT_DIR={results_dir}"])
 
     # Forward stdin/TTY for in-container licence prompts.
