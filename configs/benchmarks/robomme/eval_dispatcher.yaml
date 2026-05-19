@@ -4,7 +4,7 @@
 # step_rows, episode_results, mp4, and jsonl all wired through SQLite.
 server:
   url: "ws://DGX-H100-6:8000"
-  timeout: 120.0  # shards drift apart over ep boundaries; widen to cover non-batched serial forwards
+  timeout: 300.0  # video-history tasks (VideoPlaceOrder etc) carry ~46s+ S2 forwards from the demo motion-plan trajectory; act-roundtrip must clear the longest single fire
 
 docker:
   image: ghcr.io/allenai/vla-evaluation-harness/robomme:dev-pr191
