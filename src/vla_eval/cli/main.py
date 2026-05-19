@@ -184,25 +184,20 @@ def _run_via_docker(
     ]
     # fmt: on
 
-    # Default: map container uid to the host uid so files under the mounted
-    # output_dir are owned by the invoking user. External writers to the
-    # same SQLite (e.g. a model server running on the host) would otherwise
-    # see a root-owned file and fail with "readonly database".
-    #
-    # ``user`` semantics (see DockerConfig.user docstring):
-    #   "host"        → --user $(id -u):$(id -g) — default mapping
-    #   "<uid>:<gid>" → --user <uid>:<gid> — explicit pin (image-required uid)
-    #   "root"        → no --user; container starts as its default user (root)
-    user_str = docker_cfg.user or "host"
-    if user_str == "host":
+    # Optional: ``docker.user`` (see DockerConfig.user docstring). Default
+    # is no --user flag — the container starts as its image-default user.
+    # The shared SQLite is mode-666 (see RecordingStore) so external writers
+    # can co-write without any uid alignment; per-file ownership is left to
+    # the operator via this opt-in.
+    if docker_cfg.user == "host":
         if not hasattr(os, "getuid"):  # non-POSIX (Windows) — caller must pin explicitly
             _stderr_console().print(
                 "[red]ERROR: docker.user='host' requires a POSIX host; set user: '<uid>:<gid>' explicitly.[/red]"
             )
             sys.exit(1)
         cmd.extend(["--user", f"{os.getuid()}:{os.getgid()}"])
-    elif user_str != "root":
-        cmd.extend(["--user", user_str])
+    elif docker_cfg.user:
+        cmd.extend(["--user", docker_cfg.user])
 
     # Forward the host-side results_dir so the orchestrator inside the
     # container can advertise a host-resolvable db_path to external writers.

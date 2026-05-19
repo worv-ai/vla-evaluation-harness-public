@@ -177,11 +177,21 @@ class TestShardDockerFlags:
 # --------------------------------------------------------------------------
 
 
-def test_docker_config_user_default():
-    """``DockerConfig.user`` defaults to 'host' for default-host-uid mapping."""
+def test_docker_config_user_default_none():
+    """``DockerConfig.user`` defaults to None — container starts as its
+    image-default user; the chmod-666 on the recording DB carries the
+    external-writer use case without uid alignment."""
     from vla_eval.config import DockerConfig
 
     cfg = DockerConfig.from_dict({"image": "x"})
+    assert cfg.user is None
+
+
+def test_docker_config_user_host_opt_in():
+    """``user: host`` is the opt-in for full host-uid file ownership."""
+    from vla_eval.config import DockerConfig
+
+    cfg = DockerConfig.from_dict({"image": "x", "user": "host"})
     assert cfg.user == "host"
 
 
@@ -193,25 +203,17 @@ def test_docker_config_user_explicit_override():
     assert cfg.user == "1234:5678"
 
 
-def test_docker_config_user_root_opt_out():
-    """``user: root`` means 'leave the container's default user alone'."""
-    from vla_eval.config import DockerConfig
-
-    cfg = DockerConfig.from_dict({"image": "x", "user": "root"})
-    assert cfg.user == "root"
-
-
-def test_docker_config_user_null_yaml_falls_back_to_host():
-    """``user: null`` in YAML must not slip through as None — fall back to 'host'."""
+def test_docker_config_user_null_yaml_stays_none():
+    """``user: null`` in YAML is the same as 'unset'."""
     from vla_eval.config import DockerConfig
 
     cfg = DockerConfig.from_dict({"image": "x", "user": None})
-    assert cfg.user == "host"
+    assert cfg.user is None
 
 
-def test_docker_config_user_empty_string_falls_back_to_host():
-    """Empty string ``user: ''`` also falls back to 'host' (defensive)."""
+def test_docker_config_user_empty_string_stays_none():
+    """Empty string ``user: ''`` is also treated as 'unset' (defensive)."""
     from vla_eval.config import DockerConfig
 
     cfg = DockerConfig.from_dict({"image": "x", "user": ""})
-    assert cfg.user == "host"
+    assert cfg.user is None

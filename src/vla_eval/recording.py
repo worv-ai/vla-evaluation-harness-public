@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sqlite3
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
@@ -132,6 +133,13 @@ class RecordingStore:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(str(self.db_path), isolation_level=None, timeout=30.0)
         self._conn.executescript(SCHEMA_SQL)
+        # Mode 666 so external writers (e.g. a model server on a different
+        # uid than the shard process) can co-write via field-union upsert.
+        # WAL / SHM siblings inherit perms from the main file by default.
+        try:
+            os.chmod(self.db_path, 0o666)
+        except OSError:
+            pass  # best-effort; non-POSIX FS may not honor it
 
     def close(self) -> None:
         self._conn.close()

@@ -489,3 +489,19 @@ def test_host_translate_leaves_unrelated_path_alone(monkeypatch, tmp_path):
 
     p = Path("/some/other/place/recording-y.sqlite")
     assert _host_translate(p) == p
+
+
+def test_recording_store_chmods_db_world_writable(tmp_path):
+    """RecordingStore opens the SQLite mode 666 so an external writer
+    (different uid than the shard that created the file) can co-write
+    via field-union upsert."""
+
+    from vla_eval.recording import RecordingStore
+
+    db = tmp_path / "rec.sqlite"
+    store = RecordingStore(db)
+    try:
+        mode = db.stat().st_mode & 0o777
+        assert mode == 0o666, f"expected 0o666, got {oct(mode)}"
+    finally:
+        store.close()
