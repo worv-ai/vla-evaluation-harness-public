@@ -456,3 +456,36 @@ def test_merge_handles_missing_jsonl_path(tmp_path: Path) -> None:
     body = aggregates[0]
     failed = body["tasks"][0]["episodes"][0]
     assert failed["failure_reason"] == "server_unreachable"
+
+
+# --------------------------------------------------------------------------
+# Host translation (VLA_EVAL_HOST_OUTPUT_DIR) for cross-container db_path
+# --------------------------------------------------------------------------
+
+
+def test_host_translate_no_env(monkeypatch, tmp_path):
+    """Without VLA_EVAL_HOST_OUTPUT_DIR set, path is returned unchanged."""
+    monkeypatch.delenv("VLA_EVAL_HOST_OUTPUT_DIR", raising=False)
+    from vla_eval.recording import _host_translate
+
+    p = tmp_path / "recording-x.sqlite"
+    assert _host_translate(p) == p
+
+
+def test_host_translate_rewrites_container_prefix(monkeypatch, tmp_path):
+    """With env set and path under /workspace/results, rewrites to host root."""
+    monkeypatch.setenv("VLA_EVAL_HOST_OUTPUT_DIR", str(tmp_path))
+    from vla_eval.recording import _host_translate
+
+    container_path = Path("/workspace/results/recording-abc.sqlite")
+    out = _host_translate(container_path)
+    assert out == tmp_path / "recording-abc.sqlite"
+
+
+def test_host_translate_leaves_unrelated_path_alone(monkeypatch, tmp_path):
+    """Env set but path outside /workspace/results is returned unchanged."""
+    monkeypatch.setenv("VLA_EVAL_HOST_OUTPUT_DIR", str(tmp_path))
+    from vla_eval.recording import _host_translate
+
+    p = Path("/some/other/place/recording-y.sqlite")
+    assert _host_translate(p) == p

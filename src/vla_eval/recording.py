@@ -101,6 +101,29 @@ def db_path_for_eval(output_dir: str | Path, eval_id: str) -> Path:
     return Path(output_dir) / f"recording-{eval_id}.sqlite"
 
 
+def _host_translate(path: Path) -> Path:
+    """Translate a container-side path under ``/workspace/results`` to the
+    host path the outer CLI mounted in. Returns ``path`` unchanged when
+    ``VLA_EVAL_HOST_OUTPUT_DIR`` is unset or ``path`` doesn't live under
+    the container's results mount.
+
+    The outer ``_run_via_docker`` exports ``VLA_EVAL_HOST_OUTPUT_DIR`` so
+    external processes (e.g. a model server running on the host) can open
+    the same SQLite the in-container orchestrator writes to.
+    """
+    import os as _os
+
+    host_root = _os.environ.get("VLA_EVAL_HOST_OUTPUT_DIR")
+    if not host_root:
+        return path
+    container_root = Path("/workspace/results")
+    try:
+        rel = path.resolve().relative_to(container_root)
+    except ValueError:
+        return path
+    return Path(host_root) / rel
+
+
 class RecordingStore:
     """SQLite connection holder. One per process; same-file concurrency via WAL."""
 
@@ -250,7 +273,16 @@ class EpisodeRecorder:
 
     @property
     def db_path(self) -> str:
-        return str(self._store.db_path)
+        """Host-resolvable SQLite path forwarded to model servers in EPISODE_START.
+
+        When the orchestrator runs inside Docker, the underlying
+        ``self._store.db_path`` is container-side (e.g.
+        ``/workspace/results/...``). Outer-CLI sets
+        ``VLA_EVAL_HOST_OUTPUT_DIR`` so we can translate that to the
+        host-side mount target — model servers running on the host don't
+        see the container's filesystem.
+        """
+        return str(_host_translate(self._store.db_path))
 
     # -- Capture API -------------------------------------------------------
 

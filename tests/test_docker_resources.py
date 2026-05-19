@@ -170,3 +170,32 @@ class TestShardDockerFlags:
         assert "--cpuset-cpus" not in flags
         # OMP still set
         assert "OMP_NUM_THREADS=1" in flags
+
+
+# --------------------------------------------------------------------------
+# DockerConfig.user default-to-host-uid (cli _run_via_docker behavior)
+# --------------------------------------------------------------------------
+
+
+def test_docker_config_user_default():
+    """``DockerConfig.user`` defaults to 'host' for default-host-uid mapping."""
+    from vla_eval.config import DockerConfig
+
+    cfg = DockerConfig.from_dict({"image": "x"})
+    assert cfg.user == "host"
+
+
+def test_docker_config_user_explicit_override():
+    """Operator can pin a specific in-container uid via yaml."""
+    from vla_eval.config import DockerConfig
+
+    cfg = DockerConfig.from_dict({"image": "x", "user": "1234:5678"})
+    assert cfg.user == "1234:5678"
+
+
+def test_docker_config_user_root_opt_out():
+    """``user: root`` means 'leave the container's default user alone'."""
+    from vla_eval.config import DockerConfig
+
+    cfg = DockerConfig.from_dict({"image": "x", "user": "root"})
+    assert cfg.user == "root"

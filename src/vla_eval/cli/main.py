@@ -184,6 +184,19 @@ def _run_via_docker(
     ]
     # fmt: on
 
+    # Default: map container uid to the host uid so files under the mounted
+    # output_dir are owned by the invoking user. External writers to the
+    # same SQLite (e.g. a model server running on the host) would otherwise
+    # see a root-owned file and fail with "readonly database".
+    if docker_cfg.user == "host":
+        cmd.extend(["--user", f"{os.getuid()}:{os.getgid()}"])
+    elif docker_cfg.user not in ("", "root"):
+        cmd.extend(["--user", docker_cfg.user])
+
+    # Forward the host-side results_dir so the orchestrator inside the
+    # container can advertise a host-resolvable db_path to external writers.
+    cmd.extend(["-e", f"VLA_EVAL_HOST_OUTPUT_DIR={results_dir}"])
+
     # Forward stdin/TTY for in-container licence prompts.
     cmd.extend(tty_docker_flags())
 

@@ -77,6 +77,14 @@ class DockerConfig:
         gpus: GPU devices for benchmark containers (e.g. ``"0,1"``).
             ``None`` or ``"all"`` exposes all GPUs.  Devices are round-robin
             distributed across shards.
+        user: Value forwarded to ``docker run --user``. Default ``"host"``
+            maps the container to ``$(id -u):$(id -g)`` of the invoking
+            user, so files written under the mounted ``output_dir`` are
+            owned by that user — required when an external process (e.g.
+            a model server) writes into the same SQLite via the
+            field-union upsert path. Set to ``"root"`` (or any explicit
+            ``"<uid>:<gid>"``) for images that require a specific
+            in-container uid.
     """
 
     image: str | None = None
@@ -84,6 +92,7 @@ class DockerConfig:
     env: list[str] = field(default_factory=list)
     cpus: str | None = None
     gpus: str | None = None
+    user: str = "host"
 
     @classmethod
     def from_dict(cls, data: dict[str, Any] | None) -> DockerConfig:
@@ -95,6 +104,7 @@ class DockerConfig:
             env=data.get("env", []),
             cpus=data.get("cpus"),
             gpus=data.get("gpus"),
+            user=data.get("user", "host"),
         )
 
     def to_dict(self) -> dict[str, Any]:
