@@ -492,14 +492,16 @@ def test_host_translate_leaves_unrelated_path_alone(monkeypatch, tmp_path):
 
 
 def test_recording_store_chmods_db_world_writable(tmp_path):
-    """SQLite is mode 666 so external (different-uid) writers can upsert."""
-
+    """Main + WAL + SHM are mode 666 so external (different-uid) writers can upsert."""
     from vla_eval.recording import RecordingStore
 
     db = tmp_path / "rec.sqlite"
     store = RecordingStore(db)
     try:
-        mode = db.stat().st_mode & 0o777
-        assert mode == 0o666, f"expected 0o666, got {oct(mode)}"
+        for suffix in ("", "-wal", "-shm"):
+            f = tmp_path / ("rec.sqlite" + suffix)
+            assert f.exists(), f"missing {f.name}"
+            mode = f.stat().st_mode & 0o777
+            assert mode == 0o666, f"{f.name}: expected 0o666, got {oct(mode)}"
     finally:
         store.close()

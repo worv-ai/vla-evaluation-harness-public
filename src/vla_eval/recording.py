@@ -124,12 +124,13 @@ class RecordingStore:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(str(self.db_path), isolation_level=None, timeout=30.0)
         self._conn.executescript(SCHEMA_SQL)
-        # Mode 666 so external writers (different uid than the shard) can
-        # co-write via field-union upsert; WAL/SHM siblings inherit.
-        try:
-            os.chmod(self.db_path, 0o666)
-        except OSError:
-            pass
+        # Mode 666 on main + WAL/SHM so external writers (different uid) can
+        # co-write via field-union upsert. SQLite WAL needs SHM writable.
+        for suffix in ("", "-wal", "-shm"):
+            try:
+                os.chmod(str(self.db_path) + suffix, 0o666)
+            except OSError:
+                pass
 
     def close(self) -> None:
         self._conn.close()
