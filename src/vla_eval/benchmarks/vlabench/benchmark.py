@@ -218,7 +218,7 @@ class VLABenchBenchmark(StepBenchmark):
         return result
 
     def _extract_frame(self, obs: Any) -> np.ndarray | None:
-        """First RGB camera, normalised to (H, W, 3) uint8."""
+        """First RGB camera frame. dm_control emits uint8 — passed through unchanged."""
         if not isinstance(obs, dict):
             return None
         rgb = obs.get("rgb")
@@ -227,8 +227,6 @@ class VLABenchBenchmark(StepBenchmark):
         img = np.asarray(rgb[0])
         if img.ndim != 3 or img.shape[-1] != 3:
             return None
-        if img.dtype != np.uint8:
-            img = img.astype(np.uint8)
         return img
 
     def make_obs(self, raw_obs: Any, task: Task) -> Observation:

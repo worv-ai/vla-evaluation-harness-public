@@ -190,8 +190,7 @@ class RoboCasaBenchmark(StepBenchmark):
         for cam in self._camera_names:
             key = f"{cam}_image"
             if key in obs:
-                img = obs[key]
-                return np.ascontiguousarray(np.asarray(img, dtype=np.uint8)[::-1])
+                return np.ascontiguousarray(np.asarray(obs[key])[::-1])
         return None
 
     def make_obs(self, raw_obs: Any, task: Task) -> Observation:

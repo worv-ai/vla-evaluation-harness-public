@@ -206,7 +206,11 @@ class MIKASABenchmark(StepBenchmark):
         return StepResult(obs=obs, reward=rew, done=done, info={"success": success})
 
     def _extract_frame(self, obs: Any) -> np.ndarray | None:
-        """Pull the first camera's RGB frame, normalising tensor / batched layouts."""
+        """Pull the first camera's RGB frame, normalising tensor / batched layouts.
+
+        mani_skill3 emits uint8 RGB; we mirror ``make_obs`` and don't coerce dtype
+        (an ``astype(uint8)`` on a float [0,1] image would zero it out).
+        """
         if not isinstance(obs, dict):
             return None
         sensor = obs.get("sensor_data")
@@ -220,8 +224,6 @@ class MIKASABenchmark(StepBenchmark):
                 img = np.asarray(img)
                 if img.ndim == 4:
                     img = img[0]
-                if img.dtype != np.uint8:
-                    img = img.astype(np.uint8)
                 return img
         return None
 

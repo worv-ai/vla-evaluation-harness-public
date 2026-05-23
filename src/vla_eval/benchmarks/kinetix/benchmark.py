@@ -150,7 +150,6 @@ class KinetixBenchmark(StepBenchmark):
             if rec
             else None
         )
-        self._step_counter: int = 0
 
     def _init_jax(self) -> None:
         """Lazily import JAX (heavy import)."""
@@ -241,7 +240,6 @@ class KinetixBenchmark(StepBenchmark):
             frame = self._extract_frame(obs)
             if frame is not None:
                 self._recorder.record_frame(frame)
-        self._step_counter = 0
 
         return obs
 
@@ -291,7 +289,7 @@ class KinetixBenchmark(StepBenchmark):
             if frame is not None:
                 self._recorder.record_frame(frame)
             fields = self._record_fields
-            row: dict[str, Any] = {"step": self._step_counter}
+            row: dict[str, Any] = {"step": self._step_count - 1}
             if "reward" in fields:
                 row["reward"] = reward_val
             if "done" in fields:
@@ -299,7 +297,6 @@ class KinetixBenchmark(StepBenchmark):
             if "success" in fields:
                 row["success"] = self._episode_success
             self._recorder.record_step(row)
-        self._step_counter += 1
 
         return StepResult(obs=obs, reward=reward_val, done=done_val, info=info)
 

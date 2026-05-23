@@ -200,8 +200,7 @@ class ManiSkill2Benchmark(StepBenchmark):
     def _extract_frame(self, obs: Any) -> np.ndarray | None:
         """Pick the first enabled camera's RGB image as the recording frame."""
         try:
-            img = obs["image"][self.enabled_cameras[0]]["rgb"]
-            return np.asarray(img, dtype=np.uint8)
+            return np.asarray(obs["image"][self.enabled_cameras[0]]["rgb"])
         except (KeyError, TypeError, IndexError):
             return None
 
