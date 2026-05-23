@@ -19,6 +19,7 @@ from typing import Any
 import numpy as np
 
 from vla_eval.benchmarks.base import StepBenchmark, StepResult
+from vla_eval.benchmarks.data_recording import EpisodeRecorder, RecordingConfig
 from vla_eval.specs import GRIPPER_RAW, IMAGE_RGB, LANGUAGE, DimSpec
 from vla_eval.types import Action, EpisodeResult, Observation, Task
 
@@ -71,7 +72,14 @@ TASK_DESCRIPTIONS: dict[str, str] = {
 
 
 class MIKASABenchmark(StepBenchmark):
-    """MIKASA-Robo memory-intensive manipulation benchmark."""
+    """MIKASA-Robo memory-intensive manipulation benchmark.
+
+    Args:
+        recording: A ``RecordingConfig`` dict (or ``None`` to disable).
+            Controls per-episode video + JSONL data recording.
+    """
+
+    _ALL_RECORD_FIELDS = frozenset({"reward", "terminated", "truncated", "success"})
 
     def __init__(
         self,
@@ -79,6 +87,7 @@ class MIKASABenchmark(StepBenchmark):
         episodes_per_task: int = 10,
         max_episode_steps: int | None = None,
         render_resolution: list[int] | tuple[int, int] = (256, 256),
+        recording: dict[str, Any] | None = None,
     ) -> None:
         super().__init__()
         self._task_names = tasks or DEFAULT_TASKS
@@ -88,6 +97,26 @@ class MIKASABenchmark(StepBenchmark):
         self._current_task: str | None = None
         self._task_desc: str = ""
 
+        rec = RecordingConfig(**recording) if recording else None
+        if rec and rec.step_fields:
+            unknown = set(rec.step_fields) - self._ALL_RECORD_FIELDS
+            if unknown:
+                raise ValueError(f"Unknown step_fields: {unknown}. Valid: {sorted(self._ALL_RECORD_FIELDS)}")
+        self._record_fields: set[str] = (
+            set(rec.step_fields) if rec and rec.step_fields else set(self._ALL_RECORD_FIELDS)
+        )
+        self._recorder: EpisodeRecorder | None = (
+            EpisodeRecorder(
+                output_dir=rec.output_dir,
+                record_video=rec.record_video,
+                record_step=rec.record_step,
+                fps=rec.fps,
+            )
+            if rec
+            else None
+        )
+        self._step_counter: int = 0
+
     def cleanup(self) -> None:
         if self._env is not None:
             try:
@@ -95,9 +124,11 @@ class MIKASABenchmark(StepBenchmark):
             except Exception:
                 pass
             self._env = None
+        if self._recorder is not None:
+            self._recorder.discard()
 
     def get_tasks(self) -> list[Task]:
-        return [{"name": t} for t in self._task_names]
+        return [{"name": t, "env_id": t} for t in self._task_names]
 
     def reset(self, task: Task) -> Any:
         import gymnasium as gym
@@ -121,6 +152,14 @@ class MIKASABenchmark(StepBenchmark):
 
         obs, info = self._env.reset()
         self._task_desc = TASK_DESCRIPTIONS.get(env_name, f"Complete {env_name}")
+
+        if self._recorder is not None:
+            self._recorder.start({"env_id": task["env_id"], "episode_idx": task.get("episode_idx", 0)})
+            frame = self._extract_frame(obs)
+            if frame is not None:
+                self._recorder.record_frame(frame)
+        self._step_counter = 0
+
         return obs
 
     def step(self, action: Action) -> StepResult:
@@ -141,10 +180,50 @@ class MIKASABenchmark(StepBenchmark):
         act_tensor = torch.from_numpy(raw).unsqueeze(0)
         obs, reward, terminated, truncated, info = self._env.step(act_tensor)
 
-        done = bool(terminated.any()) or bool(truncated.any())
+        term_bool = bool(terminated.any())
+        trunc_bool = bool(truncated.any())
+        done = term_bool or trunc_bool
         rew = float(reward.sum())
         success = bool(info.get("success", torch.tensor(False)).any())
+
+        if self._recorder is not None and self._recorder.active:
+            frame = self._extract_frame(obs)
+            if frame is not None:
+                self._recorder.record_frame(frame)
+            fields = self._record_fields
+            row: dict[str, Any] = {"step": self._step_counter}
+            if "reward" in fields:
+                row["reward"] = rew
+            if "terminated" in fields:
+                row["terminated"] = term_bool
+            if "truncated" in fields:
+                row["truncated"] = trunc_bool
+            if "success" in fields:
+                row["success"] = success
+            self._recorder.record_step(row)
+        self._step_counter += 1
+
         return StepResult(obs=obs, reward=rew, done=done, info={"success": success})
+
+    def _extract_frame(self, obs: Any) -> np.ndarray | None:
+        """Pull the first camera's RGB frame, normalising tensor / batched layouts."""
+        if not isinstance(obs, dict):
+            return None
+        sensor = obs.get("sensor_data")
+        if not isinstance(sensor, dict):
+            return None
+        for cam_data in sensor.values():
+            if isinstance(cam_data, dict) and "rgb" in cam_data:
+                img = cam_data["rgb"]
+                if hasattr(img, "cpu"):
+                    img = img.cpu().numpy()
+                img = np.asarray(img)
+                if img.ndim == 4:
+                    img = img[0]
+                if img.dtype != np.uint8:
+                    img = img.astype(np.uint8)
+                return img
+        return None
 
     def make_obs(self, raw_obs: Any, task: Task) -> Observation:
         images: dict[str, np.ndarray] = {}
@@ -165,7 +244,10 @@ class MIKASABenchmark(StepBenchmark):
         return step_result.done
 
     def get_step_result(self, step_result: StepResult) -> EpisodeResult:
-        return {"success": step_result.info.get("success", False)}
+        success = bool(step_result.info.get("success", False))
+        if self._recorder is not None:
+            self._recorder.save(status="success" if success else "fail")
+        return {"success": success}
 
     def get_metadata(self) -> dict[str, Any]:
         return {"max_steps": self._max_steps_override or 90}

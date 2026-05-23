@@ -12,6 +12,7 @@ from typing import Any
 import numpy as np
 
 from vla_eval.benchmarks.base import StepBenchmark, StepResult
+from vla_eval.benchmarks.data_recording import EpisodeRecorder, RecordingConfig
 from vla_eval.specs import GRIPPER_RAW, IMAGE_RGB, LANGUAGE, DimSpec
 from vla_eval.types import Action, EpisodeResult, Observation, Task
 
@@ -34,13 +35,18 @@ class RLBenchBenchmark(StepBenchmark):
         tasks: List of RLBench task file names (snake_case).
         render_resolution: Camera resolution (square).
         max_steps: Maximum steps per episode.
+        recording: A ``RecordingConfig`` dict (or ``None`` to disable).
+            Controls per-episode video + JSONL data recording.
     """
+
+    _ALL_RECORD_FIELDS = frozenset({"reward", "done"})
 
     def __init__(
         self,
         tasks: list[str] | None = None,
         render_resolution: int = 256,
         max_steps: int = 200,
+        recording: dict[str, Any] | None = None,
     ) -> None:
         super().__init__()
         self._task_names = tasks or DEFAULT_TASKS
@@ -50,6 +56,26 @@ class RLBenchBenchmark(StepBenchmark):
         self._task_env = None  # rlbench.task_environment.TaskEnvironment
         self._descriptions: list[str] = []
 
+        rec = RecordingConfig(**recording) if recording else None
+        if rec and rec.step_fields:
+            unknown = set(rec.step_fields) - self._ALL_RECORD_FIELDS
+            if unknown:
+                raise ValueError(f"Unknown step_fields: {unknown}. Valid: {sorted(self._ALL_RECORD_FIELDS)}")
+        self._record_fields: set[str] = (
+            set(rec.step_fields) if rec and rec.step_fields else set(self._ALL_RECORD_FIELDS)
+        )
+        self._recorder: EpisodeRecorder | None = (
+            EpisodeRecorder(
+                output_dir=rec.output_dir,
+                record_video=rec.record_video,
+                record_step=rec.record_step,
+                fps=rec.fps,
+            )
+            if rec
+            else None
+        )
+        self._step_counter: int = 0
+
     def cleanup(self) -> None:
         if self._env is not None:
             try:
@@ -58,6 +84,8 @@ class RLBenchBenchmark(StepBenchmark):
                 pass
             self._env = None
             self._task_env = None
+        if self._recorder is not None:
+            self._recorder.discard()
 
     # ------------------------------------------------------------------ #
     # lazy init
@@ -106,7 +134,7 @@ class RLBenchBenchmark(StepBenchmark):
     # StepBenchmark interface
     # ------------------------------------------------------------------ #
     def get_tasks(self) -> list[Task]:
-        return [{"name": t, "task_file": t} for t in self._task_names]
+        return [{"name": t, "task_file": t, "env_id": t} for t in self._task_names]
 
     def reset(self, task: Task) -> Any:
         from rlbench import utils as rlbench_utils
@@ -118,6 +146,14 @@ class RLBenchBenchmark(StepBenchmark):
         self._task_env = self._env.get_task(task_class)
         self._task_env.sample_variation()
         self._descriptions, obs = self._task_env.reset()
+
+        if self._recorder is not None:
+            self._recorder.start({"env_id": task["env_id"], "episode_idx": task.get("episode_idx", 0)})
+            frame = self._extract_frame(obs)
+            if frame is not None:
+                self._recorder.record_frame(frame)
+        self._step_counter = 0
+
         return obs
 
     def step(self, action: Action) -> StepResult:
@@ -132,7 +168,28 @@ class RLBenchBenchmark(StepBenchmark):
 
         assert self._task_env is not None
         obs, reward, terminate = self._task_env.step(act)
+
+        if self._recorder is not None and self._recorder.active:
+            frame = self._extract_frame(obs)
+            if frame is not None:
+                self._recorder.record_frame(frame)
+            fields = self._record_fields
+            row: dict[str, Any] = {"step": self._step_counter}
+            if "reward" in fields:
+                row["reward"] = float(reward)
+            if "done" in fields:
+                row["done"] = bool(terminate)
+            self._recorder.record_step(row)
+        self._step_counter += 1
+
         return StepResult(obs=obs, reward=reward, done=terminate, info={})
+
+    @staticmethod
+    def _extract_frame(obs: Any) -> np.ndarray | None:
+        front = getattr(obs, "front_rgb", None)
+        if front is None:
+            return None
+        return np.asarray(front, dtype=np.uint8)
 
     def make_obs(self, raw_obs: Any, task: Task) -> Observation:
         images = {}
@@ -151,7 +208,10 @@ class RLBenchBenchmark(StepBenchmark):
         return step_result.done
 
     def get_step_result(self, step_result: StepResult) -> EpisodeResult:
-        return {"success": step_result.reward > 0.99}
+        success = step_result.reward > 0.99
+        if self._recorder is not None:
+            self._recorder.save(status="success" if success else "fail")
+        return {"success": success}
 
     def get_metadata(self) -> dict[str, Any]:
         return {"max_steps": self._max_steps}

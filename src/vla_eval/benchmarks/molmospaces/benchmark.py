@@ -30,6 +30,7 @@ from typing import Any
 import numpy as np
 
 from vla_eval.benchmarks.base import StepBenchmark, StepResult
+from vla_eval.benchmarks.data_recording import EpisodeRecorder, RecordingConfig
 from vla_eval.specs import GRIPPER_01, IMAGE_RGB, LANGUAGE, STATE_JOINT, DimSpec
 from vla_eval.types import Action, EpisodeResult, Observation, Task
 
@@ -68,7 +69,11 @@ class MolmoSpacesBenchmark(StepBenchmark):
             the per-task defaults above.
         send_wrist_image: Include wrist camera in wire observations.
         send_state: Include proprioceptive state (qpos) in wire observations.
+        recording: A ``RecordingConfig`` dict (or ``None`` to disable).
+            Controls per-episode video + JSONL data recording.
     """
+
+    _ALL_RECORD_FIELDS = frozenset({"reward", "done", "success"})
 
     def __init__(
         self,
@@ -77,6 +82,7 @@ class MolmoSpacesBenchmark(StepBenchmark):
         task_horizon: int | None = None,
         send_wrist_image: bool = True,
         send_state: bool = True,
+        recording: dict[str, Any] | None = None,
     ) -> None:
         super().__init__()
         self.benchmark_dir = Path(benchmark_dir)
@@ -92,6 +98,25 @@ class MolmoSpacesBenchmark(StepBenchmark):
         self._task_description: str = ""
         self._step_count: int = 0
 
+        rec = RecordingConfig(**recording) if recording else None
+        if rec and rec.step_fields:
+            unknown = set(rec.step_fields) - self._ALL_RECORD_FIELDS
+            if unknown:
+                raise ValueError(f"Unknown step_fields: {unknown}. Valid: {sorted(self._ALL_RECORD_FIELDS)}")
+        self._record_fields: set[str] = (
+            set(rec.step_fields) if rec and rec.step_fields else set(self._ALL_RECORD_FIELDS)
+        )
+        self._recorder: EpisodeRecorder | None = (
+            EpisodeRecorder(
+                output_dir=rec.output_dir,
+                record_video=rec.record_video,
+                record_step=rec.record_step,
+                fps=rec.fps,
+            )
+            if rec
+            else None
+        )
+
     # -- data -------------------------------------------------------------
 
     def cleanup(self) -> None:
@@ -106,6 +131,8 @@ class MolmoSpacesBenchmark(StepBenchmark):
                 pass
             self._sampler = None
         self._task = None
+        if self._recorder is not None:
+            self._recorder.discard()
 
     def get_tasks(self) -> list[Task]:
         from molmo_spaces.evaluation.benchmark_schema import load_all_episodes
@@ -124,6 +151,7 @@ class MolmoSpacesBenchmark(StepBenchmark):
                     "name": f"{task_cls}_{i:04d}_{desc}",
                     "episode_index": i,
                     "task_cls": task_cls,
+                    "env_id": f"{task_cls}_{i:04d}",
                 }
             )
         return tasks
@@ -173,7 +201,15 @@ class MolmoSpacesBenchmark(StepBenchmark):
             raw_obs = reset_output[0]
         else:
             raw_obs = reset_output
-        return self._unwrap_batch(raw_obs)
+        unwrapped = self._unwrap_batch(raw_obs)
+
+        if self._recorder is not None:
+            self._recorder.start({"env_id": task["env_id"], "episode_idx": task.get("episode_idx", 0)})
+            frame = self._extract_frame(unwrapped)
+            if frame is not None:
+                self._recorder.record_frame(frame)
+
+        return unwrapped
 
     def step(self, action: Action) -> StepResult:
         raw = action.get("actions", action.get("action"))
@@ -201,7 +237,28 @@ class MolmoSpacesBenchmark(StepBenchmark):
             info = info[0] if info else {}
 
         done = bool(terminated or truncated)
+
+        if self._recorder is not None and self._recorder.active:
+            frame = self._extract_frame(obs)
+            if frame is not None:
+                self._recorder.record_frame(frame)
+            fields = self._record_fields
+            row: dict[str, Any] = {"step": self._step_count - 1}
+            if "reward" in fields:
+                row["reward"] = float(reward)
+            if "done" in fields:
+                row["done"] = done
+            if "success" in fields:
+                row["success"] = bool((info or {}).get("success", False))
+            self._recorder.record_step(row)
+
         return StepResult(obs=obs, reward=float(reward), done=done, info=info or {})
+
+    def _extract_frame(self, obs: Any) -> np.ndarray | None:
+        """Reuse the camera-locator helper used for wire observations."""
+        if not isinstance(obs, dict):
+            return None
+        return self._find_camera(obs, PRIMARY_CAM_ALIASES)
 
     def make_obs(self, raw_obs: Any, task: Task) -> Observation:
         if not isinstance(raw_obs, dict):
@@ -252,6 +309,8 @@ class MolmoSpacesBenchmark(StepBenchmark):
                 success = bool(step_result.info.get("success", False))
         else:
             success = bool(step_result.info.get("success", False))
+        if self._recorder is not None:
+            self._recorder.save(status="success" if success else "fail")
         return {"success": success, "steps": self._step_count}
 
     # -- specs / metadata -------------------------------------------------

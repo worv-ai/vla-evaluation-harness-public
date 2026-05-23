@@ -19,6 +19,7 @@ from typing import Any
 import numpy as np
 
 from vla_eval.benchmarks.base import StepBenchmark, StepResult
+from vla_eval.benchmarks.data_recording import EpisodeRecorder, RecordingConfig
 from vla_eval.specs import GRIPPER_CLOSE_NEG, IMAGE_RGB, LANGUAGE, POSITION_DELTA, ROTATION_EULER, DimSpec
 from vla_eval.types import Action, EpisodeResult, Observation, Task
 
@@ -54,7 +55,11 @@ class ManiSkill2Benchmark(StepBenchmark):
         max_episode_steps: Max steps per episode (default 400).
         render_resolution: Camera resolution as ``[width, height]`` (default [256, 256]).
         enabled_cameras: Camera names to include (default ``["base_camera"]``).
+        recording: A ``RecordingConfig`` dict (or ``None`` to disable).
+            Controls per-episode video + JSONL data recording.
     """
+
+    _ALL_RECORD_FIELDS = frozenset({"reward", "terminated", "truncated", "success"})
 
     def __init__(
         self,
@@ -63,6 +68,7 @@ class ManiSkill2Benchmark(StepBenchmark):
         max_episode_steps: int = 400,
         render_resolution: list[int] | tuple[int, int] = (256, 256),
         enabled_cameras: list[str] | None = None,
+        recording: dict[str, Any] | None = None,
     ) -> None:
         super().__init__()
         self.tasks = tasks or DEFAULT_TASKS
@@ -76,6 +82,26 @@ class ManiSkill2Benchmark(StepBenchmark):
         self._goal: str = ""
         self.gripper_state: float = -1.0
 
+        rec = RecordingConfig(**recording) if recording else None
+        if rec and rec.step_fields:
+            unknown = set(rec.step_fields) - self._ALL_RECORD_FIELDS
+            if unknown:
+                raise ValueError(f"Unknown step_fields: {unknown}. Valid: {sorted(self._ALL_RECORD_FIELDS)}")
+        self._record_fields: set[str] = (
+            set(rec.step_fields) if rec and rec.step_fields else set(self._ALL_RECORD_FIELDS)
+        )
+        self._recorder: EpisodeRecorder | None = (
+            EpisodeRecorder(
+                output_dir=rec.output_dir,
+                record_video=rec.record_video,
+                record_step=rec.record_step,
+                fps=rec.fps,
+            )
+            if rec
+            else None
+        )
+        self._step_counter: int = 0
+
     def cleanup(self) -> None:
         if self._env is not None:
             try:
@@ -83,9 +109,11 @@ class ManiSkill2Benchmark(StepBenchmark):
             except Exception:
                 pass
             self._env = None
+        if self._recorder is not None:
+            self._recorder.discard()
 
     def get_tasks(self) -> list[Task]:
-        return [{"name": t, "env_name": t} for t in self.tasks]
+        return [{"name": t, "env_name": t, "env_id": t} for t in self.tasks]
 
     def reset(self, task: Task) -> Any:
         import gymnasium as gym
@@ -118,6 +146,13 @@ class ManiSkill2Benchmark(StepBenchmark):
         else:
             self._goal = goal_template
 
+        if self._recorder is not None:
+            self._recorder.start({"env_id": task["env_id"], "episode_idx": task.get("episode_idx", 0)})
+            frame = self._extract_frame(obs)
+            if frame is not None:
+                self._recorder.record_frame(frame)
+        self._step_counter = 0
+
         return obs
 
     def step(self, action: Action) -> StepResult:
@@ -142,7 +177,33 @@ class ManiSkill2Benchmark(StepBenchmark):
         self.gripper_state = -env_action[-1]
 
         done = terminated or truncated
+
+        if self._recorder is not None and self._recorder.active:
+            frame = self._extract_frame(obs)
+            if frame is not None:
+                self._recorder.record_frame(frame)
+            fields = self._record_fields
+            row: dict[str, Any] = {"step": self._step_counter}
+            if "reward" in fields:
+                row["reward"] = float(reward)
+            if "terminated" in fields:
+                row["terminated"] = bool(terminated)
+            if "truncated" in fields:
+                row["truncated"] = bool(truncated)
+            if "success" in fields:
+                row["success"] = bool(info.get("success", False))
+            self._recorder.record_step(row)
+        self._step_counter += 1
+
         return StepResult(obs=obs, reward=reward, done=done, info=info)
+
+    def _extract_frame(self, obs: Any) -> np.ndarray | None:
+        """Pick the first enabled camera's RGB image as the recording frame."""
+        try:
+            img = obs["image"][self.enabled_cameras[0]]["rgb"]
+            return np.asarray(img, dtype=np.uint8)
+        except (KeyError, TypeError, IndexError):
+            return None
 
     def make_obs(self, raw_obs: Any, task: Task) -> Observation:
         # Extract camera images
@@ -159,7 +220,10 @@ class ManiSkill2Benchmark(StepBenchmark):
         return step_result.done
 
     def get_step_result(self, step_result: StepResult) -> EpisodeResult:
-        return {"success": bool(step_result.info.get("success", False))}
+        success = bool(step_result.info.get("success", False))
+        if self._recorder is not None:
+            self._recorder.save(status="success" if success else "fail")
+        return {"success": success}
 
     def get_metadata(self) -> dict[str, Any]:
         return {"max_steps": self.max_episode_steps}

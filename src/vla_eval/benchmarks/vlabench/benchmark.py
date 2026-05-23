@@ -20,6 +20,7 @@ from typing import Any
 import numpy as np
 
 from vla_eval.benchmarks.base import StepBenchmark, StepResult
+from vla_eval.benchmarks.data_recording import EpisodeRecorder, RecordingConfig
 from vla_eval.specs import GRIPPER_RAW, IMAGE_RGB, LANGUAGE, POSITION_DELTA, ROTATION_EULER, DimSpec
 from vla_eval.types import Action, EpisodeResult, Observation, Task
 
@@ -45,13 +46,18 @@ class VLABenchBenchmark(StepBenchmark):
         tasks: List of VLABench task names to evaluate.
         robot: Robot name (default ``"franka"``).
         max_steps: Maximum steps per episode (default 200).
+        recording: A ``RecordingConfig`` dict (or ``None`` to disable).
+            Controls per-episode video + JSONL data recording.
     """
+
+    _ALL_RECORD_FIELDS = frozenset({"reward", "done", "success"})
 
     def __init__(
         self,
         tasks: list[str] | None = None,
         robot: str = "franka",
         max_steps: int = DEFAULT_MAX_STEPS,
+        recording: dict[str, Any] | None = None,
     ) -> None:
         super().__init__()
         self._task_names = tasks or DEFAULT_TASKS
@@ -62,6 +68,26 @@ class VLABenchBenchmark(StepBenchmark):
         self._instruction: str = ""
         self._last_ee_state: np.ndarray | None = None
 
+        rec = RecordingConfig(**recording) if recording else None
+        if rec and rec.step_fields:
+            unknown = set(rec.step_fields) - self._ALL_RECORD_FIELDS
+            if unknown:
+                raise ValueError(f"Unknown step_fields: {unknown}. Valid: {sorted(self._ALL_RECORD_FIELDS)}")
+        self._record_fields: set[str] = (
+            set(rec.step_fields) if rec and rec.step_fields else set(self._ALL_RECORD_FIELDS)
+        )
+        self._recorder: EpisodeRecorder | None = (
+            EpisodeRecorder(
+                output_dir=rec.output_dir,
+                record_video=rec.record_video,
+                record_step=rec.record_step,
+                fps=rec.fps,
+            )
+            if rec
+            else None
+        )
+        self._step_counter: int = 0
+
     def cleanup(self) -> None:
         if self._env is not None:
             try:
@@ -69,6 +95,8 @@ class VLABenchBenchmark(StepBenchmark):
             except Exception:
                 pass
             self._env = None
+        if self._recorder is not None:
+            self._recorder.discard()
 
     def _ensure_vlabench(self) -> None:
         """Lazy-import VLABench and register robots/tasks."""
@@ -89,7 +117,7 @@ class VLABenchBenchmark(StepBenchmark):
             LM4ManipDMEnv._pcd_patched = True
 
     def get_tasks(self) -> list[Task]:
-        return [{"name": t} for t in self._task_names]
+        return [{"name": t, "env_id": t} for t in self._task_names]
 
     def reset(self, task: Task) -> Any:
         self._ensure_vlabench()
@@ -109,6 +137,14 @@ class VLABenchBenchmark(StepBenchmark):
         obs = self._env.get_observation(require_pcd=False)
         self._instruction = self._env.task.get_instruction()
         self._last_ee_state = obs.get("ee_state", None)
+
+        if self._recorder is not None:
+            self._recorder.start({"env_id": task["env_id"], "episode_idx": task.get("episode_idx", 0)})
+            frame = self._extract_frame(obs)
+            if frame is not None:
+                self._recorder.record_frame(frame)
+        self._step_counter = 0
+
         return obs
 
     def step(self, action: Action) -> StepResult:
@@ -157,12 +193,43 @@ class VLABenchBenchmark(StepBenchmark):
         self._last_ee_state = obs.get("ee_state", None)
         self._instruction = self._env.task.get_instruction()
 
-        return StepResult(
+        result = StepResult(
             obs=obs,
             reward=1.0 if success else 0.0,
             done=success,
             info={"success": success, "timestep": timestep},
         )
+
+        if self._recorder is not None and self._recorder.active:
+            frame = self._extract_frame(obs)
+            if frame is not None:
+                self._recorder.record_frame(frame)
+            fields = self._record_fields
+            row: dict[str, Any] = {"step": self._step_counter}
+            if "reward" in fields:
+                row["reward"] = result.reward
+            if "done" in fields:
+                row["done"] = bool(result.done)
+            if "success" in fields:
+                row["success"] = bool(success)
+            self._recorder.record_step(row)
+        self._step_counter += 1
+
+        return result
+
+    def _extract_frame(self, obs: Any) -> np.ndarray | None:
+        """First RGB camera, normalised to (H, W, 3) uint8."""
+        if not isinstance(obs, dict):
+            return None
+        rgb = obs.get("rgb")
+        if rgb is None or len(rgb) == 0:
+            return None
+        img = np.asarray(rgb[0])
+        if img.ndim != 3 or img.shape[-1] != 3:
+            return None
+        if img.dtype != np.uint8:
+            img = img.astype(np.uint8)
+        return img
 
     def make_obs(self, raw_obs: Any, task: Task) -> Observation:
         images: dict[str, np.ndarray] = {}
@@ -179,7 +246,10 @@ class VLABenchBenchmark(StepBenchmark):
         return step_result.done
 
     def get_step_result(self, step_result: StepResult) -> EpisodeResult:
-        return {"success": step_result.info.get("success", False)}
+        success = bool(step_result.info.get("success", False))
+        if self._recorder is not None:
+            self._recorder.save(status="success" if success else "fail")
+        return {"success": success}
 
     def get_metadata(self) -> dict[str, Any]:
         return {"max_steps": self._max_steps}

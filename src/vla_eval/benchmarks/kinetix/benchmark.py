@@ -19,6 +19,7 @@ from typing import Any
 import numpy as np
 
 from vla_eval.benchmarks.base import StepBenchmark, StepResult
+from vla_eval.benchmarks.data_recording import EpisodeRecorder, RecordingConfig
 from vla_eval.specs import IMAGE_RGB, LANGUAGE, RAW, DimSpec
 from vla_eval.types import Action, EpisodeResult, Observation, Task
 
@@ -86,7 +87,13 @@ class KinetixBenchmark(StepBenchmark):
             levels. Falls back to kinetix built-in levels if None.
         observation_type: ``"pixels"`` (default) for rendered images, or
             ``"symbolic"`` for the flat symbolic state vector used by RTC.
+        recording: A ``RecordingConfig`` dict (or ``None`` to disable).
+            Controls per-episode video + JSONL data recording. Video is only
+            recorded when ``observation_type="pixels"`` (symbolic obs has no
+            renderable frame).
     """
+
+    _ALL_RECORD_FIELDS = frozenset({"reward", "done", "success"})
 
     def __init__(
         self,
@@ -96,6 +103,7 @@ class KinetixBenchmark(StepBenchmark):
         rtc_worlds_dir: str | None = None,
         observation_type: str = "pixels",
         action_noise_std: float = 0.0,
+        recording: dict[str, Any] | None = None,
     ) -> None:
         super().__init__()
         self._task_names = tasks
@@ -119,6 +127,30 @@ class KinetixBenchmark(StepBenchmark):
         self._episode_success = False
         self._jax = None
         self._jnp = None
+
+        rec = RecordingConfig(**recording) if recording else None
+        if rec and rec.step_fields:
+            unknown = set(rec.step_fields) - self._ALL_RECORD_FIELDS
+            if unknown:
+                raise ValueError(f"Unknown step_fields: {unknown}. Valid: {sorted(self._ALL_RECORD_FIELDS)}")
+        self._record_fields: set[str] = (
+            set(rec.step_fields) if rec and rec.step_fields else set(self._ALL_RECORD_FIELDS)
+        )
+        # Force-disable video for symbolic obs (no renderable frame).
+        record_video = bool(rec and rec.record_video and observation_type == "pixels")
+        if rec and rec.record_video and observation_type == "symbolic":
+            logger.warning("Kinetix recording: video disabled for symbolic observation_type")
+        self._recorder: EpisodeRecorder | None = (
+            EpisodeRecorder(
+                output_dir=rec.output_dir,
+                record_video=record_video,
+                record_step=rec.record_step,
+                fps=rec.fps,
+            )
+            if rec
+            else None
+        )
+        self._step_counter: int = 0
 
     def _init_jax(self) -> None:
         """Lazily import JAX (heavy import)."""
@@ -172,12 +204,14 @@ class KinetixBenchmark(StepBenchmark):
         self._level_state = None
         self._rng = None
         self._current_level = None
+        if self._recorder is not None:
+            self._recorder.discard()
 
     def get_tasks(self) -> list[Task]:
         if self._task_names is not None:
             name_set = set(self._task_names)
-            return [t for t in RTC_12_TASKS if t["name"] in name_set]
-        return list(RTC_12_TASKS)
+            return [{**t, "env_id": t["level"]} for t in RTC_12_TASKS if t["name"] in name_set]
+        return [{**t, "env_id": t["level"]} for t in RTC_12_TASKS]
 
     def reset(self, task: Task) -> Any:
         self._init_jax()
@@ -201,6 +235,13 @@ class KinetixBenchmark(StepBenchmark):
         self._rng = rng
         self._step_count = 0
         self._episode_success = False
+
+        if self._recorder is not None:
+            self._recorder.start({"env_id": task["env_id"], "episode_idx": episode_idx})
+            frame = self._extract_frame(obs)
+            if frame is not None:
+                self._recorder.record_frame(frame)
+        self._step_counter = 0
 
         return obs
 
@@ -245,7 +286,36 @@ class KinetixBenchmark(StepBenchmark):
         if reward_val > 0:
             self._episode_success = True
 
+        if self._recorder is not None and self._recorder.active:
+            frame = self._extract_frame(obs)
+            if frame is not None:
+                self._recorder.record_frame(frame)
+            fields = self._record_fields
+            row: dict[str, Any] = {"step": self._step_counter}
+            if "reward" in fields:
+                row["reward"] = reward_val
+            if "done" in fields:
+                row["done"] = done_val
+            if "success" in fields:
+                row["success"] = self._episode_success
+            self._recorder.record_step(row)
+        self._step_counter += 1
+
         return StepResult(obs=obs, reward=reward_val, done=done_val, info=info)
+
+    def _extract_frame(self, obs: Any) -> np.ndarray | None:
+        """PixelsObservation.image (H, W, 3 float32 [0,1]) → uint8. None for symbolic."""
+        if self._observation_type != "pixels":
+            return None
+        img_attr = getattr(obs, "image", None)
+        if img_attr is None:
+            return None
+        img = np.asarray(img_attr)
+        if img.ndim != 3 or img.shape[-1] != 3:
+            return None
+        if img.dtype != np.uint8:
+            img = (np.clip(img, 0.0, 1.0) * 255).astype(np.uint8)
+        return img
 
     def make_obs(self, raw_obs: Any, task: Task) -> Observation:
         if self._observation_type == "symbolic":
@@ -271,6 +341,8 @@ class KinetixBenchmark(StepBenchmark):
 
     def get_step_result(self, step_result: StepResult) -> EpisodeResult:
         # Success if reward > 0 at any step during the episode
+        if self._recorder is not None:
+            self._recorder.save(status="success" if self._episode_success else "fail")
         return {"success": self._episode_success}
 
     def get_metadata(self) -> dict[str, Any]:
