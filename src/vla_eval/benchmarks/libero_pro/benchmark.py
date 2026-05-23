@@ -81,6 +81,7 @@ class LIBEROProBenchmark(LIBEROBenchmark):
         num_steps_wait: int = 10,
         send_wrist_image: bool = False,
         send_state: bool = False,
+        recording: dict[str, Any] | None = None,
     ) -> None:
         self._perturbation = self._resolve_perturbation(perturbation)
 
@@ -99,6 +100,7 @@ class LIBEROProBenchmark(LIBEROBenchmark):
             num_steps_wait=num_steps_wait,
             send_wrist_image=send_wrist_image,
             send_state=send_state,
+            recording=recording,
         )
 
     @staticmethod

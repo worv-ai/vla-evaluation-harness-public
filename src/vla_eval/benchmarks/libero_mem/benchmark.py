@@ -21,6 +21,7 @@ class LIBEROMemBenchmark(LIBEROBenchmark):
         num_steps_wait: int = 10,
         send_wrist_image: bool = False,
         send_state: bool = False,
+        recording: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(
             suite=suite,
@@ -28,6 +29,7 @@ class LIBEROMemBenchmark(LIBEROBenchmark):
             num_steps_wait=num_steps_wait,
             send_wrist_image=send_wrist_image,
             send_state=send_state,
+            recording=recording,
         )
 
     def reset(self, task: Task) -> Any:

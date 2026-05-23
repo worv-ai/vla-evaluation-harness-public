@@ -10,6 +10,7 @@ import math
 import numpy as np
 
 from vla_eval.benchmarks.base import StepBenchmark, StepResult
+from vla_eval.benchmarks.data_recording import EpisodeRecorder, RecordingConfig
 from vla_eval.benchmarks.libero.utils import preprocess_libero_image
 from vla_eval.rotation import matrix_to_quat, quat_to_axisangle
 from vla_eval.specs import (
@@ -86,7 +87,11 @@ class LIBEROBenchmark(StepBenchmark):
             When None, uses ``MAX_STEP_MAPPING[suite]``.
         env_seed: Seed for ``env.seed()``.  When None, defaults to ``seed``.
             OpenVLA reference uses ``env_seed=0`` separately from ``seed=7``.
+        recording: A ``RecordingConfig`` dict (or ``None`` to disable).
+            Controls per-episode video + JSONL data recording.
     """
+
+    _ALL_RECORD_FIELDS = frozenset({"reward", "done", "robot_state"})
 
     def __init__(
         self,
@@ -99,6 +104,7 @@ class LIBEROBenchmark(StepBenchmark):
         max_steps: int | None = None,
         env_seed: int | None = None,
         quat_no_antipodal: bool = False,
+        recording: dict[str, Any] | None = None,
     ) -> None:
         super().__init__()
         self.suite = suite
@@ -114,6 +120,26 @@ class LIBEROBenchmark(StepBenchmark):
         self._task_suite = None
         self._current_task_id: int | None = None
 
+        rec = RecordingConfig(**recording) if recording else None
+        if rec and rec.step_fields:
+            unknown = set(rec.step_fields) - self._ALL_RECORD_FIELDS
+            if unknown:
+                raise ValueError(f"Unknown step_fields: {unknown}. Valid: {sorted(self._ALL_RECORD_FIELDS)}")
+        self._record_fields: set[str] = (
+            set(rec.step_fields) if rec and rec.step_fields else set(self._ALL_RECORD_FIELDS)
+        )
+        self._recorder: EpisodeRecorder | None = (
+            EpisodeRecorder(
+                output_dir=rec.output_dir,
+                record_video=rec.record_video,
+                record_step=rec.record_step,
+                fps=rec.fps,
+            )
+            if rec
+            else None
+        )
+        self._step_counter: int = 0
+
     def cleanup(self) -> None:
         if self._env is not None:
             try:
@@ -121,6 +147,8 @@ class LIBEROBenchmark(StepBenchmark):
             except Exception:
                 pass
             self._env = None
+        if self._recorder is not None:
+            self._recorder.discard()
 
     def _init_libero(self) -> None:
         """Lazily initialize LIBERO (heavy imports)."""
@@ -159,6 +187,7 @@ class LIBEROBenchmark(StepBenchmark):
                     "suite": self.suite,
                     "task_id": task_id,
                     "task_obj": task,
+                    "env_id": f"{self.suite}_task{task_id:02d}",
                 }
             )
         return tasks
@@ -206,6 +235,11 @@ class LIBEROBenchmark(StepBenchmark):
             for robot in self._env.robots:
                 robot.controller.use_delta = False
 
+        if self._recorder is not None:
+            self._recorder.start({"env_id": task["env_id"], "episode_idx": episode_idx})
+            self._recorder.record_frame(preprocess_libero_image(obs["agentview_image"], LIBERO_ENV_RESOLUTION))
+        self._step_counter = 0
+
         return obs
 
     def step(self, action: Action) -> StepResult:
@@ -223,6 +257,21 @@ class LIBEROBenchmark(StepBenchmark):
 
         assert self._env is not None
         obs, reward, done, info = self._env.step(processed_action)
+
+        if self._recorder is not None and self._recorder.active:
+            self._recorder.record_frame(preprocess_libero_image(obs["agentview_image"], LIBERO_ENV_RESOLUTION))
+            fields = self._record_fields
+            row: dict[str, Any] = {"step": self._step_counter}
+            if "reward" in fields:
+                row["reward"] = float(reward)
+            if "done" in fields:
+                row["done"] = bool(done)
+            if "robot_state" in fields:
+                state = np.concatenate([obs["robot0_eef_pos"], obs["robot0_eef_quat"], obs["robot0_gripper_qpos"]])
+                row["robot_state"] = state.tolist()
+            self._recorder.record_step(row)
+        self._step_counter += 1
+
         return StepResult(obs=obs, reward=reward, done=done, info=info)
 
     def make_obs(self, raw_obs: Any, task: Task) -> Observation:
@@ -262,7 +311,10 @@ class LIBEROBenchmark(StepBenchmark):
         return step_result.done
 
     def get_step_result(self, step_result: StepResult) -> EpisodeResult:
-        return {"success": step_result.done}
+        success = bool(step_result.done)
+        if self._recorder is not None:
+            self._recorder.save(status="success" if success else "fail")
+        return {"success": success}
 
     def get_metadata(self) -> dict[str, Any]:
         return {
