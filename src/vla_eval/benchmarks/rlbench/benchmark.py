@@ -39,7 +39,7 @@ class RLBenchBenchmark(StepBenchmark):
             Controls per-episode video + JSONL data recording.
     """
 
-    _ALL_RECORD_FIELDS = frozenset({"reward", "done"})
+    _ALL_RECORD_FIELDS = frozenset({"reward", "done", "success"})
 
     def __init__(
         self,
@@ -179,6 +179,8 @@ class RLBenchBenchmark(StepBenchmark):
                 row["reward"] = float(reward)
             if "done" in fields:
                 row["done"] = bool(terminate)
+            if "success" in fields:
+                row["success"] = float(reward) > 0.99
             self._recorder.record_step(row)
         self._step_counter += 1
 

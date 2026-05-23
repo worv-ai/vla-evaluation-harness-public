@@ -72,7 +72,7 @@ class SimplerEnvBenchmark(StepBenchmark):
             Controls per-episode video + JSONL data recording.
     """
 
-    _ALL_RECORD_FIELDS = frozenset({"reward", "done", "truncated"})
+    _ALL_RECORD_FIELDS = frozenset({"reward", "done", "truncated", "success"})
 
     def __init__(
         self,
@@ -333,6 +333,8 @@ class SimplerEnvBenchmark(StepBenchmark):
                 row["done"] = bool(done)
             if "truncated" in fields:
                 row["truncated"] = bool(truncated)
+            if "success" in fields:
+                row["success"] = self._success_seen
             self._recorder.record_step(row)
         self._step_counter += 1
 

@@ -190,7 +190,7 @@ class CALVINBenchmark(StepBenchmark):
             with ``subtask_idx`` available as a step field.
     """
 
-    _ALL_RECORD_FIELDS = frozenset({"reward", "done", "subtask_idx", "completed"})
+    _ALL_RECORD_FIELDS = frozenset({"reward", "done", "subtask_idx", "completed", "success"})
 
     def __init__(
         self,
@@ -592,6 +592,8 @@ class CALVINBenchmark(StepBenchmark):
             row["subtask_idx"] = self._subtask_idx
         if "completed" in fields:
             row["completed"] = self._completed
+        if "success" in fields:
+            row["success"] = bool(result.info.get("success", False))
         self._recorder.record_step(row)
         self._step_counter += 1
 
