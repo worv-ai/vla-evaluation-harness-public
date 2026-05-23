@@ -11,6 +11,7 @@ from typing import Any
 import numpy as np
 
 from vla_eval.benchmarks.base import StepBenchmark, StepResult
+from vla_eval.benchmarks.data_recording import EpisodeRecorder, RecordingConfig
 from vla_eval.rotation import quat_to_axisangle
 from vla_eval.specs import (
     GRIPPER_CLOSE_POS,
@@ -45,7 +46,11 @@ class RoboCerebraBenchmark(StepBenchmark):
         num_steps_wait: Dummy action steps at episode start.
         send_wrist_image: Include wrist camera in observations.
         send_state: Include proprioceptive state in observations.
+        recording: A ``RecordingConfig`` dict (or ``None`` to disable).
+            Controls per-episode video + JSONL data recording.
     """
+
+    _ALL_RECORD_FIELDS = frozenset({"reward", "done", "success"})
 
     def __init__(
         self,
@@ -55,6 +60,7 @@ class RoboCerebraBenchmark(StepBenchmark):
         num_steps_wait: int = 15,
         send_wrist_image: bool = False,
         send_state: bool = False,
+        recording: dict[str, Any] | None = None,
     ) -> None:
         super().__init__()
         self.robocerebra_root = robocerebra_root
@@ -67,6 +73,26 @@ class RoboCerebraBenchmark(StepBenchmark):
         self._current_goal: dict | None = None
         self._libero_inited = False
 
+        rec = RecordingConfig(**recording) if recording else None
+        if rec and rec.step_fields:
+            unknown = set(rec.step_fields) - self._ALL_RECORD_FIELDS
+            if unknown:
+                raise ValueError(f"Unknown step_fields: {unknown}. Valid: {sorted(self._ALL_RECORD_FIELDS)}")
+        self._record_fields: set[str] = (
+            set(rec.step_fields) if rec and rec.step_fields else set(self._ALL_RECORD_FIELDS)
+        )
+        self._recorder: EpisodeRecorder | None = (
+            EpisodeRecorder(
+                output_dir=rec.output_dir,
+                record_video=rec.record_video,
+                record_step=rec.record_step,
+                fps=rec.fps,
+            )
+            if rec
+            else None
+        )
+        self._step_counter: int = 0
+
     def cleanup(self) -> None:
         if self._env is not None:
             try:
@@ -74,6 +100,8 @@ class RoboCerebraBenchmark(StepBenchmark):
             except Exception:
                 pass
             self._env = None
+        if self._recorder is not None:
+            self._recorder.discard()
 
     # ------------------------------------------------------------------
     def _ensure_libero(self) -> None:
@@ -114,6 +142,7 @@ class RoboCerebraBenchmark(StepBenchmark):
                         "case_name": case_dir.name,
                         "task_dir": str(case_dir),
                         "bddl_file": str(bddl_files[0]),
+                        "env_id": f"{task_type}_{case_dir.name}",
                     }
                 )
         return tasks
@@ -192,6 +221,13 @@ class RoboCerebraBenchmark(StepBenchmark):
         for _ in range(self.num_steps_wait):
             obs, _, _, _ = self._env.step(_DUMMY_ACTION)
 
+        if self._recorder is not None:
+            self._recorder.start({"env_id": task["env_id"], "episode_idx": task.get("episode_idx", 0)})
+            frame = self._extract_frame(obs)
+            if frame is not None:
+                self._recorder.record_frame(frame)
+        self._step_counter = 0
+
         return obs
 
     # ------------------------------------------------------------------
@@ -217,7 +253,30 @@ class RoboCerebraBenchmark(StepBenchmark):
             except Exception as e:
                 logger.warning("Failed to check success criteria: %s", e)
         info["success"] = success
+
+        if self._recorder is not None and self._recorder.active:
+            frame = self._extract_frame(obs)
+            if frame is not None:
+                self._recorder.record_frame(frame)
+            fields = self._record_fields
+            row: dict[str, Any] = {"step": self._step_counter}
+            if "reward" in fields:
+                row["reward"] = float(reward)
+            if "done" in fields:
+                row["done"] = bool(done)
+            if "success" in fields:
+                row["success"] = success
+            self._recorder.record_step(row)
+        self._step_counter += 1
+
         return StepResult(obs=obs, reward=reward, done=done, info=info)
+
+    @staticmethod
+    def _extract_frame(obs: Any) -> np.ndarray | None:
+        """robosuite agentview, flipped both axes to match make_obs."""
+        if not isinstance(obs, dict) or "agentview_image" not in obs:
+            return None
+        return np.ascontiguousarray(np.asarray(obs["agentview_image"])[::-1, ::-1])
 
     # ------------------------------------------------------------------
     def make_obs(self, raw_obs: Any, task: Task) -> Observation:
@@ -251,7 +310,10 @@ class RoboCerebraBenchmark(StepBenchmark):
         return step_result.done
 
     def get_step_result(self, step_result: StepResult) -> EpisodeResult:
-        return {"success": step_result.info.get("success", False)}
+        success = bool(step_result.info.get("success", False))
+        if self._recorder is not None:
+            self._recorder.save(status="success" if success else "fail")
+        return {"success": success}
 
     def get_metadata(self) -> dict[str, Any]:
         return {"max_steps": 400}

@@ -16,6 +16,7 @@ from typing import Any
 import numpy as np
 
 from vla_eval.benchmarks.base import StepBenchmark, StepResult
+from vla_eval.benchmarks.data_recording import EpisodeRecorder, RecordingConfig
 from vla_eval.rotation import axisangle_to_matrix, matrix_to_euler_xyz
 from vla_eval.specs import (
     GRIPPER_CLOSE_NEG,
@@ -183,7 +184,13 @@ class CALVINBenchmark(StepBenchmark):
         absolute_action: Use absolute 7-D ``[pos3, euler3, gripper]``
             actions instead of delta accumulation.
         ep_len: Override per-subtask step limit (default 360).
+        recording: A ``RecordingConfig`` dict (or ``None`` to disable).
+            Controls per-episode video + JSONL data recording. One episode
+            is the full 5-subtask chain — the recording spans the chain,
+            with ``subtask_idx`` available as a step field.
     """
+
+    _ALL_RECORD_FIELDS = frozenset({"reward", "done", "subtask_idx", "completed"})
 
     def __init__(
         self,
@@ -194,6 +201,7 @@ class CALVINBenchmark(StepBenchmark):
         send_state: bool = False,
         absolute_action: bool = False,
         ep_len: int | None = None,
+        recording: dict[str, Any] | None = None,
     ) -> None:
         super().__init__()
         self.dataset_path = dataset_path
@@ -216,6 +224,28 @@ class CALVINBenchmark(StepBenchmark):
         self._subtask_just_reset: bool = False
         self._device = None
 
+        rec = RecordingConfig(**recording) if recording else None
+        if rec and rec.step_fields:
+            unknown = set(rec.step_fields) - self._ALL_RECORD_FIELDS
+            if unknown:
+                raise ValueError(f"Unknown step_fields: {unknown}. Valid: {sorted(self._ALL_RECORD_FIELDS)}")
+        self._record_fields: set[str] = (
+            set(rec.step_fields) if rec and rec.step_fields else set(self._ALL_RECORD_FIELDS)
+        )
+        # Default to 30 fps when caller didn't specify (CALVIN physics ~30 Hz).
+        fps = rec.fps if rec and "fps" in (recording or {}) else 30
+        self._recorder: EpisodeRecorder | None = (
+            EpisodeRecorder(
+                output_dir=rec.output_dir,
+                record_video=rec.record_video,
+                record_step=rec.record_step,
+                fps=fps,
+            )
+            if rec
+            else None
+        )
+        self._step_counter: int = 0
+
     def cleanup(self) -> None:
         if self._env is not None:
             try:
@@ -223,6 +253,8 @@ class CALVINBenchmark(StepBenchmark):
             except Exception:
                 pass
             self._env = None
+        if self._recorder is not None:
+            self._recorder.discard()
 
     def _init_calvin(self) -> None:
         """Lazily initialize CALVIN environment and task oracle."""
@@ -433,6 +465,7 @@ class CALVINBenchmark(StepBenchmark):
                     "initial_condition": initial_condition,
                     "eval_sequence": eval_sequence,
                     "seq_idx": idx,
+                    "env_id": f"seq_{idx:04d}",
                 }
             )
         return tasks
@@ -461,6 +494,13 @@ class CALVINBenchmark(StepBenchmark):
         # Capture start_info for task oracle
         self._start_info = self._env.get_info()
 
+        if self._recorder is not None:
+            self._recorder.start({"env_id": task["env_id"], "episode_idx": task.get("episode_idx", 0)})
+            frame = self._extract_frame(obs)
+            if frame is not None:
+                self._recorder.record_frame(frame)
+        self._step_counter = 0
+
         return obs
 
     def step(self, action: Action) -> StepResult:
@@ -488,7 +528,9 @@ class CALVINBenchmark(StepBenchmark):
             self._completed += 1
             if self._completed >= NUM_SUBTASKS:
                 # All 5 subtasks done — sequence success
-                return StepResult(obs=obs, reward=1.0, done=True, info={"success": True})
+                result = StepResult(obs=obs, reward=1.0, done=True, info={"success": True})
+                self._record_step(obs, result)
+                return result
 
             # Move to next subtask
             self._subtask_idx += 1
@@ -501,23 +543,57 @@ class CALVINBenchmark(StepBenchmark):
                 self._last_act = np.concatenate([raw[0:6], raw[14:15]])
 
             self._subtask_just_reset = True
-            return StepResult(
+            result = StepResult(
                 obs=obs,
                 reward=0.0,
                 done=False,
                 info={"completed": self._completed},
             )
+            self._record_step(obs, result)
+            return result
 
         # Check if subtask timed out
         if self._subtask_step >= ep_len:
-            return StepResult(
+            result = StepResult(
                 obs=obs,
                 reward=0.0,
                 done=True,
                 info={"success": False, "completed": self._completed},
             )
+            self._record_step(obs, result)
+            return result
 
-        return StepResult(obs=obs, reward=0.0, done=False, info={})
+        result = StepResult(obs=obs, reward=0.0, done=False, info={})
+        self._record_step(obs, result)
+        return result
+
+    def _extract_frame(self, obs: Any) -> np.ndarray | None:
+        """rgb_static [C, H, W] float [-1, 1] → [H, W, C] uint8. Mirrors make_obs."""
+        try:
+            rgb_tensor = obs["rgb_obs"]["rgb_static"][0, 0]
+        except (KeyError, TypeError, IndexError):
+            return None
+        return ((rgb_tensor.permute(1, 2, 0).cpu().numpy() + 1) / 2 * 255).astype(np.uint8)
+
+    def _record_step(self, obs: Any, result: StepResult) -> None:
+        if self._recorder is None or not self._recorder.active:
+            self._step_counter += 1
+            return
+        frame = self._extract_frame(obs)
+        if frame is not None:
+            self._recorder.record_frame(frame)
+        fields = self._record_fields
+        row: dict[str, Any] = {"step": self._step_counter}
+        if "reward" in fields:
+            row["reward"] = float(result.reward)
+        if "done" in fields:
+            row["done"] = bool(result.done)
+        if "subtask_idx" in fields:
+            row["subtask_idx"] = self._subtask_idx
+        if "completed" in fields:
+            row["completed"] = self._completed
+        self._recorder.record_step(row)
+        self._step_counter += 1
 
     def _process_absolute_action(self, action: Action) -> np.ndarray:
         """Process 7D absolute action [pos3, axisangle3, gripper] → [pos3, euler3, gripper].
@@ -593,8 +669,11 @@ class CALVINBenchmark(StepBenchmark):
         return step_result.done
 
     def get_step_result(self, step_result: StepResult) -> EpisodeResult:
+        success = bool(step_result.info.get("success", False))
+        if self._recorder is not None:
+            self._recorder.save(status="success" if success else "fail")
         return {
-            "success": step_result.info.get("success", False),
+            "success": success,
             "completed_subtasks": step_result.info.get("completed", self._completed),
         }
 
