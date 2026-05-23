@@ -196,7 +196,12 @@ class RoboMMEBenchmark(StepBenchmark):
             set(rec.step_fields) if rec and rec.step_fields else set(self._ALL_RECORD_FIELDS)
         )
         self._recorder: EpisodeRecorder | None = (
-            EpisodeRecorder(output_dir=rec.output_dir, record_video=rec.record_video, record_step=rec.record_step)
+            EpisodeRecorder(
+                output_dir=rec.output_dir,
+                record_video=rec.record_video,
+                record_step=rec.record_step,
+                fps=rec.fps,
+            )
             if rec
             else None
         )

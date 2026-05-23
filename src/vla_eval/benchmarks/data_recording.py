@@ -38,6 +38,7 @@ class RecordingConfig:
     record_video: bool = True
     record_step: bool = True
     step_fields: list[str] = field(default_factory=list)
+    fps: int = 20
 
 
 __all__ = ["EpisodeRecorder", "RecordingConfig"]
