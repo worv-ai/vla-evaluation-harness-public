@@ -571,9 +571,9 @@ class CALVINBenchmark(StepBenchmark):
         """rgb_static [C, H, W] float [-1, 1] → [H, W, C] uint8. Mirrors make_obs."""
         try:
             rgb_tensor = obs["rgb_obs"]["rgb_static"][0, 0]
-        except (KeyError, TypeError, IndexError):
+            return ((rgb_tensor.permute(1, 2, 0).cpu().numpy() + 1) / 2 * 255).astype(np.uint8)
+        except (KeyError, TypeError, IndexError, AttributeError):
             return None
-        return ((rgb_tensor.permute(1, 2, 0).cpu().numpy() + 1) / 2 * 255).astype(np.uint8)
 
     def _record_step(self, obs: Any, result: StepResult) -> None:
         if self._recorder is None or not self._recorder.active:
