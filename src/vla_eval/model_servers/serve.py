@@ -370,8 +370,23 @@ def _resolve_cli_type(
     args = getattr(annotation, "__args__", None)
     if isinstance(annotation, _types.UnionType) or origin is _typing.Union:
         non_none = [a for a in (args or ()) if a is not type(None)]
+        nullable = (args is not None) and len(non_none) < len(args)
         if len(non_none) == 1:
-            return _resolve_cli_type(non_none[0], default)
+            inner_fn, inner_is_bool, inner_skip = _resolve_cli_type(non_none[0], default)
+            if nullable and not inner_skip and not inner_is_bool and inner_fn is not None:
+                # yaml `null` round-trips through cmd_serve as the literal
+                # string "None"; treat it (and "null"/"") as Python None so
+                # the inner constructor sees the right type instead of failing
+                # on int("None")-style coercion.
+                _NULL_TOKENS = frozenset({"none", "null", ""})
+
+                def _nullable(s: str, _inner=inner_fn) -> Any:
+                    if s.strip().lower() in _NULL_TOKENS:
+                        return None
+                    return _inner(s)
+
+                return (_nullable, False, False)
+            return (inner_fn, inner_is_bool, inner_skip)
         if str in non_none:
             return (str, False, False)
         return (None, False, True)  # complex union → skip
