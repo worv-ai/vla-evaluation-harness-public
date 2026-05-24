@@ -12,7 +12,7 @@ from typing import Any
 import numpy as np
 
 from vla_eval.benchmarks.base import StepBenchmark, StepResult
-from vla_eval.benchmarks.data_recording import EpisodeRecorder, RecordingConfig
+from vla_eval.benchmarks.data_recording import EpisodeRecorder
 from vla_eval.specs import GRIPPER_RAW, IMAGE_RGB, LANGUAGE, DimSpec
 from vla_eval.types import Action, EpisodeResult, Observation, Task
 
@@ -56,25 +56,7 @@ class RLBenchBenchmark(StepBenchmark):
         self._task_env = None  # rlbench.task_environment.TaskEnvironment
         self._descriptions: list[str] = []
 
-        rec = RecordingConfig(**recording) if recording else None
-        if rec and rec.step_fields:
-            unknown = set(rec.step_fields) - self._ALL_RECORD_FIELDS
-            if unknown:
-                raise ValueError(f"Unknown step_fields: {unknown}. Valid: {sorted(self._ALL_RECORD_FIELDS)}")
-        self._record_fields: set[str] = (
-            set(rec.step_fields) if rec and rec.step_fields else set(self._ALL_RECORD_FIELDS)
-        )
-        self._recorder: EpisodeRecorder | None = (
-            EpisodeRecorder(
-                output_dir=rec.output_dir,
-                record_video=rec.record_video,
-                record_step=rec.record_step,
-                fps=rec.fps,
-            )
-            if rec
-            else None
-        )
-        self._step_counter: int = 0
+        self._recorder = EpisodeRecorder.from_config(recording, allowed_fields=self._ALL_RECORD_FIELDS)
 
     def cleanup(self) -> None:
         if self._env is not None:
@@ -84,8 +66,7 @@ class RLBenchBenchmark(StepBenchmark):
                 pass
             self._env = None
             self._task_env = None
-        if self._recorder is not None:
-            self._recorder.discard()
+        self._recorder.discard()
 
     # ------------------------------------------------------------------ #
     # lazy init
@@ -147,12 +128,8 @@ class RLBenchBenchmark(StepBenchmark):
         self._task_env.sample_variation()
         self._descriptions, obs = self._task_env.reset()
 
-        if self._recorder is not None:
-            self._recorder.start({"env_id": task["env_id"], "episode_idx": task.get("episode_idx", 0)})
-            frame = self._extract_frame(obs)
-            if frame is not None:
-                self._recorder.record_frame(frame)
-        self._step_counter = 0
+        self._recorder.start({"env_id": task["env_id"], "episode_idx": task.get("episode_idx", 0)})
+        self._recorder.record_frame(self._extract_frame(obs))
 
         return obs
 
@@ -169,20 +146,12 @@ class RLBenchBenchmark(StepBenchmark):
         assert self._task_env is not None
         obs, reward, terminate = self._task_env.step(act)
 
-        if self._recorder is not None and self._recorder.active:
-            frame = self._extract_frame(obs)
-            if frame is not None:
-                self._recorder.record_frame(frame)
-            fields = self._record_fields
-            row: dict[str, Any] = {"step": self._step_counter}
-            if "reward" in fields:
-                row["reward"] = float(reward)
-            if "done" in fields:
-                row["done"] = bool(terminate)
-            if "success" in fields:
-                row["success"] = float(reward) > 0.99
-            self._recorder.record_step(row)
-        self._step_counter += 1
+        self._recorder.record_frame(self._extract_frame(obs))
+        self._recorder.record_row(
+            reward=float(reward),
+            done=bool(terminate),
+            success=float(reward) > 0.99,
+        )
 
         return StepResult(obs=obs, reward=reward, done=terminate, info={})
 
@@ -211,8 +180,7 @@ class RLBenchBenchmark(StepBenchmark):
 
     def get_step_result(self, step_result: StepResult) -> EpisodeResult:
         success = step_result.reward > 0.99
-        if self._recorder is not None:
-            self._recorder.save(status="success" if success else "fail")
+        self._recorder.save(status="success" if success else "fail")
         return {"success": success}
 
     def get_metadata(self) -> dict[str, Any]:

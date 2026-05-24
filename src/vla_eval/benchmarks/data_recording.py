@@ -41,7 +41,22 @@ class RecordingConfig:
     fps: int = 20
 
 
-__all__ = ["EpisodeRecorder", "RecordingConfig"]
+__all__ = ["EpisodeRecorder", "NullEpisodeRecorder", "RecordingConfig"]
+
+
+class NullEpisodeRecorder:
+    """No-op stand-in returned by ``EpisodeRecorder.from_config`` when recording
+    is disabled. Mirrors EpisodeRecorder's call surface so benchmarks never need
+    to ``if recorder is not None`` around every call."""
+
+    active: bool = False
+
+    def start(self, context: Mapping[str, Any]) -> None: ...
+    def record_frame(self, frame: np.ndarray | None) -> None: ...
+    def record_step(self, data: dict[str, Any]) -> None: ...
+    def record_row(self, **fields: Any) -> None: ...
+    def save(self, **extra: Any) -> None: ...
+    def discard(self) -> None: ...
 
 
 class EpisodeRecorder:
@@ -55,6 +70,7 @@ class EpisodeRecorder:
         record_step: bool = True,
         filename_stem: str = "{env_id}_ep{episode_idx:04d}_{status}",
         fps: int = 20,
+        step_fields: set[str] | None = None,
     ) -> None:
         out = Path(output_dir)
         if record_video or record_step:
@@ -67,12 +83,38 @@ class EpisodeRecorder:
         self._data_fh: Any | None = None
         self._data_working: Path | None = None
         self._context: dict[str, Any] = {}
+        self._step_fields = step_fields  # None = no filter (record_row keeps all kwargs)
+        self._step: int = 0
         self._required_context = tuple(
             bare
             for _, field_name, _, _ in string.Formatter().parse(filename_stem)
             if field_name
             for bare in [field_name.split(".")[0].split("[")[0]]
             if bare and bare != "status"
+        )
+
+    @classmethod
+    def from_config(
+        cls,
+        recording: dict[str, Any] | None,
+        *,
+        allowed_fields: frozenset[str],
+        default_fps: int = 20,
+    ) -> "EpisodeRecorder | NullEpisodeRecorder":
+        """Build from a yaml ``recording:`` dict; return ``NullEpisodeRecorder``
+        when recording is None/empty so callers can omit the None check."""
+        if not recording:
+            return NullEpisodeRecorder()
+        rec = RecordingConfig(**recording)
+        unknown = set(rec.step_fields or []) - allowed_fields
+        if unknown:
+            raise ValueError(f"Unknown step_fields {sorted(unknown)}; valid: {sorted(allowed_fields)}")
+        return cls(
+            output_dir=rec.output_dir,
+            record_video=rec.record_video,
+            record_step=rec.record_step,
+            fps=rec.fps if "fps" in recording else default_fps,
+            step_fields=set(rec.step_fields) if rec.step_fields else set(allowed_fields),
         )
 
     @property
@@ -84,6 +126,7 @@ class EpisodeRecorder:
         if missing:
             raise ValueError(f"EpisodeRecorder.start: missing required context keys: {missing}")
         self._context = dict(context)
+        self._step = 0
         if self._video is not None:
             self._video.start(context)
         if self._data_dir is not None:
@@ -93,14 +136,25 @@ class EpisodeRecorder:
             self._data_working = self._data_dir / f".data-{uid}.jsonl"
             self._data_fh = open(self._data_working, "w", encoding="utf-8")  # noqa: SIM115
 
-    def record_frame(self, frame: np.ndarray) -> None:
-        if self._video is not None:
-            self._video.record(frame)
+    def record_frame(self, frame: np.ndarray | None) -> None:
+        if self._video is None or frame is None:
+            return
+        self._video.record(frame)
 
     def record_step(self, data: dict[str, Any]) -> None:
         if self._data_fh is None:
             return
         self._data_fh.write(json.dumps(data, ensure_ascii=False, default=str) + "\n")
+
+    def record_row(self, **fields: Any) -> None:
+        """Filter ``fields`` against ``step_fields`` (from ``from_config``),
+        stamp the in-recorder step counter, write one JSONL row, and tick."""
+        if self._data_fh is None:
+            return
+        if self._step_fields is not None:
+            fields = {k: v for k, v in fields.items() if k in self._step_fields}
+        self.record_step({"step": self._step, **fields})
+        self._step += 1
 
     def save(self, **extra: Any) -> None:
         status_kwargs = {**self._context, **extra}

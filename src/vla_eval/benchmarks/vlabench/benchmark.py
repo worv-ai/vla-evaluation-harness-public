@@ -20,7 +20,7 @@ from typing import Any
 import numpy as np
 
 from vla_eval.benchmarks.base import StepBenchmark, StepResult
-from vla_eval.benchmarks.data_recording import EpisodeRecorder, RecordingConfig
+from vla_eval.benchmarks.data_recording import EpisodeRecorder
 from vla_eval.specs import GRIPPER_RAW, IMAGE_RGB, LANGUAGE, POSITION_DELTA, ROTATION_EULER, DimSpec
 from vla_eval.types import Action, EpisodeResult, Observation, Task
 
@@ -68,25 +68,7 @@ class VLABenchBenchmark(StepBenchmark):
         self._instruction: str = ""
         self._last_ee_state: np.ndarray | None = None
 
-        rec = RecordingConfig(**recording) if recording else None
-        if rec and rec.step_fields:
-            unknown = set(rec.step_fields) - self._ALL_RECORD_FIELDS
-            if unknown:
-                raise ValueError(f"Unknown step_fields: {unknown}. Valid: {sorted(self._ALL_RECORD_FIELDS)}")
-        self._record_fields: set[str] = (
-            set(rec.step_fields) if rec and rec.step_fields else set(self._ALL_RECORD_FIELDS)
-        )
-        self._recorder: EpisodeRecorder | None = (
-            EpisodeRecorder(
-                output_dir=rec.output_dir,
-                record_video=rec.record_video,
-                record_step=rec.record_step,
-                fps=rec.fps,
-            )
-            if rec
-            else None
-        )
-        self._step_counter: int = 0
+        self._recorder = EpisodeRecorder.from_config(recording, allowed_fields=self._ALL_RECORD_FIELDS)
 
     def cleanup(self) -> None:
         if self._env is not None:
@@ -95,8 +77,7 @@ class VLABenchBenchmark(StepBenchmark):
             except Exception:
                 pass
             self._env = None
-        if self._recorder is not None:
-            self._recorder.discard()
+        self._recorder.discard()
 
     def _ensure_vlabench(self) -> None:
         """Lazy-import VLABench and register robots/tasks."""
@@ -138,12 +119,8 @@ class VLABenchBenchmark(StepBenchmark):
         self._instruction = self._env.task.get_instruction()
         self._last_ee_state = obs.get("ee_state", None)
 
-        if self._recorder is not None:
-            self._recorder.start({"env_id": task["env_id"], "episode_idx": task.get("episode_idx", 0)})
-            frame = self._extract_frame(obs)
-            if frame is not None:
-                self._recorder.record_frame(frame)
-        self._step_counter = 0
+        self._recorder.start({"env_id": task["env_id"], "episode_idx": task.get("episode_idx", 0)})
+        self._recorder.record_frame(self._extract_frame(obs))
 
         return obs
 
@@ -200,20 +177,12 @@ class VLABenchBenchmark(StepBenchmark):
             info={"success": success, "timestep": timestep},
         )
 
-        if self._recorder is not None and self._recorder.active:
-            frame = self._extract_frame(obs)
-            if frame is not None:
-                self._recorder.record_frame(frame)
-            fields = self._record_fields
-            row: dict[str, Any] = {"step": self._step_counter}
-            if "reward" in fields:
-                row["reward"] = result.reward
-            if "done" in fields:
-                row["done"] = bool(result.done)
-            if "success" in fields:
-                row["success"] = bool(success)
-            self._recorder.record_step(row)
-        self._step_counter += 1
+        self._recorder.record_frame(self._extract_frame(obs))
+        self._recorder.record_row(
+            reward=result.reward,
+            done=bool(result.done),
+            success=bool(success),
+        )
 
         return result
 
@@ -245,8 +214,7 @@ class VLABenchBenchmark(StepBenchmark):
 
     def get_step_result(self, step_result: StepResult) -> EpisodeResult:
         success = bool(step_result.info.get("success", False))
-        if self._recorder is not None:
-            self._recorder.save(status="success" if success else "fail")
+        self._recorder.save(status="success" if success else "fail")
         return {"success": success}
 
     def get_metadata(self) -> dict[str, Any]:

@@ -32,7 +32,7 @@ import numpy as np
 from anyio.to_thread import run_sync as _run_in_thread
 
 from vla_eval.benchmarks.base import StepBenchmark, StepResult
-from vla_eval.benchmarks.data_recording import EpisodeRecorder, RecordingConfig
+from vla_eval.benchmarks.data_recording import EpisodeRecorder
 from vla_eval.dirs import ensure_license
 from vla_eval.specs import IMAGE_RGB, LANGUAGE, RAW, DimSpec
 from vla_eval.types import Action, EpisodeResult, Observation, Task
@@ -209,27 +209,8 @@ class Behavior1KBenchmark(StepBenchmark):
         self._current_task_name: str | None = None
         self._available_tasks: dict[str, Any] | None = None
 
-        rec = RecordingConfig(**recording) if recording else None
-        if rec and rec.step_fields:
-            unknown = set(rec.step_fields) - self._ALL_RECORD_FIELDS
-            if unknown:
-                raise ValueError(f"Unknown step_fields: {unknown}. Valid: {sorted(self._ALL_RECORD_FIELDS)}")
-        self._record_fields: set[str] = (
-            set(rec.step_fields) if rec and rec.step_fields else set(self._ALL_RECORD_FIELDS)
-        )
-        # Default to 30 fps when caller didn't specify (R1Pro physics runs at ~30 Hz).
-        fps = rec.fps if rec and "fps" in (recording or {}) else 30
-        self._recorder: EpisodeRecorder | None = (
-            EpisodeRecorder(
-                output_dir=rec.output_dir,
-                record_video=rec.record_video,
-                record_step=rec.record_step,
-                fps=fps,
-            )
-            if rec
-            else None
-        )
-        self._step_counter: int = 0
+        # R1Pro physics runs at ~30 Hz — default fps overrides the base 20.
+        self._recorder = EpisodeRecorder.from_config(recording, allowed_fields=self._ALL_RECORD_FIELDS, default_fps=30)
 
     # ------------------------------------------------------------------
     # Lazy initialization
@@ -378,13 +359,8 @@ class Behavior1KBenchmark(StepBenchmark):
             instance_id = self._task_instance_ids[episode_idx % len(self._task_instance_ids)]
             obs = self._load_task_instance(instance_id)
 
-        if self._recorder is not None:
-            self._recorder.start({"env_id": task["env_id"], "episode_idx": task.get("episode_idx", 0)})
-            frame = self._extract_frame(obs)
-            if frame is not None:
-                self._recorder.record_frame(frame)
-        self._step_counter = 0
-
+        self._recorder.start({"env_id": task["env_id"], "episode_idx": task.get("episode_idx", 0)})
+        self._recorder.record_frame(self._extract_frame(obs))
         return obs
 
     def _load_task_instance(self, instance_id: int) -> Any:
@@ -466,23 +442,13 @@ class Behavior1KBenchmark(StepBenchmark):
         info["truncated"] = bool(truncated)
         done = bool(terminated) or bool(truncated)
 
-        if self._recorder is not None and self._recorder.active:
-            frame = self._extract_frame(obs)
-            if frame is not None:
-                self._recorder.record_frame(frame)
-            fields = self._record_fields
-            row: dict[str, Any] = {"step": self._step_counter}
-            if "reward" in fields:
-                row["reward"] = float(reward)
-            if "done" in fields:
-                row["done"] = done
-            if "truncated" in fields:
-                row["truncated"] = bool(truncated)
-            if "success" in fields:
-                row["success"] = bool((info.get("done") or {}).get("success", False))
-            self._recorder.record_step(row)
-        self._step_counter += 1
-
+        self._recorder.record_frame(self._extract_frame(obs))
+        self._recorder.record_row(
+            reward=float(reward),
+            done=done,
+            truncated=bool(truncated),
+            success=bool((info.get("done") or {}).get("success", False)),
+        )
         return StepResult(obs=obs, reward=float(reward), done=done, info=info)
 
     def _extract_frame(self, obs: Any) -> np.ndarray | None:
@@ -547,8 +513,7 @@ class Behavior1KBenchmark(StepBenchmark):
     def get_step_result(self, step_result: StepResult) -> EpisodeResult:
         done_info = step_result.info.get("done", {}) or {}
         success = bool(done_info.get("success", False))
-        if self._recorder is not None:
-            self._recorder.save(status="success" if success else "fail")
+        self._recorder.save(status="success" if success else "fail")
         return {"success": success}
 
     def get_metadata(self) -> dict[str, Any]:
@@ -566,8 +531,7 @@ class Behavior1KBenchmark(StepBenchmark):
             except Exception:
                 logger.exception("BEHAVIOR-1K env close failed")
             self._env = None
-        if self._recorder is not None:
-            self._recorder.discard()
+        self._recorder.discard()
         # Intentionally NOT calling ``omnigibson.shutdown()`` here: Isaac Sim's shutdown path can hang
         # for many minutes (waiting on hydra texture cleanup, render contexts, etc.) which prevents
         # the orchestrator from writing the result JSON at the end of the run.  Process exit reclaims

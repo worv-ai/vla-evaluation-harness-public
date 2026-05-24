@@ -23,7 +23,7 @@ from typing import Any
 import numpy as np
 
 from vla_eval.benchmarks.base import StepBenchmark, StepResult
-from vla_eval.benchmarks.data_recording import EpisodeRecorder, RecordingConfig
+from vla_eval.benchmarks.data_recording import EpisodeRecorder
 from vla_eval.specs import IMAGE_RGB, LANGUAGE, STATE_JOINT, DimSpec
 from vla_eval.types import Action, EpisodeResult, Observation, Task
 
@@ -232,25 +232,7 @@ class RoboTwinBenchmark(StepBenchmark):
         self._env_class: Any = None
         self._args: dict[str, Any] | None = None
 
-        rec = RecordingConfig(**recording) if recording else None
-        if rec and rec.step_fields:
-            unknown = set(rec.step_fields) - self._ALL_RECORD_FIELDS
-            if unknown:
-                raise ValueError(f"Unknown step_fields: {unknown}. Valid: {sorted(self._ALL_RECORD_FIELDS)}")
-        self._record_fields: set[str] = (
-            set(rec.step_fields) if rec and rec.step_fields else set(self._ALL_RECORD_FIELDS)
-        )
-        self._recorder: EpisodeRecorder | None = (
-            EpisodeRecorder(
-                output_dir=rec.output_dir,
-                record_video=rec.record_video,
-                record_step=rec.record_step,
-                fps=rec.fps,
-            )
-            if rec
-            else None
-        )
-        self._step_counter: int = 0
+        self._recorder = EpisodeRecorder.from_config(recording, allowed_fields=self._ALL_RECORD_FIELDS)
 
     # -----------------------------------------------------------------
     # Lazy init
@@ -330,8 +312,7 @@ class RoboTwinBenchmark(StepBenchmark):
             except Exception:
                 pass
             self._env = None
-        if self._recorder is not None:
-            self._recorder.discard()
+        self._recorder.discard()
 
     # -----------------------------------------------------------------
     # StepBenchmark interface
@@ -425,12 +406,8 @@ class RoboTwinBenchmark(StepBenchmark):
         self._env.set_instruction(instruction=task["instruction"])
         raw_obs = self._env.get_obs()
 
-        if self._recorder is not None:
-            self._recorder.start({"env_id": task["env_id"], "episode_idx": task.get("episode_idx", 0)})
-            frame = self._extract_frame(raw_obs)
-            if frame is not None:
-                self._recorder.record_frame(frame)
-        self._step_counter = 0
+        self._recorder.start({"env_id": task["env_id"], "episode_idx": task.get("episode_idx", 0)})
+        self._recorder.record_frame(self._extract_frame(raw_obs))
 
         return raw_obs
 
@@ -448,20 +425,12 @@ class RoboTwinBenchmark(StepBenchmark):
         success = bool(self._env.eval_success)
         done = success or (self._env.take_action_cnt >= self._env.step_lim)
 
-        if self._recorder is not None and self._recorder.active:
-            frame = self._extract_frame(raw_obs)
-            if frame is not None:
-                self._recorder.record_frame(frame)
-            fields = self._record_fields
-            row: dict[str, Any] = {"step": self._step_counter}
-            if "reward" in fields:
-                row["reward"] = 1.0 if success else 0.0
-            if "done" in fields:
-                row["done"] = done
-            if "success" in fields:
-                row["success"] = success
-            self._recorder.record_step(row)
-        self._step_counter += 1
+        self._recorder.record_frame(self._extract_frame(raw_obs))
+        self._recorder.record_row(
+            reward=1.0 if success else 0.0,
+            done=done,
+            success=success,
+        )
 
         return StepResult(obs=raw_obs, reward=1.0 if success else 0.0, done=done, info={"success": success})
 
@@ -494,8 +463,7 @@ class RoboTwinBenchmark(StepBenchmark):
 
     def get_step_result(self, step_result: StepResult) -> EpisodeResult:
         success = bool(step_result.info.get("success", False))
-        if self._recorder is not None:
-            self._recorder.save(status="success" if success else "fail")
+        self._recorder.save(status="success" if success else "fail")
         return {"success": success}
 
     def get_metadata(self) -> dict[str, Any]:

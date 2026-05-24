@@ -19,7 +19,7 @@ from typing import Any
 import numpy as np
 
 from vla_eval.benchmarks.base import StepBenchmark, StepResult
-from vla_eval.benchmarks.data_recording import EpisodeRecorder, RecordingConfig
+from vla_eval.benchmarks.data_recording import EpisodeRecorder
 from vla_eval.specs import GRIPPER_CLOSE_NEG, IMAGE_RGB, LANGUAGE, POSITION_DELTA, ROTATION_EULER, DimSpec
 from vla_eval.types import Action, EpisodeResult, Observation, Task
 
@@ -82,25 +82,7 @@ class ManiSkill2Benchmark(StepBenchmark):
         self._goal: str = ""
         self.gripper_state: float = -1.0
 
-        rec = RecordingConfig(**recording) if recording else None
-        if rec and rec.step_fields:
-            unknown = set(rec.step_fields) - self._ALL_RECORD_FIELDS
-            if unknown:
-                raise ValueError(f"Unknown step_fields: {unknown}. Valid: {sorted(self._ALL_RECORD_FIELDS)}")
-        self._record_fields: set[str] = (
-            set(rec.step_fields) if rec and rec.step_fields else set(self._ALL_RECORD_FIELDS)
-        )
-        self._recorder: EpisodeRecorder | None = (
-            EpisodeRecorder(
-                output_dir=rec.output_dir,
-                record_video=rec.record_video,
-                record_step=rec.record_step,
-                fps=rec.fps,
-            )
-            if rec
-            else None
-        )
-        self._step_counter: int = 0
+        self._recorder = EpisodeRecorder.from_config(recording, allowed_fields=self._ALL_RECORD_FIELDS)
 
     def cleanup(self) -> None:
         if self._env is not None:
@@ -109,8 +91,7 @@ class ManiSkill2Benchmark(StepBenchmark):
             except Exception:
                 pass
             self._env = None
-        if self._recorder is not None:
-            self._recorder.discard()
+        self._recorder.discard()
 
     def get_tasks(self) -> list[Task]:
         return [{"name": t, "env_name": t, "env_id": t} for t in self.tasks]
@@ -146,12 +127,8 @@ class ManiSkill2Benchmark(StepBenchmark):
         else:
             self._goal = goal_template
 
-        if self._recorder is not None:
-            self._recorder.start({"env_id": task["env_id"], "episode_idx": task.get("episode_idx", 0)})
-            frame = self._extract_frame(obs)
-            if frame is not None:
-                self._recorder.record_frame(frame)
-        self._step_counter = 0
+        self._recorder.start({"env_id": task["env_id"], "episode_idx": task.get("episode_idx", 0)})
+        self._recorder.record_frame(self._extract_frame(obs))
 
         return obs
 
@@ -178,22 +155,13 @@ class ManiSkill2Benchmark(StepBenchmark):
 
         done = terminated or truncated
 
-        if self._recorder is not None and self._recorder.active:
-            frame = self._extract_frame(obs)
-            if frame is not None:
-                self._recorder.record_frame(frame)
-            fields = self._record_fields
-            row: dict[str, Any] = {"step": self._step_counter}
-            if "reward" in fields:
-                row["reward"] = float(reward)
-            if "terminated" in fields:
-                row["terminated"] = bool(terminated)
-            if "truncated" in fields:
-                row["truncated"] = bool(truncated)
-            if "success" in fields:
-                row["success"] = bool(info.get("success", False))
-            self._recorder.record_step(row)
-        self._step_counter += 1
+        self._recorder.record_frame(self._extract_frame(obs))
+        self._recorder.record_row(
+            reward=float(reward),
+            terminated=bool(terminated),
+            truncated=bool(truncated),
+            success=bool(info.get("success", False)),
+        )
 
         return StepResult(obs=obs, reward=reward, done=done, info=info)
 
@@ -220,8 +188,7 @@ class ManiSkill2Benchmark(StepBenchmark):
 
     def get_step_result(self, step_result: StepResult) -> EpisodeResult:
         success = bool(step_result.info.get("success", False))
-        if self._recorder is not None:
-            self._recorder.save(status="success" if success else "fail")
+        self._recorder.save(status="success" if success else "fail")
         return {"success": success}
 
     def get_metadata(self) -> dict[str, Any]:

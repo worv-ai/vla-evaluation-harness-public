@@ -32,7 +32,7 @@ from typing import Any
 import numpy as np
 
 from vla_eval.benchmarks.base import StepBenchmark, StepResult
-from vla_eval.benchmarks.data_recording import EpisodeRecorder, RecordingConfig
+from vla_eval.benchmarks.data_recording import EpisodeRecorder
 from vla_eval.specs import GRIPPER_CLOSE_POS, IMAGE_RGB, LANGUAGE, POSITION_DELTA, RAW, ROTATION_EULER, DimSpec
 from vla_eval.types import Action, EpisodeResult, Observation, Task
 
@@ -121,25 +121,7 @@ class SimplerEnvBenchmark(StepBenchmark):
         if init_config is not None:
             self._va_grid = self._build_position_grid(init_config)
 
-        rec = RecordingConfig(**recording) if recording else None
-        if rec and rec.step_fields:
-            unknown = set(rec.step_fields) - self._ALL_RECORD_FIELDS
-            if unknown:
-                raise ValueError(f"Unknown step_fields: {unknown}. Valid: {sorted(self._ALL_RECORD_FIELDS)}")
-        self._record_fields: set[str] = (
-            set(rec.step_fields) if rec and rec.step_fields else set(self._ALL_RECORD_FIELDS)
-        )
-        self._recorder: EpisodeRecorder | None = (
-            EpisodeRecorder(
-                output_dir=rec.output_dir,
-                record_video=rec.record_video,
-                record_step=rec.record_step,
-                fps=rec.fps,
-            )
-            if rec
-            else None
-        )
-        self._step_counter: int = 0
+        self._recorder = EpisodeRecorder.from_config(recording, allowed_fields=self._ALL_RECORD_FIELDS)
 
     @staticmethod
     def _build_position_grid(cfg: dict[str, Any]) -> list[tuple[np.ndarray, dict[str, Any]]]:
@@ -202,8 +184,7 @@ class SimplerEnvBenchmark(StepBenchmark):
             except Exception:
                 pass
             self._env = None
-        if self._recorder is not None:
-            self._recorder.discard()
+        self._recorder.discard()
 
     # ------------------------------------------------------------------
     # Benchmark ABC
@@ -236,12 +217,8 @@ class SimplerEnvBenchmark(StepBenchmark):
         except AttributeError:
             self._task_description = self._env.get_wrapper_attr("get_language_instruction")()
 
-        if self._recorder is not None:
-            self._recorder.start({"env_id": task["env_id"], "episode_idx": task.get("episode_idx", 0)})
-            frame = self._extract_frame(obs)
-            if frame is not None:
-                self._recorder.record_frame(frame)
-        self._step_counter = 0
+        self._recorder.start({"env_id": task["env_id"], "episode_idx": task.get("episode_idx", 0)})
+        self._recorder.record_frame(self._extract_frame(obs))
 
         return obs
 
@@ -321,22 +298,13 @@ class SimplerEnvBenchmark(StepBenchmark):
         if done:
             self._success_seen = True
 
-        if self._recorder is not None and self._recorder.active:
-            frame = self._extract_frame(obs)
-            if frame is not None:
-                self._recorder.record_frame(frame)
-            fields = self._record_fields
-            row: dict[str, Any] = {"step": self._step_counter}
-            if "reward" in fields:
-                row["reward"] = float(reward)
-            if "done" in fields:
-                row["done"] = bool(done)
-            if "truncated" in fields:
-                row["truncated"] = bool(truncated)
-            if "success" in fields:
-                row["success"] = self._success_seen
-            self._recorder.record_step(row)
-        self._step_counter += 1
+        self._recorder.record_frame(self._extract_frame(obs))
+        self._recorder.record_row(
+            reward=float(reward),
+            done=bool(done),
+            truncated=bool(truncated),
+            success=self._success_seen,
+        )
 
         return StepResult(obs=obs, reward=reward, done=done, info=info)
 
@@ -418,8 +386,7 @@ class SimplerEnvBenchmark(StepBenchmark):
             # truncation: success = terminated on final step
             # early_stop: success = terminated (which triggered the stop)
             success = bool(step_result.done)
-        if self._recorder is not None:
-            self._recorder.save(status="success" if success else "fail")
+        self._recorder.save(status="success" if success else "fail")
         return {"success": success}
 
     def get_metadata(self) -> dict[str, Any]:

@@ -19,7 +19,7 @@ from typing import Any
 import numpy as np
 
 from vla_eval.benchmarks.base import StepBenchmark, StepResult
-from vla_eval.benchmarks.data_recording import EpisodeRecorder, RecordingConfig
+from vla_eval.benchmarks.data_recording import EpisodeRecorder
 from vla_eval.specs import IMAGE_RGB, LANGUAGE, RAW, DimSpec
 from vla_eval.types import Action, EpisodeResult, Observation, Task
 
@@ -128,28 +128,12 @@ class KinetixBenchmark(StepBenchmark):
         self._jax = None
         self._jnp = None
 
-        rec = RecordingConfig(**recording) if recording else None
-        if rec and rec.step_fields:
-            unknown = set(rec.step_fields) - self._ALL_RECORD_FIELDS
-            if unknown:
-                raise ValueError(f"Unknown step_fields: {unknown}. Valid: {sorted(self._ALL_RECORD_FIELDS)}")
-        self._record_fields: set[str] = (
-            set(rec.step_fields) if rec and rec.step_fields else set(self._ALL_RECORD_FIELDS)
-        )
-        # Force-disable video for symbolic obs (no renderable frame).
-        record_video = bool(rec and rec.record_video and observation_type == "pixels")
-        if rec and rec.record_video and observation_type == "symbolic":
+        # Symbolic obs has no renderable frame; force-disable video so the
+        # composite recorder skips mp4 encoding.
+        if recording and recording.get("record_video", True) and observation_type == "symbolic":
             logger.warning("Kinetix recording: video disabled for symbolic observation_type")
-        self._recorder: EpisodeRecorder | None = (
-            EpisodeRecorder(
-                output_dir=rec.output_dir,
-                record_video=record_video,
-                record_step=rec.record_step,
-                fps=rec.fps,
-            )
-            if rec
-            else None
-        )
+            recording = {**recording, "record_video": False}
+        self._recorder = EpisodeRecorder.from_config(recording, allowed_fields=self._ALL_RECORD_FIELDS)
 
     def _init_jax(self) -> None:
         """Lazily import JAX (heavy import)."""
@@ -203,8 +187,7 @@ class KinetixBenchmark(StepBenchmark):
         self._level_state = None
         self._rng = None
         self._current_level = None
-        if self._recorder is not None:
-            self._recorder.discard()
+        self._recorder.discard()
 
     def get_tasks(self) -> list[Task]:
         if self._task_names is not None:
@@ -235,11 +218,8 @@ class KinetixBenchmark(StepBenchmark):
         self._step_count = 0
         self._episode_success = False
 
-        if self._recorder is not None:
-            self._recorder.start({"env_id": task["env_id"], "episode_idx": episode_idx})
-            frame = self._extract_frame(obs)
-            if frame is not None:
-                self._recorder.record_frame(frame)
+        self._recorder.start({"env_id": task["env_id"], "episode_idx": episode_idx})
+        self._recorder.record_frame(self._extract_frame(obs))
 
         return obs
 
@@ -284,19 +264,12 @@ class KinetixBenchmark(StepBenchmark):
         if reward_val > 0:
             self._episode_success = True
 
-        if self._recorder is not None and self._recorder.active:
-            frame = self._extract_frame(obs)
-            if frame is not None:
-                self._recorder.record_frame(frame)
-            fields = self._record_fields
-            row: dict[str, Any] = {"step": self._step_count - 1}
-            if "reward" in fields:
-                row["reward"] = reward_val
-            if "done" in fields:
-                row["done"] = done_val
-            if "success" in fields:
-                row["success"] = self._episode_success
-            self._recorder.record_step(row)
+        self._recorder.record_frame(self._extract_frame(obs))
+        self._recorder.record_row(
+            reward=reward_val,
+            done=done_val,
+            success=self._episode_success,
+        )
 
         return StepResult(obs=obs, reward=reward_val, done=done_val, info=info)
 
@@ -338,8 +311,7 @@ class KinetixBenchmark(StepBenchmark):
 
     def get_step_result(self, step_result: StepResult) -> EpisodeResult:
         # Success if reward > 0 at any step during the episode
-        if self._recorder is not None:
-            self._recorder.save(status="success" if self._episode_success else "fail")
+        self._recorder.save(status="success" if self._episode_success else "fail")
         return {"success": self._episode_success}
 
     def get_metadata(self) -> dict[str, Any]:
