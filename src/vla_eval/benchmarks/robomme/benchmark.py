@@ -409,7 +409,7 @@ class RoboMMEBenchmark(StepBenchmark):
             if state is not None:
                 row["state_fq"] = state.tolist() if hasattr(state, "tolist") else list(state)
         self._recorder.record_video(self._extract_frame(obs))
-        self._recorder.record_step(row)
+        self._recorder.record_step(**row)
 
         return StepResult(obs=obs, reward=reward, done=done, info=info)
 

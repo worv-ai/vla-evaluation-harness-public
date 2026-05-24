@@ -304,24 +304,16 @@ class EpisodeRecorder:
             return
         self._video.record(frame)
 
-    def record_step(self, row: dict[str, Any] | None = None, /, **fields: Any) -> None:
-        """Record one step row. Accepts a dict OR kwargs:
-
-            recorder.record_step(reward=..., done=..., success=...)
-            recorder.record_step({"step": 12, "reward": ...})  # explicit step_id
-
-        ``step_fields`` filters caller-supplied keys; ``step`` always passes
-        through as the row identifier.
-        """
+    def record_step(self, **fields: Any) -> None:
+        """``step_fields`` filters caller keys; ``step`` kwarg overrides
+        auto-increment (used to amend a previous row)."""
         if not self._record_step:
             return
-        merged: dict[str, Any] = {**(row or {}), **fields}
         if self._step_fields is not None:
-            merged = {k: v for k, v in merged.items() if k == "step" or k in self._step_fields}
-        step_id = int(merged.get("step", self._next_step))
+            fields = {k: v for k, v in fields.items() if k == "step" or k in self._step_fields}
+        step_id = int(fields.pop("step", self._next_step))
         self._next_step = step_id + 1
-        existing = self._steps.setdefault(step_id, {})
-        existing.update((k, v) for k, v in merged.items() if k != "step")
+        self._steps.setdefault(step_id, {}).update(fields)
 
     # -- Close (orchestrator) ---------------------------------------------
 
@@ -422,7 +414,7 @@ class NullEpisodeRecorder(EpisodeRecorder):
     def record_video(self, frame: "np.ndarray | None") -> None:  # type: ignore[override]
         pass
 
-    def record_step(self, row: dict[str, Any] | None = None, /, **fields: Any) -> None:  # type: ignore[override]
+    def record_step(self, **fields: Any) -> None:  # type: ignore[override]
         pass
 
     def close(  # type: ignore[override]
