@@ -103,7 +103,7 @@ class LIBEROBenchmark(StepBenchmark):
         quat_no_antipodal: bool = False,
         step_fields: list[str] | None = None,
     ) -> None:
-        super().__init__()
+        super().__init__(step_fields=step_fields)
         self.suite = suite
         self.seed = seed
         self._quat_to_aa = _quat_to_axisangle_robosuite if quat_no_antipodal else quat_to_axisangle
@@ -113,13 +113,6 @@ class LIBEROBenchmark(StepBenchmark):
         self.send_state = send_state
         self.absolute_action = absolute_action
         self._max_steps = max_steps
-        if step_fields is None:
-            self._step_fields: frozenset[str] = self._ALL_RECORD_FIELDS
-        else:
-            unknown = set(step_fields) - self._ALL_RECORD_FIELDS
-            if unknown:
-                raise ValueError(f"Unknown step_fields: {sorted(unknown)}. Valid: {sorted(self._ALL_RECORD_FIELDS)}")
-            self._step_fields = frozenset(step_fields) if step_fields else self._ALL_RECORD_FIELDS
         self._env = None
         self._task_suite = None
         self._current_task_id: int | None = None
@@ -244,21 +237,13 @@ class LIBEROBenchmark(StepBenchmark):
             if frame is not None:
                 self._recorder.record_video(self._orient_frame(frame))
 
-        self._recorder.record_step(self._step_row(reward, done, info))
+        self._record_step(reward=float(reward), done=bool(done), success=bool(done))
         return StepResult(obs=obs, reward=reward, done=done, info=info)
 
     @staticmethod
     def _orient_frame(frame: np.ndarray) -> np.ndarray:
         """Robosuite renders agentview/wrist inverted; flip to upright before encoding."""
         return np.ascontiguousarray(frame[::-1, ::-1])
-
-    def _step_row(self, reward: float, done: bool, info: dict[str, Any]) -> dict[str, Any]:
-        sources: dict[str, Any] = {
-            "reward": float(reward),
-            "done": bool(done),
-            "success": bool(done),
-        }
-        return {k: sources[k] for k in self._step_fields if k in sources}
 
     def make_obs(self, raw_obs: Any, task: Task) -> Observation:
         img = preprocess_libero_image(raw_obs["agentview_image"], LIBERO_ENV_RESOLUTION)

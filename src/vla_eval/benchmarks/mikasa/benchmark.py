@@ -83,17 +83,10 @@ class MIKASABenchmark(StepBenchmark):
         render_resolution: list[int] | tuple[int, int] = (256, 256),
         step_fields: list[str] | None = None,
     ) -> None:
-        super().__init__()
+        super().__init__(step_fields=step_fields)
         self._task_names = tasks or DEFAULT_TASKS
         self._max_steps_override = max_episode_steps
         self._render_resolution = tuple(render_resolution)
-        if step_fields is None:
-            self._step_fields: frozenset[str] = self._ALL_RECORD_FIELDS
-        else:
-            unknown = set(step_fields) - self._ALL_RECORD_FIELDS
-            if unknown:
-                raise ValueError(f"Unknown step_fields: {sorted(unknown)}. Valid: {sorted(self._ALL_RECORD_FIELDS)}")
-            self._step_fields = frozenset(step_fields) if step_fields else self._ALL_RECORD_FIELDS
         self._env: Any = None
         self._current_task: str | None = None
         self._task_desc: str = ""
@@ -161,7 +154,7 @@ class MIKASABenchmark(StepBenchmark):
         frame = self._extract_frame(obs)
         if frame is not None:
             self._recorder.record_video(frame)
-        self._recorder.record_step(self._step_row(rew, done, success))
+        self._record_step(reward=rew, done=done, success=success)
 
         return StepResult(obs=obs, reward=rew, done=done, info={"success": success})
 
@@ -177,14 +170,6 @@ class MIKASABenchmark(StepBenchmark):
                     img = img[0]
                 return np.asarray(img)
         return None
-
-    def _step_row(self, reward: float, done: bool, success: bool) -> dict[str, Any]:
-        sources: dict[str, Any] = {
-            "reward": reward,
-            "done": done,
-            "success": success,
-        }
-        return {k: sources[k] for k in self._step_fields if k in sources}
 
     def make_obs(self, raw_obs: Any, task: Task) -> Observation:
         images: dict[str, np.ndarray] = {}

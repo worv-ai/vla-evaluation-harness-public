@@ -64,7 +64,7 @@ class RoboCasaBenchmark(StepBenchmark):
         seed: int | None = None,
         step_fields: list[str] | None = None,
     ) -> None:
-        super().__init__()
+        super().__init__(step_fields=step_fields)
         self._task_names = tasks or DEFAULT_TASKS
         self._robot = robot
         self._camera_names = camera_names or [
@@ -75,13 +75,6 @@ class RoboCasaBenchmark(StepBenchmark):
         self._max_steps = max_steps
         self._split = split
         self._seed = seed
-        if step_fields is None:
-            self._step_fields: frozenset[str] = self._ALL_RECORD_FIELDS
-        else:
-            unknown = set(step_fields) - self._ALL_RECORD_FIELDS
-            if unknown:
-                raise ValueError(f"Unknown step_fields: {sorted(unknown)}. Valid: {sorted(self._ALL_RECORD_FIELDS)}")
-            self._step_fields = frozenset(step_fields) if step_fields else self._ALL_RECORD_FIELDS
         self._env: Any = None
         self._current_task: str | None = None
         self._lang: str = ""
@@ -146,7 +139,7 @@ class RoboCasaBenchmark(StepBenchmark):
         frame = self._extract_frame(obs)
         if frame is not None:
             self._recorder.record_video(frame)
-        self._recorder.record_step(self._step_row(float(success), bool(done), success))
+        self._record_step(reward=float(success), done=bool(done), success=success)
 
         return StepResult(obs=obs, reward=float(success), done=done, info=info)
 
@@ -159,14 +152,6 @@ class RoboCasaBenchmark(StepBenchmark):
                 # Match make_obs's vertical flip so recorded video matches what the model sees.
                 return np.ascontiguousarray(raw_obs[key][::-1])
         return None
-
-    def _step_row(self, reward: float, done: bool, success: bool) -> dict[str, Any]:
-        sources: dict[str, Any] = {
-            "reward": reward,
-            "done": done,
-            "success": success,
-        }
-        return {k: sources[k] for k in self._step_fields if k in sources}
 
     def make_obs(self, raw_obs: Any, task: Task) -> Observation:
         images: dict[str, Any] = {}

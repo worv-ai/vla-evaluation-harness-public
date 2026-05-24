@@ -81,19 +81,12 @@ class MolmoSpacesBenchmark(StepBenchmark):
         send_state: bool = True,
         step_fields: list[str] | None = None,
     ) -> None:
-        super().__init__()
+        super().__init__(step_fields=step_fields)
         self.benchmark_dir = Path(benchmark_dir)
         self.eval_config_cls = eval_config_cls
         self.task_horizon = task_horizon
         self.send_wrist_image = send_wrist_image
         self.send_state = send_state
-        if step_fields is None:
-            self._step_fields: frozenset[str] = self._ALL_RECORD_FIELDS
-        else:
-            unknown = set(step_fields) - self._ALL_RECORD_FIELDS
-            if unknown:
-                raise ValueError(f"Unknown step_fields: {sorted(unknown)}. Valid: {sorted(self._ALL_RECORD_FIELDS)}")
-            self._step_fields = frozenset(step_fields) if step_fields else self._ALL_RECORD_FIELDS
 
         self._episodes: list[Any] = []
         self._exp_config: Any = None
@@ -220,7 +213,7 @@ class MolmoSpacesBenchmark(StepBenchmark):
         frame = self._extract_frame(obs)
         if frame is not None:
             self._recorder.record_video(frame)
-        self._recorder.record_step(self._step_row(float(reward), done, success))
+        self._record_step(reward=float(reward), done=done, success=success)
 
         return StepResult(obs=obs, reward=float(reward), done=done, info=info or {})
 
@@ -229,14 +222,6 @@ class MolmoSpacesBenchmark(StepBenchmark):
             return None
         # Reuse the primary-camera resolution logic that make_obs uses for the model server.
         return self._find_camera(raw_obs, PRIMARY_CAM_ALIASES)
-
-    def _step_row(self, reward: float, done: bool, success: bool) -> dict[str, Any]:
-        sources: dict[str, Any] = {
-            "reward": reward,
-            "done": done,
-            "success": success,
-        }
-        return {k: sources[k] for k in self._step_fields if k in sources}
 
     def make_obs(self, raw_obs: Any, task: Task) -> Observation:
         if not isinstance(raw_obs, dict):

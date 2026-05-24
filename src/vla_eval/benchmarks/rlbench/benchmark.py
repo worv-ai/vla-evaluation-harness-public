@@ -45,17 +45,10 @@ class RLBenchBenchmark(StepBenchmark):
         max_steps: int = 200,
         step_fields: list[str] | None = None,
     ) -> None:
-        super().__init__()
+        super().__init__(step_fields=step_fields)
         self._task_names = tasks or DEFAULT_TASKS
         self._render_resolution = render_resolution
         self._max_steps = max_steps
-        if step_fields is None:
-            self._step_fields: frozenset[str] = self._ALL_RECORD_FIELDS
-        else:
-            unknown = set(step_fields) - self._ALL_RECORD_FIELDS
-            if unknown:
-                raise ValueError(f"Unknown step_fields: {sorted(unknown)}. Valid: {sorted(self._ALL_RECORD_FIELDS)}")
-            self._step_fields = frozenset(step_fields) if step_fields else self._ALL_RECORD_FIELDS
         self._env = None  # rlbench.environment.Environment
         self._task_env = None  # rlbench.task_environment.TaskEnvironment
         self._descriptions: list[str] = []
@@ -150,7 +143,7 @@ class RLBenchBenchmark(StepBenchmark):
         frame = self._extract_frame(obs)
         if frame is not None:
             self._recorder.record_video(frame)
-        self._recorder.record_step(self._step_row(float(reward), bool(terminate), bool(success)))
+        self._record_step(reward=float(reward), done=bool(terminate), success=bool(success))
 
         return StepResult(obs=obs, reward=reward, done=terminate, info={})
 
@@ -160,14 +153,6 @@ class RLBenchBenchmark(StepBenchmark):
         if front is None:
             return None
         return np.asarray(front, dtype=np.uint8)
-
-    def _step_row(self, reward: float, done: bool, success: bool) -> dict[str, Any]:
-        sources: dict[str, Any] = {
-            "reward": reward,
-            "done": done,
-            "success": success,
-        }
-        return {k: sources[k] for k in self._step_fields if k in sources}
 
     def make_obs(self, raw_obs: Any, task: Task) -> Observation:
         images = {}

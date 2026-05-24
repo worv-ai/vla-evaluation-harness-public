@@ -87,7 +87,7 @@ class SimplerEnvBenchmark(StepBenchmark):
         init_config: dict[str, Any] | None = None,
         step_fields: list[str] | None = None,
     ) -> None:
-        super().__init__()
+        super().__init__(step_fields=step_fields)
         assert success_mode in ("truncation", "early_stop", "accumulate"), (
             f"Invalid success_mode={success_mode!r}. Expected: truncation, early_stop, accumulate"
         )
@@ -103,13 +103,6 @@ class SimplerEnvBenchmark(StepBenchmark):
         self.env_name = env_name
         self.scene_name = scene_name
         self.env_build_kwargs = env_build_kwargs or {}
-        if step_fields is None:
-            self._step_fields: frozenset[str] = self._ALL_RECORD_FIELDS
-        else:
-            unknown = set(step_fields) - self._ALL_RECORD_FIELDS
-            if unknown:
-                raise ValueError(f"Unknown step_fields: {sorted(unknown)}. Valid: {sorted(self._ALL_RECORD_FIELDS)}")
-            self._step_fields = frozenset(step_fields) if step_fields else self._ALL_RECORD_FIELDS
 
         self._env: Any = None
         self._task_description: str = ""
@@ -303,7 +296,13 @@ class SimplerEnvBenchmark(StepBenchmark):
         frame = self._extract_frame(obs)
         if frame is not None:
             self._recorder.record_video(frame)
-        self._recorder.record_step(self._step_row(reward, done, bool(truncated)))
+        self._record_step(
+            reward=float(reward),
+            done=done or bool(truncated),
+            terminated=done,
+            truncated=bool(truncated),
+            success=done,
+        )
 
         return StepResult(obs=obs, reward=reward, done=done, info=info)
 
@@ -318,17 +317,6 @@ class SimplerEnvBenchmark(StepBenchmark):
             return np.asarray(get_image_from_maniskill2_obs_dict(self._env, raw_obs))
         except Exception:
             return None
-
-    def _step_row(self, reward: float, terminated: bool, truncated: bool) -> dict[str, Any]:
-        done = terminated or truncated
-        sources: dict[str, Any] = {
-            "reward": float(reward),
-            "done": done,
-            "terminated": terminated,
-            "truncated": truncated,
-            "success": terminated,
-        }
-        return {k: sources[k] for k in self._step_fields if k in sources}
 
     def make_obs(self, raw_obs: Any, task: Task) -> Observation:
         from simpler_env.utils.env.observation_utils import (

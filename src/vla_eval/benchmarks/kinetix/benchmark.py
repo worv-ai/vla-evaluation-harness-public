@@ -100,7 +100,7 @@ class KinetixBenchmark(StepBenchmark):
         action_noise_std: float = 0.0,
         step_fields: list[str] | None = None,
     ) -> None:
-        super().__init__()
+        super().__init__(step_fields=step_fields)
         self._task_names = tasks
         self._max_episode_steps = max_episode_steps
         self._seed = seed
@@ -109,13 +109,6 @@ class KinetixBenchmark(StepBenchmark):
             raise ValueError(f"observation_type must be 'pixels' or 'symbolic', got {observation_type!r}")
         self._observation_type = observation_type
         self._action_noise_std = action_noise_std
-        if step_fields is None:
-            self._step_fields: frozenset[str] = self._ALL_RECORD_FIELDS
-        else:
-            unknown = set(step_fields) - self._ALL_RECORD_FIELDS
-            if unknown:
-                raise ValueError(f"Unknown step_fields: {sorted(unknown)}. Valid: {sorted(self._ALL_RECORD_FIELDS)}")
-            self._step_fields = frozenset(step_fields) if step_fields else self._ALL_RECORD_FIELDS
 
         # Lazy-initialized JAX state
         self._env = None
@@ -262,7 +255,7 @@ class KinetixBenchmark(StepBenchmark):
         frame = self._extract_frame(obs)
         if frame is not None:
             self._recorder.record_video(frame)
-        self._recorder.record_step(self._step_row(reward_val, done_val, self._episode_success))
+        self._record_step(reward=reward_val, done=done_val, success=self._episode_success)
 
         return StepResult(obs=obs, reward=reward_val, done=done_val, info=info)
 
@@ -274,14 +267,6 @@ class KinetixBenchmark(StepBenchmark):
         if img.dtype != np.uint8:
             img = (np.clip(img, 0.0, 1.0) * 255).astype(np.uint8)
         return img
-
-    def _step_row(self, reward: float, done: bool, success: bool) -> dict[str, Any]:
-        sources: dict[str, Any] = {
-            "reward": reward,
-            "done": done,
-            "success": success,
-        }
-        return {k: sources[k] for k in self._step_fields if k in sources}
 
     def make_obs(self, raw_obs: Any, task: Task) -> Observation:
         if self._observation_type == "symbolic":

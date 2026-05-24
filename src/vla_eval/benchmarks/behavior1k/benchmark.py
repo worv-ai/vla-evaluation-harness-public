@@ -177,7 +177,7 @@ class Behavior1KBenchmark(StepBenchmark):
         task_instance_id: int | list[int] | None = None,
         step_fields: list[str] | None = None,
     ) -> None:
-        super().__init__()
+        super().__init__(step_fields=step_fields)
         if tasks is not None:
             unknown = [t for t in tasks if t not in B50_TASKS]
             if unknown:
@@ -200,15 +200,6 @@ class Behavior1KBenchmark(StepBenchmark):
             if not task_instance_id:
                 raise ValueError("task_instance_id list must not be empty")
             self._task_instance_ids = [int(i) for i in task_instance_id]
-        if step_fields is None:
-            self._step_fields: frozenset[str] = self._ALL_RECORD_FIELDS
-        else:
-            unknown_fields = set(step_fields) - self._ALL_RECORD_FIELDS
-            if unknown_fields:
-                raise ValueError(
-                    f"Unknown step_fields: {sorted(unknown_fields)}. Valid: {sorted(self._ALL_RECORD_FIELDS)}"
-                )
-            self._step_fields = frozenset(step_fields) if step_fields else self._ALL_RECORD_FIELDS
 
         self._env: Any = None
         self._current_task_name: str | None = None
@@ -447,7 +438,14 @@ class Behavior1KBenchmark(StepBenchmark):
         frame = self._extract_frame(obs)
         if frame is not None:
             self._recorder.record_video(frame)
-        self._recorder.record_step(self._step_row(float(reward), done, bool(terminated), bool(truncated), info))
+        done_info = info.get("done", {}) or {}
+        self._record_step(
+            reward=float(reward),
+            done=done,
+            terminated=bool(terminated),
+            truncated=bool(truncated),
+            success=bool(done_info.get("success", False)),
+        )
 
         return StepResult(obs=obs, reward=float(reward), done=done, info=info)
 
@@ -470,24 +468,6 @@ class Behavior1KBenchmark(StepBenchmark):
                 arr = arr[..., :3]
             return np.ascontiguousarray(arr)
         return None
-
-    def _step_row(
-        self,
-        reward: float,
-        done: bool,
-        terminated: bool,
-        truncated: bool,
-        info: dict[str, Any],
-    ) -> dict[str, Any]:
-        done_info = info.get("done", {}) or {}
-        sources: dict[str, Any] = {
-            "reward": reward,
-            "done": done,
-            "terminated": terminated,
-            "truncated": truncated,
-            "success": bool(done_info.get("success", False)),
-        }
-        return {k: sources[k] for k in self._step_fields if k in sources}
 
     def make_obs(self, raw_obs: Any, task: Task) -> Observation:
         from omnigibson.learning.utils.eval_utils import flatten_obs_dict

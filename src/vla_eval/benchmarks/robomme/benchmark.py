@@ -176,7 +176,7 @@ class RoboMMEBenchmark(StepBenchmark):
         subgoal_mode: Literal["grounded", "simple"] = "grounded",
         step_fields: list[str] | None = None,
     ) -> None:
-        super().__init__()
+        super().__init__(step_fields=step_fields)
         if subgoal_mode not in ("grounded", "simple"):
             raise ValueError(f"subgoal_mode must be 'grounded' or 'simple', got {subgoal_mode!r}")
         self.tasks = tasks or list(_DEFAULT_TASK_LIST)
@@ -188,17 +188,6 @@ class RoboMMEBenchmark(StepBenchmark):
         self.send_video_history = send_video_history
         self.send_subgoal = send_subgoal
         self.subgoal_mode = subgoal_mode
-
-        # Validate the requested field subset at construction time so a typo
-        # crashes the run before the first episode rather than silently
-        # dropping rows.
-        if step_fields is None:
-            self._step_fields: frozenset[str] = self._ALL_RECORD_FIELDS
-        else:
-            unknown = set(step_fields) - self._ALL_RECORD_FIELDS
-            if unknown:
-                raise ValueError(f"Unknown step_fields: {sorted(unknown)}. Valid: {sorted(self._ALL_RECORD_FIELDS)}")
-            self._step_fields = frozenset(step_fields) if step_fields else self._ALL_RECORD_FIELDS
 
         self._env: Any = None
         self._task: Task | None = None
@@ -420,28 +409,20 @@ class RoboMMEBenchmark(StepBenchmark):
         reward = float(reward)
         done = terminated or truncated or info.get("status") == "error"
 
-        self._recorder.record_step(self._step_row(info, obs, reward, terminated))
-
-        return StepResult(obs=obs, reward=reward, done=done, info=info)
-
-    def _step_row(
-        self,
-        info: dict[str, Any],
-        obs: Any,
-        reward: float,
-        terminated: bool,
-    ) -> dict[str, Any]:
-        sources: dict[str, Any] = {
-            "simple_subgoal_online": info.get("simple_subgoal_online", ""),
-            "grounded_subgoal_online": info.get("grounded_subgoal_online", ""),
-            "reward": reward,
-            "terminated": terminated,
-        }
+        extra: dict[str, Any] = {}
         if obs:
             state = obs.get("state_fq")
             if state is not None:
-                sources["state_fq"] = state.tolist() if hasattr(state, "tolist") else list(state)
-        return {k: sources[k] for k in self._step_fields if k in sources}
+                extra["state_fq"] = state.tolist() if hasattr(state, "tolist") else list(state)
+        self._record_step(
+            simple_subgoal_online=info.get("simple_subgoal_online", ""),
+            grounded_subgoal_online=info.get("grounded_subgoal_online", ""),
+            reward=reward,
+            terminated=terminated,
+            **extra,
+        )
+
+        return StepResult(obs=obs, reward=reward, done=done, info=info)
 
     def _extract_subgoal(self, info: dict[str, Any]) -> str:
         """Pick the configured subgoal text from the env's info dict.

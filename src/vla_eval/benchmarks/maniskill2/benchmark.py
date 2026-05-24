@@ -67,19 +67,12 @@ class ManiSkill2Benchmark(StepBenchmark):
         enabled_cameras: list[str] | None = None,
         step_fields: list[str] | None = None,
     ) -> None:
-        super().__init__()
+        super().__init__(step_fields=step_fields)
         self.tasks = tasks or DEFAULT_TASKS
         self.episodes_per_task = episodes_per_task
         self.max_episode_steps = max_episode_steps
         self.render_resolution = tuple(render_resolution)
         self.enabled_cameras = enabled_cameras or ["base_camera"]
-        if step_fields is None:
-            self._step_fields: frozenset[str] = self._ALL_RECORD_FIELDS
-        else:
-            unknown = set(step_fields) - self._ALL_RECORD_FIELDS
-            if unknown:
-                raise ValueError(f"Unknown step_fields: {sorted(unknown)}. Valid: {sorted(self._ALL_RECORD_FIELDS)}")
-            self._step_fields = frozenset(step_fields) if step_fields else self._ALL_RECORD_FIELDS
 
         self._env = None
         self._current_task: str | None = None
@@ -160,7 +153,13 @@ class ManiSkill2Benchmark(StepBenchmark):
         frame = self._extract_frame(obs)
         if frame is not None:
             self._recorder.record_video(frame)
-        self._recorder.record_step(self._step_row(reward, done, bool(terminated), bool(truncated), info))
+        self._record_step(
+            reward=float(reward),
+            done=done,
+            terminated=bool(terminated),
+            truncated=bool(truncated),
+            success=bool(info.get("success", False)),
+        )
 
         return StepResult(obs=obs, reward=reward, done=done, info=info)
 
@@ -172,23 +171,6 @@ class ManiSkill2Benchmark(StepBenchmark):
             if cam_data is not None and "rgb" in cam_data:
                 return np.asarray(cam_data["rgb"])
         return None
-
-    def _step_row(
-        self,
-        reward: float,
-        done: bool,
-        terminated: bool,
-        truncated: bool,
-        info: dict[str, Any],
-    ) -> dict[str, Any]:
-        sources: dict[str, Any] = {
-            "reward": float(reward),
-            "done": done,
-            "terminated": terminated,
-            "truncated": truncated,
-            "success": bool(info.get("success", False)),
-        }
-        return {k: sources[k] for k in self._step_fields if k in sources}
 
     def make_obs(self, raw_obs: Any, task: Task) -> Observation:
         # Extract camera images

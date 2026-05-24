@@ -13,8 +13,9 @@ from __future__ import annotations
 
 import time
 from abc import ABC, abstractmethod
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, ClassVar
 
 from vla_eval.specs import DimSpec
 
@@ -158,13 +159,34 @@ class StepBenchmark(Benchmark, ABC):
         - ``get_step_result(step_result)`` → EpisodeResult (abstract)
 
     The class auto-bridges these to the async parent API via internal state.
+
+    Recording: subclasses declare which fields they can record by overriding
+    :attr:`_ALL_RECORD_FIELDS`. Per-eval ``step_fields`` (a subset, from yaml)
+    is validated here and applied by :meth:`_record_step` — subclasses just
+    call ``self._record_step(reward=..., done=..., success=...)`` and any key
+    not in ``step_fields`` is dropped before reaching the recorder.
     """
 
-    def __init__(self) -> None:
+    _ALL_RECORD_FIELDS: ClassVar[frozenset[str]] = frozenset()
+
+    def __init__(self, *, step_fields: Iterable[str] | None = None) -> None:
         super().__init__()
         self._last_result: StepResult = StepResult(obs=None, reward=0.0, done=False, info={})
         self._task: Task = {}
         self._t0: float = 0.0
+        if step_fields is None:
+            self._step_fields: frozenset[str] = self._ALL_RECORD_FIELDS
+        else:
+            requested = frozenset(step_fields)
+            unknown = requested - self._ALL_RECORD_FIELDS
+            if unknown:
+                raise ValueError(f"Unknown step_fields: {sorted(unknown)}. Valid: {sorted(self._ALL_RECORD_FIELDS)}")
+            self._step_fields = requested or self._ALL_RECORD_FIELDS
+
+    def _record_step(self, **fields: Any) -> None:
+        """Filter ``fields`` by ``self._step_fields`` and forward to the recorder."""
+        row = {k: v for k, v in fields.items() if k in self._step_fields}
+        self._recorder.record_step(row)
 
     # -- abstract: user implements ----------------------------------------
 

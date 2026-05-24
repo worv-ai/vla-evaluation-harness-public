@@ -59,20 +59,13 @@ class RoboCerebraBenchmark(StepBenchmark):
         send_state: bool = False,
         step_fields: list[str] | None = None,
     ) -> None:
-        super().__init__()
+        super().__init__(step_fields=step_fields)
         self.robocerebra_root = robocerebra_root
         self.task_types = task_types or ["Ideal"]
         self.seed = seed
         self.num_steps_wait = num_steps_wait
         self.send_wrist_image = send_wrist_image
         self.send_state = send_state
-        if step_fields is None:
-            self._step_fields: frozenset[str] = self._ALL_RECORD_FIELDS
-        else:
-            unknown = set(step_fields) - self._ALL_RECORD_FIELDS
-            if unknown:
-                raise ValueError(f"Unknown step_fields: {sorted(unknown)}. Valid: {sorted(self._ALL_RECORD_FIELDS)}")
-            self._step_fields = frozenset(step_fields) if step_fields else self._ALL_RECORD_FIELDS
         self._env: Any = None
         self._current_goal: dict | None = None
         self._libero_inited = False
@@ -235,7 +228,7 @@ class RoboCerebraBenchmark(StepBenchmark):
         frame = self._extract_frame(obs)
         if frame is not None:
             self._recorder.record_video(frame)
-        self._recorder.record_step(self._step_row(float(reward), bool(done), success))
+        self._record_step(reward=float(reward), done=bool(done), success=success)
 
         return StepResult(obs=obs, reward=reward, done=done, info=info)
 
@@ -248,14 +241,6 @@ class RoboCerebraBenchmark(StepBenchmark):
             return None
         # Same flip as make_obs so the recorded frame matches what the model sees.
         return np.ascontiguousarray(img[::-1, ::-1])
-
-    def _step_row(self, reward: float, done: bool, success: bool) -> dict[str, Any]:
-        sources: dict[str, Any] = {
-            "reward": reward,
-            "done": done,
-            "success": success,
-        }
-        return {k: sources[k] for k in self._step_fields if k in sources}
 
     # ------------------------------------------------------------------
     def make_obs(self, raw_obs: Any, task: Task) -> Observation:

@@ -198,7 +198,7 @@ class CALVINBenchmark(StepBenchmark):
         ep_len: int | None = None,
         step_fields: list[str] | None = None,
     ) -> None:
-        super().__init__()
+        super().__init__(step_fields=step_fields)
         self.dataset_path = dataset_path
         self.num_sequences = num_sequences
         self.seed = seed
@@ -206,13 +206,6 @@ class CALVINBenchmark(StepBenchmark):
         self.send_state = send_state
         self.absolute_action = absolute_action
         self._ep_len = ep_len
-        if step_fields is None:
-            self._step_fields: frozenset[str] = self._ALL_RECORD_FIELDS
-        else:
-            unknown = set(step_fields) - self._ALL_RECORD_FIELDS
-            if unknown:
-                raise ValueError(f"Unknown step_fields: {sorted(unknown)}. Valid: {sorted(self._ALL_RECORD_FIELDS)}")
-            self._step_fields = frozenset(step_fields) if step_fields else self._ALL_RECORD_FIELDS
         self._env = None
         self._task_oracle = None
         self._sequences: list | None = None
@@ -535,7 +528,13 @@ class CALVINBenchmark(StepBenchmark):
         frame = self._extract_frame(obs)
         if frame is not None:
             self._recorder.record_video(frame)
-        self._recorder.record_step(self._step_row(result, current_subtask))
+        self._record_step(
+            reward=float(result.reward),
+            done=bool(result.done),
+            success=bool(result.info.get("success", False)),
+            completed_subtasks=int(result.info.get("completed", self._completed)),
+            subtask=current_subtask,
+        )
         return result
 
     @staticmethod
@@ -546,16 +545,6 @@ class CALVINBenchmark(StepBenchmark):
         # Same conversion as make_obs: [-1, 1] float CHW -> uint8 HWC.
         tensor = rgb_static[0, 0]
         return ((tensor.permute(1, 2, 0).cpu().numpy() + 1) / 2 * 255).astype(np.uint8)
-
-    def _step_row(self, result: StepResult, subtask: str) -> dict[str, Any]:
-        sources: dict[str, Any] = {
-            "reward": float(result.reward),
-            "done": bool(result.done),
-            "success": bool(result.info.get("success", False)),
-            "completed_subtasks": int(result.info.get("completed", self._completed)),
-            "subtask": subtask,
-        }
-        return {k: sources[k] for k in self._step_fields if k in sources}
 
     def _process_absolute_action(self, action: Action) -> np.ndarray:
         """Process 7D absolute action [pos3, axisangle3, gripper] → [pos3, euler3, gripper].

@@ -214,7 +214,7 @@ class RoboTwinBenchmark(StepBenchmark):
     ) -> None:
         import re
 
-        super().__init__()
+        super().__init__(step_fields=step_fields)
         if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", task_name):
             raise ValueError(f"Invalid task_name: {task_name!r}")
         if not re.fullmatch(r"[A-Za-z0-9_-]+", task_config):
@@ -227,13 +227,6 @@ class RoboTwinBenchmark(StepBenchmark):
         self.skip_expert_check = skip_expert_check
         self.fast_init = fast_init
         self.fast_render = fast_render
-        if step_fields is None:
-            self._step_fields: frozenset[str] = self._ALL_RECORD_FIELDS
-        else:
-            unknown = set(step_fields) - self._ALL_RECORD_FIELDS
-            if unknown:
-                raise ValueError(f"Unknown step_fields: {sorted(unknown)}. Valid: {sorted(self._ALL_RECORD_FIELDS)}")
-            self._step_fields = frozenset(step_fields) if step_fields else self._ALL_RECORD_FIELDS
         self._env: Any = None
         self._env_class: Any = None
         self._args: dict[str, Any] | None = None
@@ -428,7 +421,7 @@ class RoboTwinBenchmark(StepBenchmark):
         frame = self._extract_frame(raw_obs)
         if frame is not None:
             self._recorder.record_video(frame)
-        self._recorder.record_step(self._step_row(1.0 if success else 0.0, done, success))
+        self._record_step(reward=1.0 if success else 0.0, done=done, success=success)
 
         return StepResult(obs=raw_obs, reward=1.0 if success else 0.0, done=done, info={"success": success})
 
@@ -440,14 +433,6 @@ class RoboTwinBenchmark(StepBenchmark):
             return np.asarray(raw_obs["observation"]["head_camera"]["rgb"])
         except (KeyError, TypeError):
             return None
-
-    def _step_row(self, reward: float, done: bool, success: bool) -> dict[str, Any]:
-        sources: dict[str, Any] = {
-            "reward": reward,
-            "done": done,
-            "success": success,
-        }
-        return {k: sources[k] for k in self._step_fields if k in sources}
 
     def make_obs(self, raw_obs: Any, task: Task) -> Observation:
         return {
