@@ -81,9 +81,8 @@ class MIKASABenchmark(StepBenchmark):
         episodes_per_task: int = 10,
         max_episode_steps: int | None = None,
         render_resolution: list[int] | tuple[int, int] = (256, 256),
-        step_fields: list[str] | None = None,
     ) -> None:
-        super().__init__(step_fields=step_fields)
+        super().__init__()
         self._task_names = tasks or DEFAULT_TASKS
         self._max_steps_override = max_episode_steps
         self._render_resolution = tuple(render_resolution)
@@ -124,6 +123,9 @@ class MIKASABenchmark(StepBenchmark):
 
         obs, info = self._env.reset()
         self._task_desc = TASK_DESCRIPTIONS.get(env_name, f"Complete {env_name}")
+        frame = self._extract_frame(obs)
+        if frame is not None:
+            self._recorder.record_video(frame)
         return obs
 
     def step(self, action: Action) -> StepResult:
@@ -148,15 +150,12 @@ class MIKASABenchmark(StepBenchmark):
         rew = float(reward.sum())
         success = bool(info.get("success", torch.tensor(False)).any())
 
-        return StepResult(obs=obs, reward=rew, done=done, info={"success": success})
+        frame = self._extract_frame(obs)
+        if frame is not None:
+            self._recorder.record_video(frame)
+        self._recorder.record_step({"reward": rew, "done": done, "success": success})
 
-    def _step_record_fields(self, result: StepResult) -> dict[str, Any]:
-        info = result.info or {}
-        return {
-            "reward": float(result.reward),
-            "done": bool(result.done),
-            "success": bool(info.get("success", False)),
-        }
+        return StepResult(obs=obs, reward=rew, done=done, info={"success": success})
 
     def _extract_frame(self, raw_obs: Any) -> np.ndarray | None:
         if not isinstance(raw_obs, dict) or "sensor_data" not in raw_obs:

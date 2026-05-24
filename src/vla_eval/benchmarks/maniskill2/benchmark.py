@@ -65,9 +65,8 @@ class ManiSkill2Benchmark(StepBenchmark):
         max_episode_steps: int = 400,
         render_resolution: list[int] | tuple[int, int] = (256, 256),
         enabled_cameras: list[str] | None = None,
-        step_fields: list[str] | None = None,
     ) -> None:
-        super().__init__(step_fields=step_fields)
+        super().__init__()
         self.tasks = tasks or DEFAULT_TASKS
         self.episodes_per_task = episodes_per_task
         self.max_episode_steps = max_episode_steps
@@ -121,6 +120,9 @@ class ManiSkill2Benchmark(StepBenchmark):
         else:
             self._goal = goal_template
 
+        frame = self._extract_frame(obs)
+        if frame is not None:
+            self._recorder.record_video(frame)
         return obs
 
     def step(self, action: Action) -> StepResult:
@@ -144,10 +146,19 @@ class ManiSkill2Benchmark(StepBenchmark):
         # Track gripper state for next observation (sign inversion)
         self.gripper_state = -env_action[-1]
 
-        info = dict(info)
-        info["terminated"] = bool(terminated)
-        info["truncated"] = bool(truncated)
         done = bool(terminated) or bool(truncated)
+        frame = self._extract_frame(obs)
+        if frame is not None:
+            self._recorder.record_video(frame)
+        self._recorder.record_step(
+            {
+                "reward": float(reward),
+                "done": done,
+                "terminated": bool(terminated),
+                "truncated": bool(truncated),
+                "success": bool(info.get("success", False)),
+            }
+        )
         return StepResult(obs=obs, reward=reward, done=done, info=info)
 
     def _extract_frame(self, raw_obs: Any) -> np.ndarray | None:
@@ -158,16 +169,6 @@ class ManiSkill2Benchmark(StepBenchmark):
             if cam_data is not None and "rgb" in cam_data:
                 return np.asarray(cam_data["rgb"])
         return None
-
-    def _step_record_fields(self, result: StepResult) -> dict[str, Any]:
-        info = result.info or {}
-        return {
-            "reward": float(result.reward),
-            "done": bool(result.done),
-            "terminated": bool(info.get("terminated", False)),
-            "truncated": bool(info.get("truncated", False)),
-            "success": bool(info.get("success", False)),
-        }
 
     def make_obs(self, raw_obs: Any, task: Task) -> Observation:
         # Extract camera images

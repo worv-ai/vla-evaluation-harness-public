@@ -196,9 +196,8 @@ class CALVINBenchmark(StepBenchmark):
         send_state: bool = False,
         absolute_action: bool = False,
         ep_len: int | None = None,
-        step_fields: list[str] | None = None,
     ) -> None:
-        super().__init__(step_fields=step_fields)
+        super().__init__()
         self.dataset_path = dataset_path
         self.num_sequences = num_sequences
         self.seed = seed
@@ -464,6 +463,9 @@ class CALVINBenchmark(StepBenchmark):
         # Capture start_info for task oracle
         self._start_info = self._env.get_info()
 
+        frame = self._extract_frame(obs)
+        if frame is not None:
+            self._recorder.record_video(frame)
         return obs
 
     def step(self, action: Action) -> StepResult:
@@ -521,29 +523,28 @@ class CALVINBenchmark(StepBenchmark):
         else:
             result = StepResult(obs=obs, reward=0.0, done=False, info={})
 
-        # Stash the current subtask name so _step_record_fields can read it
-        # without rerunning the oracle decision.
-        info = dict(result.info)
-        info["_current_subtask"] = current_subtask
-        return StepResult(obs=result.obs, reward=result.reward, done=result.done, info=info)
+        frame = self._extract_frame(result.obs)
+        if frame is not None:
+            self._recorder.record_video(frame)
+        self._recorder.record_step(
+            {
+                "reward": float(result.reward),
+                "done": bool(result.done),
+                "success": bool(result.info.get("success", False)),
+                "completed_subtasks": int(result.info.get("completed", self._completed)),
+                "subtask": current_subtask,
+            }
+        )
+        return result
 
-    def _extract_frame(self, raw_obs: Any) -> np.ndarray | None:
+    @staticmethod
+    def _extract_frame(raw_obs: Any) -> np.ndarray | None:
         rgb_static = raw_obs.get("rgb_obs", {}).get("rgb_static") if isinstance(raw_obs, dict) else None
         if rgb_static is None:
             return None
-        # Same conversion as make_obs: [-1, 1] float CHW -> uint8 HWC.
+        # [-1, 1] float CHW -> uint8 HWC, same conversion as make_obs.
         tensor = rgb_static[0, 0]
         return ((tensor.permute(1, 2, 0).cpu().numpy() + 1) / 2 * 255).astype(np.uint8)
-
-    def _step_record_fields(self, result: StepResult) -> dict[str, Any]:
-        info = result.info or {}
-        return {
-            "reward": float(result.reward),
-            "done": bool(result.done),
-            "success": bool(info.get("success", False)),
-            "completed_subtasks": int(info.get("completed", self._completed)),
-            "subtask": str(info.get("_current_subtask", "")),
-        }
 
     def _process_absolute_action(self, action: Action) -> np.ndarray:
         """Process 7D absolute action [pos3, axisangle3, gripper] → [pos3, euler3, gripper].

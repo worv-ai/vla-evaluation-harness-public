@@ -43,9 +43,8 @@ class RLBenchBenchmark(StepBenchmark):
         tasks: list[str] | None = None,
         render_resolution: int = 256,
         max_steps: int = 200,
-        step_fields: list[str] | None = None,
     ) -> None:
-        super().__init__(step_fields=step_fields)
+        super().__init__()
         self._task_names = tasks or DEFAULT_TASKS
         self._render_resolution = render_resolution
         self._max_steps = max_steps
@@ -121,6 +120,9 @@ class RLBenchBenchmark(StepBenchmark):
         self._task_env = self._env.get_task(task_class)
         self._task_env.sample_variation()
         self._descriptions, obs = self._task_env.reset()
+        frame = self._extract_frame(obs)
+        if frame is not None:
+            self._recorder.record_video(frame)
         return obs
 
     def step(self, action: Action) -> StepResult:
@@ -136,17 +138,14 @@ class RLBenchBenchmark(StepBenchmark):
         assert self._task_env is not None
         obs, reward, terminate = self._task_env.step(act)
         success = reward > 0.99
+        frame = self._extract_frame(obs)
+        if frame is not None:
+            self._recorder.record_video(frame)
+        self._recorder.record_step({"reward": float(reward), "done": bool(terminate), "success": bool(success)})
         return StepResult(obs=obs, reward=reward, done=terminate, info={"success": bool(success)})
 
-    def _step_record_fields(self, result: StepResult) -> dict[str, Any]:
-        info = result.info or {}
-        return {
-            "reward": float(result.reward),
-            "done": bool(result.done),
-            "success": bool(info.get("success", result.reward > 0.99)),
-        }
-
-    def _extract_frame(self, raw_obs: Any) -> np.ndarray | None:
+    @staticmethod
+    def _extract_frame(raw_obs: Any) -> np.ndarray | None:
         front = getattr(raw_obs, "front_rgb", None)
         if front is None:
             return None

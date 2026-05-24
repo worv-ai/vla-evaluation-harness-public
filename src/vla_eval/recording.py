@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import sqlite3
+from collections.abc import Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -225,6 +226,8 @@ class EpisodeRecorder:
         record_video: bool = True,
         record_step: bool = True,
         video_fps: int = 20,
+        step_fields: Iterable[str] | None = None,
+        allowed_fields: Iterable[str] | None = None,
     ) -> None:
         self._store = store
         self._sid = sid
@@ -238,6 +241,23 @@ class EpisodeRecorder:
         self._next_step = 0
         self._closed = False
         self._video: Any = None
+        # step_fields=None → record everything in ``allowed_fields`` (or
+        # everything, if both are None). Explicit empty list = record nothing.
+        allowed = frozenset(allowed_fields) if allowed_fields is not None else None
+        if step_fields is None:
+            self._step_fields: frozenset[str] | None = allowed
+        else:
+            if isinstance(step_fields, str):
+                raise TypeError(
+                    f"step_fields must be a list of field names, got bare string {step_fields!r} — "
+                    "did you forget the YAML list brackets?"
+                )
+            requested = frozenset(step_fields)
+            if allowed is not None:
+                unknown = requested - allowed
+                if unknown:
+                    raise ValueError(f"Unknown step_fields: {sorted(unknown)}. Valid: {sorted(allowed)}")
+            self._step_fields = requested
         if record_video:
             from vla_eval.benchmarks.video import EpisodeVideoRecorder
 
@@ -284,6 +304,10 @@ class EpisodeRecorder:
     def record_step(self, row: dict[str, Any]) -> None:
         if not self._record_step:
             return
+        # ``step_fields`` filters caller-supplied keys; ``step`` is the row
+        # identifier and always passes through (it's not a data field).
+        if self._step_fields is not None:
+            row = {k: v for k, v in row.items() if k == "step" or k in self._step_fields}
         step_id = int(row.get("step", self._next_step))
         self._next_step = step_id + 1
         existing = self._steps.setdefault(step_id, {})

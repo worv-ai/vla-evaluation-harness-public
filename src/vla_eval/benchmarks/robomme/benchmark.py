@@ -153,8 +153,6 @@ class RoboMMEBenchmark(StepBenchmark):
             ``info['simple_subgoal_online']`` (no coords).  Both come from
             ``DemonstrationWrapper`` in the upstream robomme env.  ``"grounded"``
             falls back to simple if grounded is empty.
-        step_fields: Subset of ``_ALL_RECORD_FIELDS`` to write into each step row.
-            ``None`` selects all.
     """
 
     _ALL_RECORD_FIELDS = frozenset(
@@ -174,9 +172,8 @@ class RoboMMEBenchmark(StepBenchmark):
         send_video_history: bool = True,
         send_subgoal: bool = False,
         subgoal_mode: Literal["grounded", "simple"] = "grounded",
-        step_fields: list[str] | None = None,
     ) -> None:
-        super().__init__(step_fields=step_fields)
+        super().__init__()
         if subgoal_mode not in ("grounded", "simple"):
             raise ValueError(f"subgoal_mode must be 'grounded' or 'simple', got {subgoal_mode!r}")
         self.tasks = tasks or list(_DEFAULT_TASK_LIST)
@@ -378,6 +375,9 @@ class RoboMMEBenchmark(StepBenchmark):
         if self.send_subgoal:
             self._current_subgoal = self._extract_subgoal(info_flat)
 
+        frame = self._extract_frame(obs_batch)
+        if frame is not None:
+            self._recorder.record_video(frame)
         return obs_batch
 
     def step(self, action: Action) -> StepResult:
@@ -400,33 +400,31 @@ class RoboMMEBenchmark(StepBenchmark):
         reward = float(reward)
         done = terminated or truncated or info.get("status") == "error"
 
-        info = dict(info)
-        info["terminated"] = terminated
-        info["truncated"] = truncated
+        row: dict[str, Any] = {
+            "simple_subgoal_online": info.get("simple_subgoal_online", ""),
+            "grounded_subgoal_online": info.get("grounded_subgoal_online", ""),
+            "reward": reward,
+            "terminated": terminated,
+        }
+        if isinstance(obs, dict):
+            state = obs.get("state_fq")
+            if state is not None:
+                row["state_fq"] = state.tolist() if hasattr(state, "tolist") else list(state)
+        frame = self._extract_frame(obs)
+        if frame is not None:
+            self._recorder.record_video(frame)
+        self._recorder.record_step(row)
+
         return StepResult(obs=obs, reward=reward, done=done, info=info)
 
-    def _extract_frame(self, raw_obs: Any) -> np.ndarray | None:
-        if not raw_obs:
+    @staticmethod
+    def _extract_frame(raw_obs: Any) -> np.ndarray | None:
+        if not isinstance(raw_obs, dict):
             return None
         front_list = raw_obs.get("front_rgb_list", [])
         if not front_list:
             return None
         return np.asarray(front_list[-1])
-
-    def _step_record_fields(self, result: StepResult) -> dict[str, Any]:
-        info = result.info or {}
-        row: dict[str, Any] = {
-            "simple_subgoal_online": info.get("simple_subgoal_online", ""),
-            "grounded_subgoal_online": info.get("grounded_subgoal_online", ""),
-            "reward": float(result.reward),
-            "terminated": bool(info.get("terminated", False)),
-        }
-        obs = result.obs
-        if obs:
-            state = obs.get("state_fq")
-            if state is not None:
-                row["state_fq"] = state.tolist() if hasattr(state, "tolist") else list(state)
-        return row
 
     def _extract_subgoal(self, info: dict[str, Any]) -> str:
         """Pick the configured subgoal text from the env's info dict.

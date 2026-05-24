@@ -21,7 +21,6 @@ class LIBEROMemBenchmark(LIBEROBenchmark):
         num_steps_wait: int = 10,
         send_wrist_image: bool = False,
         send_state: bool = False,
-        step_fields: list[str] | None = None,
     ) -> None:
         super().__init__(
             suite=suite,
@@ -29,7 +28,6 @@ class LIBEROMemBenchmark(LIBEROBenchmark):
             num_steps_wait=num_steps_wait,
             send_wrist_image=send_wrist_image,
             send_state=send_state,
-            step_fields=step_fields,
         )
 
     def reset(self, task: Task) -> Any:
@@ -50,6 +48,13 @@ class LIBEROMemBenchmark(LIBEROBenchmark):
         # subgoal state machine. Preserve the env's own done flag too.
         assert self._env is not None
         done = result.done or self._env.env._check_success(inc=True)
+        # super() already recorded a step row with done = result.done.
+        # Overwrite that row's done/success with the mutated value so the
+        # SQLite record matches what the harness sees. ``_next_step`` is
+        # currently one past the row we want; subtract 1 to reuse it.
+        last_step_id = self._recorder._next_step - 1
+        if last_step_id >= 0:
+            self._recorder.record_step({"step": last_step_id, "done": bool(done), "success": bool(done)})
         return StepResult(obs=result.obs, reward=result.reward, done=done, info=result.info)
 
     def get_metadata(self) -> dict[str, Any]:

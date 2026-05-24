@@ -62,9 +62,8 @@ class RoboCasaBenchmark(StepBenchmark):
         max_steps: int = 500,
         split: str = "pretrain",
         seed: int | None = None,
-        step_fields: list[str] | None = None,
     ) -> None:
-        super().__init__(step_fields=step_fields)
+        super().__init__()
         self._task_names = tasks or DEFAULT_TASKS
         self._robot = robot
         self._camera_names = camera_names or [
@@ -113,6 +112,9 @@ class RoboCasaBenchmark(StepBenchmark):
 
         obs = self._env.reset()
         self._lang = self._env.get_ep_meta().get("lang", task_name)
+        frame = self._extract_frame(obs)
+        if frame is not None:
+            self._recorder.record_video(frame)
         return obs
 
     def step(self, action: Action) -> StepResult:
@@ -132,16 +134,11 @@ class RoboCasaBenchmark(StepBenchmark):
         obs, reward, done, info = self._env.step(raw_action)
         success = bool(self._env._check_success())
         info["success"] = success
+        frame = self._extract_frame(obs)
+        if frame is not None:
+            self._recorder.record_video(frame)
+        self._recorder.record_step({"reward": float(success), "done": bool(done), "success": success})
         return StepResult(obs=obs, reward=float(success), done=done, info=info)
-
-    def _step_record_fields(self, result: StepResult) -> dict[str, Any]:
-        info = result.info or {}
-        success = bool(info.get("success", False))
-        return {
-            "reward": float(result.reward),
-            "done": bool(result.done),
-            "success": success,
-        }
 
     def _extract_frame(self, raw_obs: Any) -> np.ndarray | None:
         if not isinstance(raw_obs, dict):

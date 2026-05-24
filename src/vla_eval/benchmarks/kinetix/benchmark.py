@@ -98,9 +98,8 @@ class KinetixBenchmark(StepBenchmark):
         rtc_worlds_dir: str | None = None,
         observation_type: str = "pixels",
         action_noise_std: float = 0.0,
-        step_fields: list[str] | None = None,
     ) -> None:
-        super().__init__(step_fields=step_fields)
+        super().__init__()
         self._task_names = tasks
         self._max_episode_steps = max_episode_steps
         self._seed = seed
@@ -205,6 +204,9 @@ class KinetixBenchmark(StepBenchmark):
         self._step_count = 0
         self._episode_success = False
 
+        frame = self._extract_frame(obs)
+        if frame is not None:
+            self._recorder.record_video(frame)
         return obs
 
     def step(self, action: Action) -> StepResult:
@@ -248,14 +250,12 @@ class KinetixBenchmark(StepBenchmark):
         if reward_val > 0:
             self._episode_success = True
 
-        return StepResult(obs=obs, reward=reward_val, done=done_val, info=info)
+        frame = self._extract_frame(obs)
+        if frame is not None:
+            self._recorder.record_video(frame)
+        self._recorder.record_step({"reward": reward_val, "done": done_val, "success": bool(self._episode_success)})
 
-    def _step_record_fields(self, result: StepResult) -> dict[str, Any]:
-        return {
-            "reward": float(result.reward),
-            "done": bool(result.done),
-            "success": bool(self._episode_success),
-        }
+        return StepResult(obs=obs, reward=reward_val, done=done_val, info=info)
 
     def _extract_frame(self, raw_obs: Any) -> np.ndarray | None:
         # Symbolic-obs runs have no renderable frame.
