@@ -211,10 +211,6 @@ class SimplerEnvBenchmark(StepBenchmark):
         except AttributeError:
             self._task_description = self._env.get_wrapper_attr("get_language_instruction")()
 
-        frame = self._extract_frame(obs)
-        if frame is not None:
-            self._recorder.record_video(frame)
-
         return obs
 
     def _common_make_kwargs(self) -> dict[str, Any]:
@@ -289,22 +285,24 @@ class SimplerEnvBenchmark(StepBenchmark):
         assert self._env is not None
         obs, reward, done, truncated, info = self._env.step(env_action)
 
-        info["truncated"] = truncated
+        info = dict(info)
+        info["terminated"] = bool(done)
+        info["truncated"] = bool(truncated)
+        info["success"] = bool(done)
         if done:
             self._success_seen = True
 
-        frame = self._extract_frame(obs)
-        if frame is not None:
-            self._recorder.record_video(frame)
-        self._record_step(
-            reward=float(reward),
-            done=done or bool(truncated),
-            terminated=done,
-            truncated=bool(truncated),
-            success=done,
-        )
+        return StepResult(obs=obs, reward=reward, done=done or bool(truncated), info=info)
 
-        return StepResult(obs=obs, reward=reward, done=done, info=info)
+    def _step_record_fields(self, result: StepResult) -> dict[str, Any]:
+        info = result.info or {}
+        return {
+            "reward": float(result.reward),
+            "done": bool(result.done),
+            "terminated": bool(info.get("terminated", False)),
+            "truncated": bool(info.get("truncated", False)),
+            "success": bool(info.get("success", False)),
+        }
 
     def _extract_frame(self, raw_obs: Any) -> np.ndarray | None:
         if self._env is None:

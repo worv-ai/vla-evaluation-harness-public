@@ -399,9 +399,6 @@ class RoboTwinBenchmark(StepBenchmark):
             )
         self._env.set_instruction(instruction=task["instruction"])
         raw_obs = self._env.get_obs()
-        frame = self._extract_frame(raw_obs)
-        if frame is not None:
-            self._recorder.record_video(frame)
         return raw_obs
 
     def step(self, action: Action) -> StepResult:
@@ -417,16 +414,14 @@ class RoboTwinBenchmark(StepBenchmark):
         raw_obs = self._env.get_obs()
         success = bool(self._env.eval_success)
         done = success or (self._env.take_action_cnt >= self._env.step_lim)
-
-        frame = self._extract_frame(raw_obs)
-        if frame is not None:
-            self._recorder.record_video(frame)
-        self._record_step(reward=1.0 if success else 0.0, done=done, success=success)
-
         return StepResult(obs=raw_obs, reward=1.0 if success else 0.0, done=done, info={"success": success})
 
-    @staticmethod
-    def _extract_frame(raw_obs: Any) -> np.ndarray | None:
+    def _step_record_fields(self, result: StepResult) -> dict[str, Any]:
+        info = result.info or {}
+        success = bool(info.get("success", False))
+        return {"reward": float(result.reward), "done": bool(result.done), "success": success}
+
+    def _extract_frame(self, raw_obs: Any) -> np.ndarray | None:
         if not isinstance(raw_obs, dict):
             return None
         try:

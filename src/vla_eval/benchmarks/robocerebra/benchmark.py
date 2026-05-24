@@ -195,10 +195,6 @@ class RoboCerebraBenchmark(StepBenchmark):
         for _ in range(self.num_steps_wait):
             obs, _, _, _ = self._env.step(_DUMMY_ACTION)
 
-        frame = self._extract_frame(obs)
-        if frame is not None:
-            self._recorder.record_video(frame)
-
         return obs
 
     # ------------------------------------------------------------------
@@ -225,15 +221,17 @@ class RoboCerebraBenchmark(StepBenchmark):
                 logger.warning("Failed to check success criteria: %s", e)
         info["success"] = success
 
-        frame = self._extract_frame(obs)
-        if frame is not None:
-            self._recorder.record_video(frame)
-        self._record_step(reward=float(reward), done=bool(done), success=success)
-
         return StepResult(obs=obs, reward=reward, done=done, info=info)
 
-    @staticmethod
-    def _extract_frame(raw_obs: Any) -> np.ndarray | None:
+    def _step_record_fields(self, result: StepResult) -> dict[str, Any]:
+        info = result.info or {}
+        return {
+            "reward": float(result.reward),
+            "done": bool(result.done),
+            "success": bool(info.get("success", False)),
+        }
+
+    def _extract_frame(self, raw_obs: Any) -> np.ndarray | None:
         if not isinstance(raw_obs, dict):
             return None
         img = raw_obs.get("agentview_image")

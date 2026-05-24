@@ -378,10 +378,6 @@ class RoboMMEBenchmark(StepBenchmark):
         if self.send_subgoal:
             self._current_subgoal = self._extract_subgoal(info_flat)
 
-        front_list = obs_batch.get("front_rgb_list", [])
-        if front_list:
-            self._recorder.record_video(front_list[-1])
-
         return obs_batch
 
     def step(self, action: Action) -> StepResult:
@@ -399,30 +395,38 @@ class RoboMMEBenchmark(StepBenchmark):
         if self.send_subgoal:
             self._current_subgoal = self._extract_subgoal(info)
 
-        if obs:
-            front_list = obs.get("front_rgb_list", [])
-            if front_list:
-                self._recorder.record_video(front_list[-1])
-
         terminated = bool(terminated)
         truncated = bool(truncated)
         reward = float(reward)
         done = terminated or truncated or info.get("status") == "error"
 
-        extra: dict[str, Any] = {}
+        info = dict(info)
+        info["terminated"] = terminated
+        info["truncated"] = truncated
+        return StepResult(obs=obs, reward=reward, done=done, info=info)
+
+    def _extract_frame(self, raw_obs: Any) -> np.ndarray | None:
+        if not raw_obs:
+            return None
+        front_list = raw_obs.get("front_rgb_list", [])
+        if not front_list:
+            return None
+        return np.asarray(front_list[-1])
+
+    def _step_record_fields(self, result: StepResult) -> dict[str, Any]:
+        info = result.info or {}
+        row: dict[str, Any] = {
+            "simple_subgoal_online": info.get("simple_subgoal_online", ""),
+            "grounded_subgoal_online": info.get("grounded_subgoal_online", ""),
+            "reward": float(result.reward),
+            "terminated": bool(info.get("terminated", False)),
+        }
+        obs = result.obs
         if obs:
             state = obs.get("state_fq")
             if state is not None:
-                extra["state_fq"] = state.tolist() if hasattr(state, "tolist") else list(state)
-        self._record_step(
-            simple_subgoal_online=info.get("simple_subgoal_online", ""),
-            grounded_subgoal_online=info.get("grounded_subgoal_online", ""),
-            reward=reward,
-            terminated=terminated,
-            **extra,
-        )
-
-        return StepResult(obs=obs, reward=reward, done=done, info=info)
+                row["state_fq"] = state.tolist() if hasattr(state, "tolist") else list(state)
+        return row
 
     def _extract_subgoal(self, info: dict[str, Any]) -> str:
         """Pick the configured subgoal text from the env's info dict.

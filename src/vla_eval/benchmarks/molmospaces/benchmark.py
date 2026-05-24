@@ -177,9 +177,6 @@ class MolmoSpacesBenchmark(StepBenchmark):
         else:
             raw_obs = reset_output
         unwrapped = self._unwrap_batch(raw_obs)
-        frame = self._extract_frame(unwrapped)
-        if frame is not None:
-            self._recorder.record_video(frame)
         return unwrapped
 
     def step(self, action: Action) -> StepResult:
@@ -210,12 +207,17 @@ class MolmoSpacesBenchmark(StepBenchmark):
         done = bool(terminated or truncated)
         success = bool(self._scalar(info.get("success", False), default=False)) if isinstance(info, dict) else False
 
-        frame = self._extract_frame(obs)
-        if frame is not None:
-            self._recorder.record_video(frame)
-        self._record_step(reward=float(reward), done=done, success=success)
+        out_info = dict(info) if isinstance(info, dict) else {}
+        out_info.setdefault("success", success)
+        return StepResult(obs=obs, reward=float(reward), done=done, info=out_info)
 
-        return StepResult(obs=obs, reward=float(reward), done=done, info=info or {})
+    def _step_record_fields(self, result: StepResult) -> dict[str, Any]:
+        info = result.info or {}
+        return {
+            "reward": float(result.reward),
+            "done": bool(result.done),
+            "success": bool(info.get("success", False)),
+        }
 
     def _extract_frame(self, raw_obs: Any) -> np.ndarray | None:
         if not isinstance(raw_obs, dict):

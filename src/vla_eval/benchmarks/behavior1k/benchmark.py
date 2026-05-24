@@ -204,6 +204,7 @@ class Behavior1KBenchmark(StepBenchmark):
         self._env: Any = None
         self._current_task_name: str | None = None
         self._available_tasks: dict[str, Any] | None = None
+        self._flat_obs_cache: dict[str, Any] = {}
 
     # ------------------------------------------------------------------
     # Lazy initialization
@@ -351,9 +352,6 @@ class Behavior1KBenchmark(StepBenchmark):
             episode_idx = int(task.get("episode_idx", 0))
             instance_id = self._task_instance_ids[episode_idx % len(self._task_instance_ids)]
             obs = self._load_task_instance(instance_id)
-        frame = self._extract_frame(obs)
-        if frame is not None:
-            self._recorder.record_video(frame)
         return obs
 
     def _load_task_instance(self, instance_id: int) -> Any:
@@ -432,29 +430,29 @@ class Behavior1KBenchmark(StepBenchmark):
         assert self._env is not None
         obs, reward, terminated, truncated, info = self._env.step(tensor, n_render_iterations=1)
         info = dict(info)
+        info["terminated"] = bool(terminated)
         info["truncated"] = bool(truncated)
         done = bool(terminated) or bool(truncated)
-
-        frame = self._extract_frame(obs)
-        if frame is not None:
-            self._recorder.record_video(frame)
-        done_info = info.get("done", {}) or {}
-        self._record_step(
-            reward=float(reward),
-            done=done,
-            terminated=bool(terminated),
-            truncated=bool(truncated),
-            success=bool(done_info.get("success", False)),
-        )
-
         return StepResult(obs=obs, reward=float(reward), done=done, info=info)
 
-    def _extract_frame(self, raw_obs: Any) -> np.ndarray | None:
+    def _flatten_obs(self, raw_obs: Any) -> dict[str, Any] | None:
+        """Memoised ``flatten_obs_dict(raw_obs)``. The harness reuses the same
+        ``raw_obs`` object for the recorder frame, ``make_obs``, and (in
+        sub-classes) extra hooks — flattening is non-trivial in OmniGibson."""
+        if self._flat_obs_cache.get("obj") is raw_obs:
+            return self._flat_obs_cache.get("flat")
         from omnigibson.learning.utils.eval_utils import flatten_obs_dict
 
         try:
             flat = flatten_obs_dict(raw_obs)
         except Exception:
+            flat = None
+        self._flat_obs_cache = {"obj": raw_obs, "flat": flat}
+        return flat
+
+    def _extract_frame(self, raw_obs: Any) -> np.ndarray | None:
+        flat = self._flatten_obs(raw_obs)
+        if flat is None:
             return None
         for cam in self._camera_names:
             key = R1PRO_CAMERAS[cam] + RGB_SUFFIX
@@ -469,10 +467,19 @@ class Behavior1KBenchmark(StepBenchmark):
             return np.ascontiguousarray(arr)
         return None
 
-    def make_obs(self, raw_obs: Any, task: Task) -> Observation:
-        from omnigibson.learning.utils.eval_utils import flatten_obs_dict
+    def _step_record_fields(self, result: StepResult) -> dict[str, Any]:
+        info = result.info or {}
+        done_info = info.get("done") or {}
+        return {
+            "reward": float(result.reward),
+            "done": bool(result.done),
+            "terminated": bool(info.get("terminated", False)),
+            "truncated": bool(info.get("truncated", False)),
+            "success": bool(done_info.get("success", False)),
+        }
 
-        flat = flatten_obs_dict(raw_obs)
+    def make_obs(self, raw_obs: Any, task: Task) -> Observation:
+        flat = self._flatten_obs(raw_obs) or {}
 
         images: dict[str, np.ndarray] = {}
         for cam in self._camera_names:

@@ -160,11 +160,18 @@ class StepBenchmark(Benchmark, ABC):
 
     The class auto-bridges these to the async parent API via internal state.
 
-    Recording: subclasses declare which fields they can record by overriding
-    :attr:`_ALL_RECORD_FIELDS`. Per-eval ``step_fields`` (a subset, from yaml)
-    is validated here and applied by :meth:`_record_step` — subclasses just
-    call ``self._record_step(reward=..., done=..., success=...)`` and any key
-    not in ``step_fields`` is dropped before reaching the recorder.
+    Recording: subclasses declare:
+        - :attr:`_ALL_RECORD_FIELDS` — which fields they CAN record.
+        - :meth:`_extract_frame(raw_obs)` — single video frame per step (or ``None``).
+        - :meth:`_step_record_fields(result)` — the per-step row.
+
+    The async bridge records the first frame at :meth:`start_episode` and the
+    per-step frame + row at :meth:`apply_action`, AFTER ``step()`` returns —
+    so subclasses that mutate ``StepResult`` post-``super().step()`` are
+    recorded with the final state.
+
+    ``step_fields`` (yaml) is a per-eval subset filter; explicit empty list
+    means "record no per-step fields" (``record_video`` still fires).
     """
 
     _ALL_RECORD_FIELDS: ClassVar[frozenset[str]] = frozenset()
@@ -181,11 +188,29 @@ class StepBenchmark(Benchmark, ABC):
             unknown = requested - self._ALL_RECORD_FIELDS
             if unknown:
                 raise ValueError(f"Unknown step_fields: {sorted(unknown)}. Valid: {sorted(self._ALL_RECORD_FIELDS)}")
-            self._step_fields = requested or self._ALL_RECORD_FIELDS
+            # Explicit empty list = record no fields (≠ default ``None`` = all).
+            self._step_fields = requested
+
+    def _extract_frame(self, raw_obs: Any) -> np.ndarray | None:
+        """Return one video frame for the recorder, or ``None`` to skip."""
+        return None
+
+    def _step_record_fields(self, result: StepResult) -> dict[str, Any]:
+        """Return the per-step row to record. Default: reward + done."""
+        return {"reward": float(result.reward), "done": bool(result.done)}
 
     def _record_step(self, **fields: Any) -> None:
-        """Filter ``fields`` by ``self._step_fields`` and forward to the recorder."""
+        """Filter ``fields`` by ``self._step_fields`` and forward to the recorder.
+
+        An empty filtered row is a no-op: the recorder treats step_id as
+        monotonic, so emitting empty rows would advance the counter and
+        pollute the SQLite table with blank entries.
+        """
+        if not self._step_fields:
+            return
         row = {k: v for k, v in fields.items() if k in self._step_fields}
+        if not row:
+            return
         self._recorder.record_step(row)
 
     # -- abstract: user implements ----------------------------------------
@@ -225,9 +250,16 @@ class StepBenchmark(Benchmark, ABC):
         self._recorder: EpisodeRecorder = recorder or NullEpisodeRecorder()
         raw_obs = self.reset(task)
         self._last_result = StepResult(obs=raw_obs, reward=0.0, done=False, info={})
+        frame = self._extract_frame(raw_obs)
+        if frame is not None:
+            self._recorder.record_video(frame)
 
     async def apply_action(self, action: Action) -> None:
         self._last_result = self.step(action)
+        frame = self._extract_frame(self._last_result.obs)
+        if frame is not None:
+            self._recorder.record_video(frame)
+        self._record_step(**self._step_record_fields(self._last_result))
 
     async def get_observation(self) -> Observation:
         return self.make_obs(self._last_result.obs, self._task)

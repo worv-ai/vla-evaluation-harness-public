@@ -112,9 +112,6 @@ class VLABenchBenchmark(StepBenchmark):
         obs = self._env.get_observation(require_pcd=False)
         self._instruction = self._env.task.get_instruction()
         self._last_ee_state = obs.get("ee_state", None)
-        frame = self._extract_frame(obs)
-        if frame is not None:
-            self._recorder.record_video(frame)
         return obs
 
     def step(self, action: Action) -> StepResult:
@@ -163,11 +160,6 @@ class VLABenchBenchmark(StepBenchmark):
         self._last_ee_state = obs.get("ee_state", None)
         self._instruction = self._env.task.get_instruction()
 
-        frame = self._extract_frame(obs)
-        if frame is not None:
-            self._recorder.record_video(frame)
-        self._record_step(reward=1.0 if success else 0.0, done=success, success=success)
-
         return StepResult(
             obs=obs,
             reward=1.0 if success else 0.0,
@@ -175,14 +167,17 @@ class VLABenchBenchmark(StepBenchmark):
             info={"success": success, "timestep": timestep},
         )
 
-    @staticmethod
-    def _extract_frame(raw_obs: Any) -> np.ndarray | None:
+    def _extract_frame(self, raw_obs: Any) -> np.ndarray | None:
         if not isinstance(raw_obs, dict):
             return None
         rgb = raw_obs.get("rgb")
         if rgb is None or len(rgb) == 0:
             return None
         return np.asarray(rgb[0])
+
+    def _step_record_fields(self, result: StepResult) -> dict[str, Any]:
+        success = bool(result.info.get("success", result.done))
+        return {"reward": float(result.reward), "done": bool(result.done), "success": success}
 
     def make_obs(self, raw_obs: Any, task: Task) -> Observation:
         images: dict[str, np.ndarray] = {}
