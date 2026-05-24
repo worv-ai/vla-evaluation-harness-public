@@ -88,6 +88,8 @@ class LIBEROBenchmark(StepBenchmark):
             OpenVLA reference uses ``env_seed=0`` separately from ``seed=7``.
     """
 
+    _ALL_RECORD_FIELDS = frozenset({"reward", "done", "success"})
+
     def __init__(
         self,
         suite: str = "libero_spatial",
@@ -99,6 +101,7 @@ class LIBEROBenchmark(StepBenchmark):
         max_steps: int | None = None,
         env_seed: int | None = None,
         quat_no_antipodal: bool = False,
+        step_fields: list[str] | None = None,
     ) -> None:
         super().__init__()
         self.suite = suite
@@ -110,6 +113,13 @@ class LIBEROBenchmark(StepBenchmark):
         self.send_state = send_state
         self.absolute_action = absolute_action
         self._max_steps = max_steps
+        if step_fields is None:
+            self._step_fields: frozenset[str] = self._ALL_RECORD_FIELDS
+        else:
+            unknown = set(step_fields) - self._ALL_RECORD_FIELDS
+            if unknown:
+                raise ValueError(f"Unknown step_fields: {sorted(unknown)}. Valid: {sorted(self._ALL_RECORD_FIELDS)}")
+            self._step_fields = frozenset(step_fields) if step_fields else self._ALL_RECORD_FIELDS
         self._env = None
         self._task_suite = None
         self._current_task_id: int | None = None
@@ -206,6 +216,11 @@ class LIBEROBenchmark(StepBenchmark):
             for robot in self._env.robots:
                 robot.controller.use_delta = False
 
+        if isinstance(obs, dict):
+            frame = obs.get("agentview_image")
+            if frame is not None:
+                self._recorder.record_video(self._orient_frame(frame))
+
         return obs
 
     def step(self, action: Action) -> StepResult:
@@ -223,7 +238,27 @@ class LIBEROBenchmark(StepBenchmark):
 
         assert self._env is not None
         obs, reward, done, info = self._env.step(processed_action)
+
+        if isinstance(obs, dict):
+            frame = obs.get("agentview_image")
+            if frame is not None:
+                self._recorder.record_video(self._orient_frame(frame))
+
+        self._recorder.record_step(self._step_row(reward, done, info))
         return StepResult(obs=obs, reward=reward, done=done, info=info)
+
+    @staticmethod
+    def _orient_frame(frame: np.ndarray) -> np.ndarray:
+        """Robosuite renders agentview/wrist inverted; flip to upright before encoding."""
+        return np.ascontiguousarray(frame[::-1, ::-1])
+
+    def _step_row(self, reward: float, done: bool, info: dict[str, Any]) -> dict[str, Any]:
+        sources: dict[str, Any] = {
+            "reward": float(reward),
+            "done": bool(done),
+            "success": bool(done),
+        }
+        return {k: sources[k] for k in self._step_fields if k in sources}
 
     def make_obs(self, raw_obs: Any, task: Task) -> Observation:
         img = preprocess_libero_image(raw_obs["agentview_image"], LIBERO_ENV_RESOLUTION)

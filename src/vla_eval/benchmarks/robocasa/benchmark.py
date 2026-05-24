@@ -51,6 +51,8 @@ class RoboCasaBenchmark(StepBenchmark):
         seed: Random seed for environment creation.
     """
 
+    _ALL_RECORD_FIELDS = frozenset({"reward", "done", "success"})
+
     def __init__(
         self,
         tasks: list[str] | None = None,
@@ -60,6 +62,7 @@ class RoboCasaBenchmark(StepBenchmark):
         max_steps: int = 500,
         split: str = "pretrain",
         seed: int | None = None,
+        step_fields: list[str] | None = None,
     ) -> None:
         super().__init__()
         self._task_names = tasks or DEFAULT_TASKS
@@ -72,6 +75,13 @@ class RoboCasaBenchmark(StepBenchmark):
         self._max_steps = max_steps
         self._split = split
         self._seed = seed
+        if step_fields is None:
+            self._step_fields: frozenset[str] = self._ALL_RECORD_FIELDS
+        else:
+            unknown = set(step_fields) - self._ALL_RECORD_FIELDS
+            if unknown:
+                raise ValueError(f"Unknown step_fields: {sorted(unknown)}. Valid: {sorted(self._ALL_RECORD_FIELDS)}")
+            self._step_fields = frozenset(step_fields) if step_fields else self._ALL_RECORD_FIELDS
         self._env: Any = None
         self._current_task: str | None = None
         self._lang: str = ""
@@ -110,6 +120,9 @@ class RoboCasaBenchmark(StepBenchmark):
 
         obs = self._env.reset()
         self._lang = self._env.get_ep_meta().get("lang", task_name)
+        frame = self._extract_frame(obs)
+        if frame is not None:
+            self._recorder.record_video(frame)
         return obs
 
     def step(self, action: Action) -> StepResult:
@@ -129,7 +142,31 @@ class RoboCasaBenchmark(StepBenchmark):
         obs, reward, done, info = self._env.step(raw_action)
         success = bool(self._env._check_success())
         info["success"] = success
+
+        frame = self._extract_frame(obs)
+        if frame is not None:
+            self._recorder.record_video(frame)
+        self._recorder.record_step(self._step_row(float(success), bool(done), success))
+
         return StepResult(obs=obs, reward=float(success), done=done, info=info)
+
+    def _extract_frame(self, raw_obs: Any) -> np.ndarray | None:
+        if not isinstance(raw_obs, dict):
+            return None
+        for cam in self._camera_names:
+            key = f"{cam}_image"
+            if key in raw_obs:
+                # Match make_obs's vertical flip so recorded video matches what the model sees.
+                return np.ascontiguousarray(raw_obs[key][::-1])
+        return None
+
+    def _step_row(self, reward: float, done: bool, success: bool) -> dict[str, Any]:
+        sources: dict[str, Any] = {
+            "reward": reward,
+            "done": done,
+            "success": success,
+        }
+        return {k: sources[k] for k in self._step_fields if k in sources}
 
     def make_obs(self, raw_obs: Any, task: Task) -> Observation:
         images: dict[str, Any] = {}

@@ -56,6 +56,8 @@ class ManiSkill2Benchmark(StepBenchmark):
         enabled_cameras: Camera names to include (default ``["base_camera"]``).
     """
 
+    _ALL_RECORD_FIELDS = frozenset({"reward", "done", "terminated", "truncated", "success"})
+
     def __init__(
         self,
         tasks: list[str] | None = None,
@@ -63,6 +65,7 @@ class ManiSkill2Benchmark(StepBenchmark):
         max_episode_steps: int = 400,
         render_resolution: list[int] | tuple[int, int] = (256, 256),
         enabled_cameras: list[str] | None = None,
+        step_fields: list[str] | None = None,
     ) -> None:
         super().__init__()
         self.tasks = tasks or DEFAULT_TASKS
@@ -70,6 +73,13 @@ class ManiSkill2Benchmark(StepBenchmark):
         self.max_episode_steps = max_episode_steps
         self.render_resolution = tuple(render_resolution)
         self.enabled_cameras = enabled_cameras or ["base_camera"]
+        if step_fields is None:
+            self._step_fields: frozenset[str] = self._ALL_RECORD_FIELDS
+        else:
+            unknown = set(step_fields) - self._ALL_RECORD_FIELDS
+            if unknown:
+                raise ValueError(f"Unknown step_fields: {sorted(unknown)}. Valid: {sorted(self._ALL_RECORD_FIELDS)}")
+            self._step_fields = frozenset(step_fields) if step_fields else self._ALL_RECORD_FIELDS
 
         self._env = None
         self._current_task: str | None = None
@@ -118,6 +128,10 @@ class ManiSkill2Benchmark(StepBenchmark):
         else:
             self._goal = goal_template
 
+        frame = self._extract_frame(obs)
+        if frame is not None:
+            self._recorder.record_video(frame)
+
         return obs
 
     def step(self, action: Action) -> StepResult:
@@ -141,8 +155,40 @@ class ManiSkill2Benchmark(StepBenchmark):
         # Track gripper state for next observation (sign inversion)
         self.gripper_state = -env_action[-1]
 
-        done = terminated or truncated
+        done = bool(terminated) or bool(truncated)
+
+        frame = self._extract_frame(obs)
+        if frame is not None:
+            self._recorder.record_video(frame)
+        self._recorder.record_step(self._step_row(reward, done, bool(terminated), bool(truncated), info))
+
         return StepResult(obs=obs, reward=reward, done=done, info=info)
+
+    def _extract_frame(self, raw_obs: Any) -> np.ndarray | None:
+        if not isinstance(raw_obs, dict):
+            return None
+        for cam in self.enabled_cameras:
+            cam_data = raw_obs.get("image", {}).get(cam)
+            if cam_data is not None and "rgb" in cam_data:
+                return np.asarray(cam_data["rgb"])
+        return None
+
+    def _step_row(
+        self,
+        reward: float,
+        done: bool,
+        terminated: bool,
+        truncated: bool,
+        info: dict[str, Any],
+    ) -> dict[str, Any]:
+        sources: dict[str, Any] = {
+            "reward": float(reward),
+            "done": done,
+            "terminated": terminated,
+            "truncated": truncated,
+            "success": bool(info.get("success", False)),
+        }
+        return {k: sources[k] for k in self._step_fields if k in sources}
 
     def make_obs(self, raw_obs: Any, task: Task) -> Observation:
         # Extract camera images

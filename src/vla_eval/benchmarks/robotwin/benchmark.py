@@ -198,6 +198,8 @@ class RoboTwinBenchmark(StepBenchmark):
             differ from the reference benchmark.
     """
 
+    _ALL_RECORD_FIELDS = frozenset({"reward", "done", "success"})
+
     def __init__(
         self,
         task_name: str,
@@ -208,6 +210,7 @@ class RoboTwinBenchmark(StepBenchmark):
         skip_expert_check: bool = False,
         fast_init: bool = True,
         fast_render: bool = False,
+        step_fields: list[str] | None = None,
     ) -> None:
         import re
 
@@ -224,6 +227,13 @@ class RoboTwinBenchmark(StepBenchmark):
         self.skip_expert_check = skip_expert_check
         self.fast_init = fast_init
         self.fast_render = fast_render
+        if step_fields is None:
+            self._step_fields: frozenset[str] = self._ALL_RECORD_FIELDS
+        else:
+            unknown = set(step_fields) - self._ALL_RECORD_FIELDS
+            if unknown:
+                raise ValueError(f"Unknown step_fields: {sorted(unknown)}. Valid: {sorted(self._ALL_RECORD_FIELDS)}")
+            self._step_fields = frozenset(step_fields) if step_fields else self._ALL_RECORD_FIELDS
         self._env: Any = None
         self._env_class: Any = None
         self._args: dict[str, Any] | None = None
@@ -396,6 +406,9 @@ class RoboTwinBenchmark(StepBenchmark):
             )
         self._env.set_instruction(instruction=task["instruction"])
         raw_obs = self._env.get_obs()
+        frame = self._extract_frame(raw_obs)
+        if frame is not None:
+            self._recorder.record_video(frame)
         return raw_obs
 
     def step(self, action: Action) -> StepResult:
@@ -411,7 +424,30 @@ class RoboTwinBenchmark(StepBenchmark):
         raw_obs = self._env.get_obs()
         success = bool(self._env.eval_success)
         done = success or (self._env.take_action_cnt >= self._env.step_lim)
+
+        frame = self._extract_frame(raw_obs)
+        if frame is not None:
+            self._recorder.record_video(frame)
+        self._recorder.record_step(self._step_row(1.0 if success else 0.0, done, success))
+
         return StepResult(obs=raw_obs, reward=1.0 if success else 0.0, done=done, info={"success": success})
+
+    @staticmethod
+    def _extract_frame(raw_obs: Any) -> np.ndarray | None:
+        if not isinstance(raw_obs, dict):
+            return None
+        try:
+            return np.asarray(raw_obs["observation"]["head_camera"]["rgb"])
+        except (KeyError, TypeError):
+            return None
+
+    def _step_row(self, reward: float, done: bool, success: bool) -> dict[str, Any]:
+        sources: dict[str, Any] = {
+            "reward": reward,
+            "done": done,
+            "success": success,
+        }
+        return {k: sources[k] for k in self._step_fields if k in sources}
 
     def make_obs(self, raw_obs: Any, task: Task) -> Observation:
         return {

@@ -70,6 +70,8 @@ class MolmoSpacesBenchmark(StepBenchmark):
         send_state: Include proprioceptive state (qpos) in wire observations.
     """
 
+    _ALL_RECORD_FIELDS = frozenset({"reward", "done", "success"})
+
     def __init__(
         self,
         benchmark_dir: str,
@@ -77,6 +79,7 @@ class MolmoSpacesBenchmark(StepBenchmark):
         task_horizon: int | None = None,
         send_wrist_image: bool = True,
         send_state: bool = True,
+        step_fields: list[str] | None = None,
     ) -> None:
         super().__init__()
         self.benchmark_dir = Path(benchmark_dir)
@@ -84,6 +87,13 @@ class MolmoSpacesBenchmark(StepBenchmark):
         self.task_horizon = task_horizon
         self.send_wrist_image = send_wrist_image
         self.send_state = send_state
+        if step_fields is None:
+            self._step_fields: frozenset[str] = self._ALL_RECORD_FIELDS
+        else:
+            unknown = set(step_fields) - self._ALL_RECORD_FIELDS
+            if unknown:
+                raise ValueError(f"Unknown step_fields: {sorted(unknown)}. Valid: {sorted(self._ALL_RECORD_FIELDS)}")
+            self._step_fields = frozenset(step_fields) if step_fields else self._ALL_RECORD_FIELDS
 
         self._episodes: list[Any] = []
         self._exp_config: Any = None
@@ -173,7 +183,11 @@ class MolmoSpacesBenchmark(StepBenchmark):
             raw_obs = reset_output[0]
         else:
             raw_obs = reset_output
-        return self._unwrap_batch(raw_obs)
+        unwrapped = self._unwrap_batch(raw_obs)
+        frame = self._extract_frame(unwrapped)
+        if frame is not None:
+            self._recorder.record_video(frame)
+        return unwrapped
 
     def step(self, action: Action) -> StepResult:
         raw = action.get("actions", action.get("action"))
@@ -201,7 +215,28 @@ class MolmoSpacesBenchmark(StepBenchmark):
             info = info[0] if info else {}
 
         done = bool(terminated or truncated)
+        success = bool(self._scalar(info.get("success", False), default=False)) if isinstance(info, dict) else False
+
+        frame = self._extract_frame(obs)
+        if frame is not None:
+            self._recorder.record_video(frame)
+        self._recorder.record_step(self._step_row(float(reward), done, success))
+
         return StepResult(obs=obs, reward=float(reward), done=done, info=info or {})
+
+    def _extract_frame(self, raw_obs: Any) -> np.ndarray | None:
+        if not isinstance(raw_obs, dict):
+            return None
+        # Reuse the primary-camera resolution logic that make_obs uses for the model server.
+        return self._find_camera(raw_obs, PRIMARY_CAM_ALIASES)
+
+    def _step_row(self, reward: float, done: bool, success: bool) -> dict[str, Any]:
+        sources: dict[str, Any] = {
+            "reward": reward,
+            "done": done,
+            "success": success,
+        }
+        return {k: sources[k] for k in self._step_fields if k in sources}
 
     def make_obs(self, raw_obs: Any, task: Task) -> Observation:
         if not isinstance(raw_obs, dict):

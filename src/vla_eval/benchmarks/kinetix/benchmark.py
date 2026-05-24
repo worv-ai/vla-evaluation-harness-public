@@ -88,6 +88,8 @@ class KinetixBenchmark(StepBenchmark):
             ``"symbolic"`` for the flat symbolic state vector used by RTC.
     """
 
+    _ALL_RECORD_FIELDS = frozenset({"reward", "done", "success"})
+
     def __init__(
         self,
         tasks: list[str] | None = None,
@@ -96,6 +98,7 @@ class KinetixBenchmark(StepBenchmark):
         rtc_worlds_dir: str | None = None,
         observation_type: str = "pixels",
         action_noise_std: float = 0.0,
+        step_fields: list[str] | None = None,
     ) -> None:
         super().__init__()
         self._task_names = tasks
@@ -106,6 +109,13 @@ class KinetixBenchmark(StepBenchmark):
             raise ValueError(f"observation_type must be 'pixels' or 'symbolic', got {observation_type!r}")
         self._observation_type = observation_type
         self._action_noise_std = action_noise_std
+        if step_fields is None:
+            self._step_fields: frozenset[str] = self._ALL_RECORD_FIELDS
+        else:
+            unknown = set(step_fields) - self._ALL_RECORD_FIELDS
+            if unknown:
+                raise ValueError(f"Unknown step_fields: {sorted(unknown)}. Valid: {sorted(self._ALL_RECORD_FIELDS)}")
+            self._step_fields = frozenset(step_fields) if step_fields else self._ALL_RECORD_FIELDS
 
         # Lazy-initialized JAX state
         self._env = None
@@ -202,6 +212,10 @@ class KinetixBenchmark(StepBenchmark):
         self._step_count = 0
         self._episode_success = False
 
+        frame = self._extract_frame(obs)
+        if frame is not None:
+            self._recorder.record_video(frame)
+
         return obs
 
     def step(self, action: Action) -> StepResult:
@@ -245,7 +259,29 @@ class KinetixBenchmark(StepBenchmark):
         if reward_val > 0:
             self._episode_success = True
 
+        frame = self._extract_frame(obs)
+        if frame is not None:
+            self._recorder.record_video(frame)
+        self._recorder.record_step(self._step_row(reward_val, done_val, self._episode_success))
+
         return StepResult(obs=obs, reward=reward_val, done=done_val, info=info)
+
+    def _extract_frame(self, raw_obs: Any) -> np.ndarray | None:
+        # Symbolic-obs runs have no renderable frame.
+        if self._observation_type != "pixels":
+            return None
+        img = np.asarray(getattr(raw_obs, "image", raw_obs))
+        if img.dtype != np.uint8:
+            img = (np.clip(img, 0.0, 1.0) * 255).astype(np.uint8)
+        return img
+
+    def _step_row(self, reward: float, done: bool, success: bool) -> dict[str, Any]:
+        sources: dict[str, Any] = {
+            "reward": reward,
+            "done": done,
+            "success": success,
+        }
+        return {k: sources[k] for k in self._step_fields if k in sources}
 
     def make_obs(self, raw_obs: Any, task: Task) -> Observation:
         if self._observation_type == "symbolic":

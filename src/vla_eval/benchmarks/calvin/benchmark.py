@@ -185,6 +185,8 @@ class CALVINBenchmark(StepBenchmark):
         ep_len: Override per-subtask step limit (default 360).
     """
 
+    _ALL_RECORD_FIELDS = frozenset({"reward", "done", "success", "completed_subtasks", "subtask"})
+
     def __init__(
         self,
         dataset_path: str = "/data/calvin/dataset/validation",
@@ -194,6 +196,7 @@ class CALVINBenchmark(StepBenchmark):
         send_state: bool = False,
         absolute_action: bool = False,
         ep_len: int | None = None,
+        step_fields: list[str] | None = None,
     ) -> None:
         super().__init__()
         self.dataset_path = dataset_path
@@ -203,6 +206,13 @@ class CALVINBenchmark(StepBenchmark):
         self.send_state = send_state
         self.absolute_action = absolute_action
         self._ep_len = ep_len
+        if step_fields is None:
+            self._step_fields: frozenset[str] = self._ALL_RECORD_FIELDS
+        else:
+            unknown = set(step_fields) - self._ALL_RECORD_FIELDS
+            if unknown:
+                raise ValueError(f"Unknown step_fields: {sorted(unknown)}. Valid: {sorted(self._ALL_RECORD_FIELDS)}")
+            self._step_fields = frozenset(step_fields) if step_fields else self._ALL_RECORD_FIELDS
         self._env = None
         self._task_oracle = None
         self._sequences: list | None = None
@@ -461,6 +471,10 @@ class CALVINBenchmark(StepBenchmark):
         # Capture start_info for task oracle
         self._start_info = self._env.get_info()
 
+        frame = self._extract_frame(obs)
+        if frame is not None:
+            self._recorder.record_video(frame)
+
         return obs
 
     def step(self, action: Action) -> StepResult:
@@ -488,36 +502,60 @@ class CALVINBenchmark(StepBenchmark):
             self._completed += 1
             if self._completed >= NUM_SUBTASKS:
                 # All 5 subtasks done — sequence success
-                return StepResult(obs=obs, reward=1.0, done=True, info={"success": True})
+                result = StepResult(obs=obs, reward=1.0, done=True, info={"success": True})
+            else:
+                # Move to next subtask
+                self._subtask_idx += 1
+                self._subtask_step = 0
+                self._start_info = current_info
 
-            # Move to next subtask
-            self._subtask_idx += 1
-            self._subtask_step = 0
-            self._start_info = current_info
+                if not self.absolute_action:
+                    # Re-init last_act from current robot state (delta mode only)
+                    raw = obs["robot_obs_raw"].cpu().numpy()
+                    self._last_act = np.concatenate([raw[0:6], raw[14:15]])
 
-            if not self.absolute_action:
-                # Re-init last_act from current robot state (delta mode only)
-                raw = obs["robot_obs_raw"].cpu().numpy()
-                self._last_act = np.concatenate([raw[0:6], raw[14:15]])
-
-            self._subtask_just_reset = True
-            return StepResult(
-                obs=obs,
-                reward=0.0,
-                done=False,
-                info={"completed": self._completed},
-            )
-
-        # Check if subtask timed out
-        if self._subtask_step >= ep_len:
-            return StepResult(
+                self._subtask_just_reset = True
+                result = StepResult(
+                    obs=obs,
+                    reward=0.0,
+                    done=False,
+                    info={"completed": self._completed},
+                )
+        elif self._subtask_step >= ep_len:
+            # Subtask timed out
+            result = StepResult(
                 obs=obs,
                 reward=0.0,
                 done=True,
                 info={"success": False, "completed": self._completed},
             )
+        else:
+            result = StepResult(obs=obs, reward=0.0, done=False, info={})
 
-        return StepResult(obs=obs, reward=0.0, done=False, info={})
+        frame = self._extract_frame(obs)
+        if frame is not None:
+            self._recorder.record_video(frame)
+        self._recorder.record_step(self._step_row(result, current_subtask))
+        return result
+
+    @staticmethod
+    def _extract_frame(raw_obs: Any) -> np.ndarray | None:
+        rgb_static = raw_obs.get("rgb_obs", {}).get("rgb_static") if isinstance(raw_obs, dict) else None
+        if rgb_static is None:
+            return None
+        # Same conversion as make_obs: [-1, 1] float CHW -> uint8 HWC.
+        tensor = rgb_static[0, 0]
+        return ((tensor.permute(1, 2, 0).cpu().numpy() + 1) / 2 * 255).astype(np.uint8)
+
+    def _step_row(self, result: StepResult, subtask: str) -> dict[str, Any]:
+        sources: dict[str, Any] = {
+            "reward": float(result.reward),
+            "done": bool(result.done),
+            "success": bool(result.info.get("success", False)),
+            "completed_subtasks": int(result.info.get("completed", self._completed)),
+            "subtask": subtask,
+        }
+        return {k: sources[k] for k in self._step_fields if k in sources}
 
     def _process_absolute_action(self, action: Action) -> np.ndarray:
         """Process 7D absolute action [pos3, axisangle3, gripper] → [pos3, euler3, gripper].

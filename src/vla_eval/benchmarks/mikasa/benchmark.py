@@ -73,17 +73,27 @@ TASK_DESCRIPTIONS: dict[str, str] = {
 class MIKASABenchmark(StepBenchmark):
     """MIKASA-Robo memory-intensive manipulation benchmark."""
 
+    _ALL_RECORD_FIELDS = frozenset({"reward", "done", "success"})
+
     def __init__(
         self,
         tasks: list[str] | None = None,
         episodes_per_task: int = 10,
         max_episode_steps: int | None = None,
         render_resolution: list[int] | tuple[int, int] = (256, 256),
+        step_fields: list[str] | None = None,
     ) -> None:
         super().__init__()
         self._task_names = tasks or DEFAULT_TASKS
         self._max_steps_override = max_episode_steps
         self._render_resolution = tuple(render_resolution)
+        if step_fields is None:
+            self._step_fields: frozenset[str] = self._ALL_RECORD_FIELDS
+        else:
+            unknown = set(step_fields) - self._ALL_RECORD_FIELDS
+            if unknown:
+                raise ValueError(f"Unknown step_fields: {sorted(unknown)}. Valid: {sorted(self._ALL_RECORD_FIELDS)}")
+            self._step_fields = frozenset(step_fields) if step_fields else self._ALL_RECORD_FIELDS
         self._env: Any = None
         self._current_task: str | None = None
         self._task_desc: str = ""
@@ -121,6 +131,9 @@ class MIKASABenchmark(StepBenchmark):
 
         obs, info = self._env.reset()
         self._task_desc = TASK_DESCRIPTIONS.get(env_name, f"Complete {env_name}")
+        frame = self._extract_frame(obs)
+        if frame is not None:
+            self._recorder.record_video(frame)
         return obs
 
     def step(self, action: Action) -> StepResult:
@@ -144,7 +157,34 @@ class MIKASABenchmark(StepBenchmark):
         done = bool(terminated.any()) or bool(truncated.any())
         rew = float(reward.sum())
         success = bool(info.get("success", torch.tensor(False)).any())
+
+        frame = self._extract_frame(obs)
+        if frame is not None:
+            self._recorder.record_video(frame)
+        self._recorder.record_step(self._step_row(rew, done, success))
+
         return StepResult(obs=obs, reward=rew, done=done, info={"success": success})
+
+    def _extract_frame(self, raw_obs: Any) -> np.ndarray | None:
+        if not isinstance(raw_obs, dict) or "sensor_data" not in raw_obs:
+            return None
+        for _cam_name, cam_data in raw_obs["sensor_data"].items():
+            if "rgb" in cam_data:
+                img = cam_data["rgb"]
+                if hasattr(img, "cpu"):
+                    img = img.cpu().numpy()
+                if img.ndim == 4:
+                    img = img[0]
+                return np.asarray(img)
+        return None
+
+    def _step_row(self, reward: float, done: bool, success: bool) -> dict[str, Any]:
+        sources: dict[str, Any] = {
+            "reward": reward,
+            "done": done,
+            "success": success,
+        }
+        return {k: sources[k] for k in self._step_fields if k in sources}
 
     def make_obs(self, raw_obs: Any, task: Task) -> Observation:
         images: dict[str, np.ndarray] = {}

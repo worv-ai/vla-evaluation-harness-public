@@ -47,16 +47,26 @@ class VLABenchBenchmark(StepBenchmark):
         max_steps: Maximum steps per episode (default 200).
     """
 
+    _ALL_RECORD_FIELDS = frozenset({"reward", "done", "success"})
+
     def __init__(
         self,
         tasks: list[str] | None = None,
         robot: str = "franka",
         max_steps: int = DEFAULT_MAX_STEPS,
+        step_fields: list[str] | None = None,
     ) -> None:
         super().__init__()
         self._task_names = tasks or DEFAULT_TASKS
         self._robot = robot
         self._max_steps = max_steps
+        if step_fields is None:
+            self._step_fields: frozenset[str] = self._ALL_RECORD_FIELDS
+        else:
+            unknown = set(step_fields) - self._ALL_RECORD_FIELDS
+            if unknown:
+                raise ValueError(f"Unknown step_fields: {sorted(unknown)}. Valid: {sorted(self._ALL_RECORD_FIELDS)}")
+            self._step_fields = frozenset(step_fields) if step_fields else self._ALL_RECORD_FIELDS
         self._env: Any = None
         self._current_task: str | None = None
         self._instruction: str = ""
@@ -109,6 +119,9 @@ class VLABenchBenchmark(StepBenchmark):
         obs = self._env.get_observation(require_pcd=False)
         self._instruction = self._env.task.get_instruction()
         self._last_ee_state = obs.get("ee_state", None)
+        frame = self._extract_frame(obs)
+        if frame is not None:
+            self._recorder.record_video(frame)
         return obs
 
     def step(self, action: Action) -> StepResult:
@@ -157,12 +170,34 @@ class VLABenchBenchmark(StepBenchmark):
         self._last_ee_state = obs.get("ee_state", None)
         self._instruction = self._env.task.get_instruction()
 
+        frame = self._extract_frame(obs)
+        if frame is not None:
+            self._recorder.record_video(frame)
+        self._recorder.record_step(self._step_row(1.0 if success else 0.0, success, success))
+
         return StepResult(
             obs=obs,
             reward=1.0 if success else 0.0,
             done=success,
             info={"success": success, "timestep": timestep},
         )
+
+    @staticmethod
+    def _extract_frame(raw_obs: Any) -> np.ndarray | None:
+        if not isinstance(raw_obs, dict):
+            return None
+        rgb = raw_obs.get("rgb")
+        if rgb is None or len(rgb) == 0:
+            return None
+        return np.asarray(rgb[0])
+
+    def _step_row(self, reward: float, done: bool, success: bool) -> dict[str, Any]:
+        sources: dict[str, Any] = {
+            "reward": reward,
+            "done": done,
+            "success": success,
+        }
+        return {k: sources[k] for k in self._step_fields if k in sources}
 
     def make_obs(self, raw_obs: Any, task: Task) -> Observation:
         images: dict[str, np.ndarray] = {}
