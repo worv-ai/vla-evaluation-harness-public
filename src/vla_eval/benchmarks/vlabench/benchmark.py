@@ -111,9 +111,7 @@ class VLABenchBenchmark(StepBenchmark):
         obs = self._env.get_observation(require_pcd=False)
         self._instruction = self._env.task.get_instruction()
         self._last_ee_state = obs.get("ee_state", None)
-        frame = self._extract_frame(obs)
-        if frame is not None:
-            self._recorder.record_video(frame)
+        self._recorder.record_video(self._extract_frame(obs))
         return obs
 
     def step(self, action: Action) -> StepResult:
@@ -162,10 +160,8 @@ class VLABenchBenchmark(StepBenchmark):
         self._last_ee_state = obs.get("ee_state", None)
         self._instruction = self._env.task.get_instruction()
 
-        frame = self._extract_frame(obs)
-        if frame is not None:
-            self._recorder.record_video(frame)
-        self._recorder.record_step({"reward": 1.0 if success else 0.0, "done": success, "success": success})
+        self._recorder.record_video(self._extract_frame(obs))
+        self._recorder.record_step(reward=1.0 if success else 0.0, done=success, success=success)
 
         return StepResult(
             obs=obs,

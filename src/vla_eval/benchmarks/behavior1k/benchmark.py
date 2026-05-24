@@ -350,9 +350,7 @@ class Behavior1KBenchmark(StepBenchmark):
             episode_idx = int(task.get("episode_idx", 0))
             instance_id = self._task_instance_ids[episode_idx % len(self._task_instance_ids)]
             obs = self._load_task_instance(instance_id)
-        frame = self._extract_frame(obs)
-        if frame is not None:
-            self._recorder.record_video(frame)
+        self._recorder.record_video(self._extract_frame(obs))
         return obs
 
     def _load_task_instance(self, instance_id: int) -> Any:
@@ -436,17 +434,13 @@ class Behavior1KBenchmark(StepBenchmark):
         done_info = info.get("done") or {}
         success = bool(done_info.get("success", False))
 
-        frame = self._extract_frame(obs)
-        if frame is not None:
-            self._recorder.record_video(frame)
+        self._recorder.record_video(self._extract_frame(obs))
         self._recorder.record_step(
-            {
-                "reward": float(reward),
-                "done": done,
-                "terminated": bool(terminated),
-                "truncated": bool(truncated),
-                "success": success,
-            }
+            reward=float(reward),
+            done=done,
+            terminated=bool(terminated),
+            truncated=bool(truncated),
+            success=success,
         )
 
         return StepResult(obs=obs, reward=float(reward), done=done, info=info)

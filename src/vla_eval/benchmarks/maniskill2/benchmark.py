@@ -120,9 +120,7 @@ class ManiSkill2Benchmark(StepBenchmark):
         else:
             self._goal = goal_template
 
-        frame = self._extract_frame(obs)
-        if frame is not None:
-            self._recorder.record_video(frame)
+        self._recorder.record_video(self._extract_frame(obs))
         return obs
 
     def step(self, action: Action) -> StepResult:
@@ -147,17 +145,13 @@ class ManiSkill2Benchmark(StepBenchmark):
         self.gripper_state = -env_action[-1]
 
         done = bool(terminated) or bool(truncated)
-        frame = self._extract_frame(obs)
-        if frame is not None:
-            self._recorder.record_video(frame)
+        self._recorder.record_video(self._extract_frame(obs))
         self._recorder.record_step(
-            {
-                "reward": float(reward),
-                "done": done,
-                "terminated": bool(terminated),
-                "truncated": bool(truncated),
-                "success": bool(info.get("success", False)),
-            }
+            reward=float(reward),
+            done=done,
+            terminated=bool(terminated),
+            truncated=bool(truncated),
+            success=bool(info.get("success", False)),
         )
         return StepResult(obs=obs, reward=reward, done=done, info=info)
 

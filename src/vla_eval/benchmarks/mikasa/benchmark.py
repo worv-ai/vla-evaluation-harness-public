@@ -123,9 +123,7 @@ class MIKASABenchmark(StepBenchmark):
 
         obs, info = self._env.reset()
         self._task_desc = TASK_DESCRIPTIONS.get(env_name, f"Complete {env_name}")
-        frame = self._extract_frame(obs)
-        if frame is not None:
-            self._recorder.record_video(frame)
+        self._recorder.record_video(self._extract_frame(obs))
         return obs
 
     def step(self, action: Action) -> StepResult:
@@ -150,10 +148,8 @@ class MIKASABenchmark(StepBenchmark):
         rew = float(reward.sum())
         success = bool(info.get("success", torch.tensor(False)).any())
 
-        frame = self._extract_frame(obs)
-        if frame is not None:
-            self._recorder.record_video(frame)
-        self._recorder.record_step({"reward": rew, "done": done, "success": success})
+        self._recorder.record_video(self._extract_frame(obs))
+        self._recorder.record_step(reward=rew, done=done, success=success)
 
         return StepResult(obs=obs, reward=rew, done=done, info={"success": success})
 

@@ -463,9 +463,7 @@ class CALVINBenchmark(StepBenchmark):
         # Capture start_info for task oracle
         self._start_info = self._env.get_info()
 
-        frame = self._extract_frame(obs)
-        if frame is not None:
-            self._recorder.record_video(frame)
+        self._recorder.record_video(self._extract_frame(obs))
         return obs
 
     def step(self, action: Action) -> StepResult:
@@ -523,17 +521,13 @@ class CALVINBenchmark(StepBenchmark):
         else:
             result = StepResult(obs=obs, reward=0.0, done=False, info={})
 
-        frame = self._extract_frame(result.obs)
-        if frame is not None:
-            self._recorder.record_video(frame)
+        self._recorder.record_video(self._extract_frame(result.obs))
         self._recorder.record_step(
-            {
-                "reward": float(result.reward),
-                "done": bool(result.done),
-                "success": bool(result.info.get("success", False)),
-                "completed_subtasks": int(result.info.get("completed", self._completed)),
-                "subtask": current_subtask,
-            }
+            reward=float(result.reward),
+            done=bool(result.done),
+            success=bool(result.info.get("success", False)),
+            completed_subtasks=int(result.info.get("completed", self._completed)),
+            subtask=current_subtask,
         )
         return result
 

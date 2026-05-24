@@ -375,9 +375,7 @@ class RoboMMEBenchmark(StepBenchmark):
         if self.send_subgoal:
             self._current_subgoal = self._extract_subgoal(info_flat)
 
-        frame = self._extract_frame(obs_batch)
-        if frame is not None:
-            self._recorder.record_video(frame)
+        self._recorder.record_video(self._extract_frame(obs_batch))
         return obs_batch
 
     def step(self, action: Action) -> StepResult:
@@ -410,9 +408,7 @@ class RoboMMEBenchmark(StepBenchmark):
             state = obs.get("state_fq")
             if state is not None:
                 row["state_fq"] = state.tolist() if hasattr(state, "tolist") else list(state)
-        frame = self._extract_frame(obs)
-        if frame is not None:
-            self._recorder.record_video(frame)
+        self._recorder.record_video(self._extract_frame(obs))
         self._recorder.record_step(row)
 
         return StepResult(obs=obs, reward=reward, done=done, info=info)

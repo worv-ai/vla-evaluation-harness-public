@@ -194,9 +194,7 @@ class RoboCerebraBenchmark(StepBenchmark):
         for _ in range(self.num_steps_wait):
             obs, _, _, _ = self._env.step(_DUMMY_ACTION)
 
-        frame = self._extract_frame(obs)
-        if frame is not None:
-            self._recorder.record_video(frame)
+        self._recorder.record_video(self._extract_frame(obs))
         return obs
 
     # ------------------------------------------------------------------
@@ -223,10 +221,8 @@ class RoboCerebraBenchmark(StepBenchmark):
                 logger.warning("Failed to check success criteria: %s", e)
         info["success"] = success
 
-        frame = self._extract_frame(obs)
-        if frame is not None:
-            self._recorder.record_video(frame)
-        self._recorder.record_step({"reward": float(reward), "done": bool(done), "success": success})
+        self._recorder.record_video(self._extract_frame(obs))
+        self._recorder.record_step(reward=float(reward), done=bool(done), success=success)
 
         return StepResult(obs=obs, reward=reward, done=done, info=info)
 

@@ -210,9 +210,7 @@ class SimplerEnvBenchmark(StepBenchmark):
         except AttributeError:
             self._task_description = self._env.get_wrapper_attr("get_language_instruction")()
 
-        frame = self._extract_frame(obs)
-        if frame is not None:
-            self._recorder.record_video(frame)
+        self._recorder.record_video(self._extract_frame(obs))
         return obs
 
     def _common_make_kwargs(self) -> dict[str, Any]:
@@ -291,17 +289,13 @@ class SimplerEnvBenchmark(StepBenchmark):
         if done:
             self._success_seen = True
 
-        frame = self._extract_frame(obs)
-        if frame is not None:
-            self._recorder.record_video(frame)
+        self._recorder.record_video(self._extract_frame(obs))
         self._recorder.record_step(
-            {
-                "reward": float(reward),
-                "done": bool(done),
-                "terminated": bool(done),
-                "truncated": bool(truncated),
-                "success": bool(done),
-            }
+            reward=float(reward),
+            done=bool(done),
+            terminated=bool(done),
+            truncated=bool(truncated),
+            success=bool(done),
         )
 
         return StepResult(obs=obs, reward=reward, done=done, info=info)

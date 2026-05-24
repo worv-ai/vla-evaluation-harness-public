@@ -204,9 +204,7 @@ class KinetixBenchmark(StepBenchmark):
         self._step_count = 0
         self._episode_success = False
 
-        frame = self._extract_frame(obs)
-        if frame is not None:
-            self._recorder.record_video(frame)
+        self._recorder.record_video(self._extract_frame(obs))
         return obs
 
     def step(self, action: Action) -> StepResult:
@@ -250,10 +248,8 @@ class KinetixBenchmark(StepBenchmark):
         if reward_val > 0:
             self._episode_success = True
 
-        frame = self._extract_frame(obs)
-        if frame is not None:
-            self._recorder.record_video(frame)
-        self._recorder.record_step({"reward": reward_val, "done": done_val, "success": bool(self._episode_success)})
+        self._recorder.record_video(self._extract_frame(obs))
+        self._recorder.record_step(reward=reward_val, done=done_val, success=bool(self._episode_success))
 
         return StepResult(obs=obs, reward=reward_val, done=done_val, info=info)
 

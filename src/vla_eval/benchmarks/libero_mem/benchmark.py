@@ -48,13 +48,11 @@ class LIBEROMemBenchmark(LIBEROBenchmark):
         # subgoal state machine. Preserve the env's own done flag too.
         assert self._env is not None
         done = result.done or self._env.env._check_success(inc=True)
-        # super() already recorded a step row with done = result.done.
-        # Overwrite that row's done/success with the mutated value so the
-        # SQLite record matches what the harness sees. ``_next_step`` is
-        # currently one past the row we want; subtract 1 to reuse it.
+        # super().step already recorded one row; overwrite its done/success
+        # fields with the mutated value (json_patch merges by step_id).
         last_step_id = self._recorder._next_step - 1
         if last_step_id >= 0:
-            self._recorder.record_step({"step": last_step_id, "done": bool(done), "success": bool(done)})
+            self._recorder.record_step(step=last_step_id, done=bool(done), success=bool(done))
         return StepResult(obs=result.obs, reward=result.reward, done=done, info=result.info)
 
     def get_metadata(self) -> dict[str, Any]:

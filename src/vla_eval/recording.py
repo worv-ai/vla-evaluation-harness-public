@@ -297,21 +297,31 @@ class EpisodeRecorder:
 
     # -- Capture API -------------------------------------------------------
 
-    def record_video(self, frame: "np.ndarray") -> None:
-        if self._video is not None:
-            self._video.record(frame)
+    def record_video(self, frame: "np.ndarray | None") -> None:
+        """Append one frame to the per-episode mp4. ``None`` is a no-op so
+        benchmarks can pass ``self._extract_frame(obs)`` directly."""
+        if frame is None or self._video is None:
+            return
+        self._video.record(frame)
 
-    def record_step(self, row: dict[str, Any]) -> None:
+    def record_step(self, row: dict[str, Any] | None = None, /, **fields: Any) -> None:
+        """Record one step row. Accepts a dict OR kwargs:
+
+            recorder.record_step(reward=..., done=..., success=...)
+            recorder.record_step({"step": 12, "reward": ...})  # explicit step_id
+
+        ``step_fields`` filters caller-supplied keys; ``step`` always passes
+        through as the row identifier.
+        """
         if not self._record_step:
             return
-        # ``step_fields`` filters caller-supplied keys; ``step`` is the row
-        # identifier and always passes through (it's not a data field).
+        merged: dict[str, Any] = {**(row or {}), **fields}
         if self._step_fields is not None:
-            row = {k: v for k, v in row.items() if k == "step" or k in self._step_fields}
-        step_id = int(row.get("step", self._next_step))
+            merged = {k: v for k, v in merged.items() if k == "step" or k in self._step_fields}
+        step_id = int(merged.get("step", self._next_step))
         self._next_step = step_id + 1
         existing = self._steps.setdefault(step_id, {})
-        existing.update((k, v) for k, v in row.items() if k != "step")
+        existing.update((k, v) for k, v in merged.items() if k != "step")
 
     # -- Close (orchestrator) ---------------------------------------------
 
@@ -409,10 +419,10 @@ class NullEpisodeRecorder(EpisodeRecorder):
     def db_path(self) -> str:  # type: ignore[override]
         return ""
 
-    def record_video(self, frame: "np.ndarray") -> None:  # type: ignore[override]
+    def record_video(self, frame: "np.ndarray | None") -> None:  # type: ignore[override]
         pass
 
-    def record_step(self, row: dict[str, Any]) -> None:  # type: ignore[override]
+    def record_step(self, row: dict[str, Any] | None = None, /, **fields: Any) -> None:  # type: ignore[override]
         pass
 
     def close(  # type: ignore[override]

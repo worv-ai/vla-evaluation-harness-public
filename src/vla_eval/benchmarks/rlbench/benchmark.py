@@ -120,9 +120,7 @@ class RLBenchBenchmark(StepBenchmark):
         self._task_env = self._env.get_task(task_class)
         self._task_env.sample_variation()
         self._descriptions, obs = self._task_env.reset()
-        frame = self._extract_frame(obs)
-        if frame is not None:
-            self._recorder.record_video(frame)
+        self._recorder.record_video(self._extract_frame(obs))
         return obs
 
     def step(self, action: Action) -> StepResult:
@@ -138,10 +136,8 @@ class RLBenchBenchmark(StepBenchmark):
         assert self._task_env is not None
         obs, reward, terminate = self._task_env.step(act)
         success = reward > 0.99
-        frame = self._extract_frame(obs)
-        if frame is not None:
-            self._recorder.record_video(frame)
-        self._recorder.record_step({"reward": float(reward), "done": bool(terminate), "success": bool(success)})
+        self._recorder.record_video(self._extract_frame(obs))
+        self._recorder.record_step(reward=float(reward), done=bool(terminate), success=bool(success))
         return StepResult(obs=obs, reward=reward, done=terminate, info={"success": bool(success)})
 
     @staticmethod

@@ -208,9 +208,7 @@ class LIBEROBenchmark(StepBenchmark):
             for robot in self._env.robots:
                 robot.controller.use_delta = False
 
-        frame = self._extract_frame(obs)
-        if frame is not None:
-            self._recorder.record_video(frame)
+        self._recorder.record_video(self._extract_frame(obs))
         return obs
 
     def step(self, action: Action) -> StepResult:
@@ -228,10 +226,8 @@ class LIBEROBenchmark(StepBenchmark):
 
         assert self._env is not None
         obs, reward, done, info = self._env.step(processed_action)
-        frame = self._extract_frame(obs)
-        if frame is not None:
-            self._recorder.record_video(frame)
-        self._recorder.record_step({"reward": float(reward), "done": bool(done), "success": bool(done)})
+        self._recorder.record_video(self._extract_frame(obs))
+        self._recorder.record_step(reward=float(reward), done=bool(done), success=bool(done))
         return StepResult(obs=obs, reward=reward, done=done, info=info)
 
     @staticmethod
