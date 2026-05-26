@@ -437,9 +437,11 @@ def cmd_merge(args: argparse.Namespace) -> None:
       ``--output-dir`` (or the DB's parent dir).
     """
     from vla_eval.results.merge import merge_db, print_merge_summary
+    from vla_eval.tracking import call_each, get_reporting_trackers
 
     db_paths: list[Path] = []
     output_dir: Path
+    config: dict[str, Any] = {}
 
     if getattr(args, "db", None):
         db_paths = [Path(args.db)]
@@ -462,15 +464,36 @@ def cmd_merge(args: argparse.Namespace) -> None:
         )
         sys.exit(1)
 
+    # Trackers run only when a config is provided — the ``--db <path>`` shorthand
+    # has no ``tracking.report_to`` to read. Sniff ``eval_id`` from the DB filename
+    # when ``--eval-id`` wasn't passed so the tracker run identity still matches
+    # whatever the orchestrator used (live path → same wandb run via id+resume).
+    trackers = get_reporting_trackers((config.get("tracking") or {}).get("report_to"))
+    eval_id_for_trackers = getattr(args, "eval_id", None)
+    if trackers and eval_id_for_trackers is None and db_paths:
+        stem = db_paths[0].stem  # "recording-<eval_id>"
+        if stem.startswith("recording-"):
+            eval_id_for_trackers = stem[len("recording-") :]
+    if trackers and eval_id_for_trackers:
+        call_each(trackers, "on_eval_begin", eval_id_for_trackers, config)
+
     all_aggregates: list[dict[str, Any]] = []
     for db in db_paths:
         try:
-            all_aggregates.extend(merge_db(db, output_dir))
+            aggs = merge_db(db, output_dir)
         except FileNotFoundError:
             _stderr_console().print(f"[yellow]WARNING: skipping missing DB {db}[/yellow]")
+            continue
         except Exception as exc:
             _stderr_console().print(f"[red]ERROR merging {db}: {exc}[/red]")
             sys.exit(1)
+        for agg in aggs:
+            call_each(trackers, "on_benchmark_end", agg.get("benchmark", ""), agg)
+        all_aggregates.extend(aggs)
+
+    if trackers:
+        call_each(trackers, "on_eval_end", all_aggregates)
+        call_each(trackers, "close")
 
     print_merge_summary(all_aggregates)
 
