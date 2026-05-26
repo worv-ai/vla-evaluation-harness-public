@@ -24,11 +24,13 @@ logger = logging.getLogger(__name__)
 def is_wandb_available() -> bool:
     if importlib.util.find_spec("wandb") is None:
         return False
-    import wandb
+    # try/except so `report_to="all"` doesn't crash on a partial/broken install.
+    try:
+        import wandb
 
-    # ``find_spec`` can return a stale entry after a partial uninstall; touching
-    # an attribute that's always present on a working install confirms it.
-    return hasattr(wandb, "run")
+        return hasattr(wandb, "run")
+    except Exception:
+        return False
 
 
 def is_trackio_available() -> bool:
@@ -38,7 +40,7 @@ def is_trackio_available() -> bool:
 class Tracker:
     """Base tracker — all hooks are no-ops by default. Subclass and override.
 
-    Lifecycle (mirrors transformers' ``on_train_begin`` / ``on_log`` / ``on_train_end``):
+    Lifecycle:
 
     1. ``on_eval_begin``      — once per eval, before any benchmark.
     2. ``on_benchmark_begin`` — once per benchmark in the eval's ``benchmarks`` list.
@@ -46,10 +48,14 @@ class Tracker:
     4. ``on_benchmark_end``   — once per benchmark, after its episodes finish.
     5. ``on_eval_end``        — once per eval, after the last benchmark.
     6. ``close``              — final cleanup (flush, release file handles).
-
-    The orchestrator skips per-episode and per-eval hooks under sharded mode;
-    ``vla-eval merge`` fires the per-benchmark and per-eval hooks instead.
     """
+
+    def __init__(self) -> None:
+        self._step = 0
+
+    def _next_step(self) -> int:
+        self._step += 1
+        return self._step
 
     def on_eval_begin(self, eval_id: str, config: dict[str, Any]) -> None: ...
     def on_benchmark_begin(self, bench_name: str, bench_config: dict[str, Any]) -> None: ...
@@ -59,22 +65,23 @@ class Tracker:
     def close(self) -> None: ...
 
 
-def _scalar_metrics(d: dict[str, Any]) -> dict[str, float]:
-    """Keep only int/float/bool values; coerce to float (bool → 0.0/1.0)."""
-    out: dict[str, float] = {}
-    for k, v in d.items():
+def _episode_log_dict(bench_name: str, task_name: str, ep_dict: dict[str, Any], status: str) -> dict[str, Any]:
+    """Flatten an episode result into ``{bench/task/key: value}`` for wandb-style logging."""
+    prefix = f"{bench_name}/{task_name}"
+    log: dict[str, Any] = {f"{prefix}/status": status}
+    for k, v in (ep_dict.get("metrics") or {}).items():
         if isinstance(v, (int, float, bool)):  # bool is int subclass; float() handles both
-            out[k] = float(v)
-    return out
+            log[f"{prefix}/{k}"] = float(v)
+    for k in ("steps", "elapsed_sec"):
+        v = ep_dict.get(k)
+        if isinstance(v, (int, float)) and not isinstance(v, bool):
+            log[f"{prefix}/{k}"] = float(v)
+    return log
 
 
 def _scalar_summary(d: dict[str, Any]) -> dict[str, float]:
     """Top-level aggregate fields: numeric only, drop bools (none expected at this level)."""
-    out: dict[str, float] = {}
-    for k, v in d.items():
-        if isinstance(v, (int, float)) and not isinstance(v, bool):
-            out[k] = v
-    return out
+    return {k: v for k, v in d.items() if isinstance(v, (int, float)) and not isinstance(v, bool)}
 
 
 class WandbTracker(Tracker):
@@ -92,8 +99,8 @@ class WandbTracker(Tracker):
             raise RuntimeError("WandbTracker requires wandb. Run `pip install wandb`.")
         import wandb
 
+        super().__init__()
         self._wandb = wandb
-        self._step = 0
 
     def on_eval_begin(self, eval_id: str, config: dict[str, Any]) -> None:
         if self._wandb.run is None:
@@ -110,15 +117,7 @@ class WandbTracker(Tracker):
     def on_episode_end(self, bench_name: str, task_name: str, ep_dict: dict[str, Any], status: str) -> None:
         if self._wandb.run is None:
             return
-        prefix = f"{bench_name}/{task_name}"
-        log: dict[str, float | str] = {f"{prefix}/status": status}
-        log.update({f"{prefix}/{k}": v for k, v in _scalar_metrics(ep_dict.get("metrics") or {}).items()})
-        for k in ("steps", "elapsed_sec"):
-            v = ep_dict.get(k)
-            if isinstance(v, (int, float)) and not isinstance(v, bool):
-                log[f"{prefix}/{k}"] = float(v)
-        self._step += 1
-        self._wandb.log(log, step=self._step)
+        self._wandb.log(_episode_log_dict(bench_name, task_name, ep_dict, status), step=self._next_step())
 
     def on_benchmark_end(self, bench_name: str, result: dict[str, Any]) -> None:
         if self._wandb.run is None:
@@ -149,8 +148,8 @@ class TrackioTracker(Tracker):
             raise RuntimeError("TrackioTracker requires trackio. Run `pip install trackio`.")
         import trackio
 
+        super().__init__()
         self._trackio = trackio
-        self._step = 0
 
     def on_eval_begin(self, eval_id: str, config: dict[str, Any]) -> None:
         self._trackio.init(
@@ -164,23 +163,14 @@ class TrackioTracker(Tracker):
             logger.debug("trackio.config.update not available; skipping config push.")
 
     def on_episode_end(self, bench_name: str, task_name: str, ep_dict: dict[str, Any], status: str) -> None:
-        prefix = f"{bench_name}/{task_name}"
-        log: dict[str, float | str] = {f"{prefix}/status": status}
-        log.update({f"{prefix}/{k}": v for k, v in _scalar_metrics(ep_dict.get("metrics") or {}).items()})
-        for k in ("steps", "elapsed_sec"):
-            v = ep_dict.get(k)
-            if isinstance(v, (int, float)) and not isinstance(v, bool):
-                log[f"{prefix}/{k}"] = float(v)
-        self._step += 1
-        self._trackio.log(log, step=self._step)
+        self._trackio.log(_episode_log_dict(bench_name, task_name, ep_dict, status), step=self._next_step())
 
     def on_benchmark_end(self, bench_name: str, result: dict[str, Any]) -> None:
-        # trackio doesn't expose run.summary; emit aggregate as a final log
-        # under a "summary/" sub-namespace so it's still discoverable.
+        # trackio has no run.summary; emit aggregate as a final log under a
+        # "summary/" sub-namespace so it's still discoverable.
         log = {f"{bench_name}/summary/{k}": v for k, v in _scalar_summary(result).items()}
         if log:
-            self._step += 1
-            self._trackio.log(log, step=self._step)
+            self._trackio.log(log, step=self._next_step())
 
     def on_eval_end(self, all_results: list[dict[str, Any]]) -> None:
         try:
@@ -238,11 +228,7 @@ def get_reporting_trackers(report_to: str | list[str] | None) -> list[Tracker]:
 
 
 def call_each(trackers: list[Tracker], hook: str, *args: Any) -> None:
-    """Invoke ``hook`` on every tracker, swallowing per-tracker errors.
-
-    Matches the robustness pattern in transformers' callback handler — one
-    broken backend never aborts the eval.
-    """
+    """Invoke ``hook`` on every tracker; one raising backend never aborts the eval."""
     for t in trackers:
         try:
             getattr(t, hook)(*args)

@@ -9,7 +9,6 @@ separately in ``tests/test_recording_sqlite.py``.
 
 from __future__ import annotations
 
-from typing import Any
 from unittest.mock import patch
 
 import numpy as np
@@ -17,34 +16,8 @@ import pytest
 import websockets.exceptions
 
 from vla_eval.orchestrator import Orchestrator
-from vla_eval.tracking import Tracker
 
-from tests.conftest import StubBenchmark
-
-
-class _RecordingTracker(Tracker):
-    """Captures every hook call in order — used to assert lifecycle correctness."""
-
-    def __init__(self) -> None:
-        self.calls: list[tuple[str, tuple[Any, ...]]] = []
-
-    def on_eval_begin(self, eval_id, config):
-        self.calls.append(("on_eval_begin", (eval_id,)))
-
-    def on_benchmark_begin(self, bench_name, bench_config):
-        self.calls.append(("on_benchmark_begin", (bench_name,)))
-
-    def on_episode_end(self, bench_name, task_name, ep_dict, status):
-        self.calls.append(("on_episode_end", (bench_name, task_name, status)))
-
-    def on_benchmark_end(self, bench_name, result):
-        self.calls.append(("on_benchmark_end", (bench_name,)))
-
-    def on_eval_end(self, all_results):
-        self.calls.append(("on_eval_end", (len(all_results),)))
-
-    def close(self):
-        self.calls.append(("close", ()))
+from tests.conftest import BrokenTracker, RecordingTracker, StubBenchmark
 
 
 @pytest.mark.anyio
@@ -276,7 +249,7 @@ async def test_orchestrator_records_steps_from_yaml_recording_block(echo_server,
 async def test_orchestrator_fires_tracker_lifecycle_on_success(echo_server, tmp_path):
     """A clean run drives eval_begin → benchmark_begin → episode_end(success)*
     → benchmark_end → eval_end → close."""
-    tracker = _RecordingTracker()
+    tracker = RecordingTracker()
     config = {
         "server": {"url": echo_server},
         "output_dir": str(tmp_path),
@@ -302,9 +275,10 @@ async def test_orchestrator_fires_tracker_lifecycle_on_success(echo_server, tmp_
     hooks = [c[0] for c in tracker.calls]
     assert hooks[0] == "on_eval_begin"
     assert hooks[1] == "on_benchmark_begin"
+    # on_episode_end args: (bench_name, task_name, ep_dict, status) — status at index 3
     episode_calls = [c for c in tracker.calls if c[0] == "on_episode_end"]
     assert len(episode_calls) == 2
-    assert all(c[1][2] == "success" for c in episode_calls), f"expected all success, got {episode_calls}"
+    assert all(c[1][3] == "success" for c in episode_calls), f"expected all success, got {episode_calls}"
     assert "on_benchmark_end" in hooks
     assert hooks[-2] == "on_eval_end"
     assert hooks[-1] == "close"
@@ -338,7 +312,7 @@ async def test_orchestrator_tracker_sees_error_status(tmp_path):
         async def reconnect(self):
             raise ConnectionError("server gone")
 
-    tracker = _RecordingTracker()
+    tracker = RecordingTracker()
     config = {
         "server": {"url": "ws://fake:0"},
         "output_dir": str(tmp_path),
@@ -363,7 +337,8 @@ async def test_orchestrator_tracker_sees_error_status(tmp_path):
         orch = Orchestrator(config, no_save=True)
         await orch.run()
 
-    error_episodes = [c for c in tracker.calls if c[0] == "on_episode_end" and c[1][2] == "error"]
+    # on_episode_end args at index 3 = status; reconnect path must produce status="error"
+    error_episodes = [c for c in tracker.calls if c[0] == "on_episode_end" and c[1][3] == "error"]
     assert error_episodes, f"expected at least one status='error', got {tracker.calls}"
 
 
@@ -371,7 +346,7 @@ async def test_orchestrator_tracker_sees_error_status(tmp_path):
 async def test_orchestrator_sharded_skips_live_hooks(echo_server, tmp_path):
     """Under sharding, the orchestrator must instantiate trackers (config errors
     fail fast on every shard) but skip live + eval-end hooks — merge owns those."""
-    tracker = _RecordingTracker()
+    tracker = RecordingTracker()
     config = {
         "server": {"url": echo_server},
         "output_dir": str(tmp_path),
@@ -400,19 +375,8 @@ async def test_orchestrator_sharded_skips_live_hooks(echo_server, tmp_path):
 @pytest.mark.anyio
 async def test_orchestrator_isolates_broken_tracker(echo_server, tmp_path):
     """A backend that raises on every hook must not abort the eval."""
-
-    class _BrokenTracker(Tracker):
-        def on_eval_begin(self, *a, **kw):
-            raise RuntimeError("boom")
-
-        def on_episode_end(self, *a, **kw):
-            raise RuntimeError("boom")
-
-        def on_benchmark_end(self, *a, **kw):
-            raise RuntimeError("boom")
-
-    good = _RecordingTracker()
-    bad = _BrokenTracker()
+    good = RecordingTracker()
+    bad = BrokenTracker()
     config = {
         "server": {"url": echo_server},
         "output_dir": str(tmp_path),

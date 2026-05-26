@@ -464,18 +464,19 @@ def cmd_merge(args: argparse.Namespace) -> None:
         )
         sys.exit(1)
 
-    # Trackers run only when a config is provided — the ``--db <path>`` shorthand
-    # has no ``tracking.report_to`` to read. Sniff ``eval_id`` from the DB filename
-    # when ``--eval-id`` wasn't passed so the tracker run identity still matches
-    # whatever the orchestrator used (live path → same wandb run via id+resume).
+    # Tracker run identity needs the same eval_id the orchestrator used so
+    # id+resume converges live + merge on one run. Sniff from the DB filename
+    # if --eval-id wasn't passed; skip emission entirely otherwise (orphan
+    # hooks would raise on backends that require init first).
+    from vla_eval.recording import eval_id_from_db_path
+
     trackers = get_reporting_trackers((config.get("tracking") or {}).get("report_to"))
     eval_id_for_trackers = getattr(args, "eval_id", None)
-    if trackers and eval_id_for_trackers is None and db_paths:
-        stem = db_paths[0].stem  # "recording-<eval_id>"
-        if stem.startswith("recording-"):
-            eval_id_for_trackers = stem[len("recording-") :]
-    if trackers and eval_id_for_trackers:
-        call_each(trackers, "on_eval_begin", eval_id_for_trackers, config)
+    if trackers and not eval_id_for_trackers and db_paths:
+        eval_id_for_trackers = eval_id_from_db_path(db_paths[0])
+    if not eval_id_for_trackers:
+        trackers = []
+    call_each(trackers, "on_eval_begin", eval_id_for_trackers, config)
 
     all_aggregates: list[dict[str, Any]] = []
     for db in db_paths:
@@ -491,9 +492,8 @@ def cmd_merge(args: argparse.Namespace) -> None:
             call_each(trackers, "on_benchmark_end", agg.get("benchmark", ""), agg)
         all_aggregates.extend(aggs)
 
-    if trackers:
-        call_each(trackers, "on_eval_end", all_aggregates)
-        call_each(trackers, "close")
+    call_each(trackers, "on_eval_end", all_aggregates)
+    call_each(trackers, "close")
 
     print_merge_summary(all_aggregates)
 

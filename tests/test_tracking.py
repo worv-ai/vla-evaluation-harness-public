@@ -10,7 +10,6 @@ the same convergence handle the orchestrator and ``vla-eval merge`` rely on.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 from unittest import mock
 
 import pytest
@@ -18,13 +17,15 @@ import pytest
 from vla_eval.tracking import (
     INTEGRATION_TO_TRACKER,
     Tracker,
-    _scalar_metrics,
+    _episode_log_dict,
     _scalar_summary,
     call_each,
     get_reporting_trackers,
     is_trackio_available,
     is_wandb_available,
 )
+
+from tests.conftest import BrokenTracker, RecordingTracker
 
 
 # ---------- get_reporting_trackers dispatch ----------
@@ -79,63 +80,36 @@ def test_base_tracker_hooks_dont_raise() -> None:
 # ---------- call_each robustness ----------
 
 
-class _RecordingTracker(Tracker):
-    """Captures every hook call as a tuple for assertions."""
-
-    def __init__(self) -> None:
-        self.calls: list[tuple[str, tuple[Any, ...]]] = []
-
-    def on_eval_begin(self, eval_id, config):
-        self.calls.append(("on_eval_begin", (eval_id, config)))
-
-    def on_benchmark_begin(self, bench_name, bench_config):
-        self.calls.append(("on_benchmark_begin", (bench_name, bench_config)))
-
-    def on_episode_end(self, bench_name, task_name, ep_dict, status):
-        self.calls.append(("on_episode_end", (bench_name, task_name, ep_dict, status)))
-
-    def on_benchmark_end(self, bench_name, result):
-        self.calls.append(("on_benchmark_end", (bench_name, result)))
-
-    def on_eval_end(self, all_results):
-        self.calls.append(("on_eval_end", (all_results,)))
-
-    def close(self):
-        self.calls.append(("close", ()))
-
-
-class _BrokenTracker(Tracker):
-    """Raises on every hook — should not abort other trackers in the list."""
-
-    def on_eval_begin(self, *a, **kw):
-        raise RuntimeError("backend exploded")
-
-    def on_episode_end(self, *a, **kw):
-        raise RuntimeError("backend exploded")
-
-
 def test_call_each_isolates_per_tracker_errors() -> None:
-    good = _RecordingTracker()
-    bad = _BrokenTracker()
+    good = RecordingTracker()
+    bad = BrokenTracker()
     # bad is first so good must still fire even when bad raised
     call_each([bad, good], "on_eval_begin", "eid", {"x": 1})
     assert good.calls == [("on_eval_begin", ("eid", {"x": 1}))]
 
 
 def test_call_each_handles_unknown_hook_per_tracker() -> None:
-    good = _RecordingTracker()
-    # Calling a hook that doesn't exist on the base — getattr raises AttributeError,
-    # which call_each must swallow per-tracker.
-    call_each([good], "nonexistent_hook")
-    assert good.calls == []  # the missing hook didn't raise out of call_each
+    good = RecordingTracker()
+    call_each([good], "nonexistent_hook")  # getattr raises AttributeError; call_each swallows
+    assert good.calls == []
 
 
-# ---------- scalar helpers ----------
+# ---------- log-dict / summary helpers ----------
 
 
-def test_scalar_metrics_keeps_numerics_and_coerces_bool() -> None:
-    got = _scalar_metrics({"success": True, "steps": 42, "ratio": 0.5, "label": "ok", "obj": object()})
-    assert got == {"success": 1.0, "steps": 42.0, "ratio": 0.5}
+def test_episode_log_dict_flattens_with_prefix() -> None:
+    got = _episode_log_dict(
+        "robosuite",
+        "lift",
+        {"metrics": {"success": True, "label": "ok"}, "steps": 42, "elapsed_sec": 0.5},
+        "success",
+    )
+    assert got == {
+        "robosuite/lift/status": "success",
+        "robosuite/lift/success": 1.0,
+        "robosuite/lift/steps": 42.0,
+        "robosuite/lift/elapsed_sec": 0.5,
+    }
 
 
 def test_scalar_summary_drops_bools_and_strings() -> None:

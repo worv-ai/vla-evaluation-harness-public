@@ -81,12 +81,9 @@ class Orchestrator:
         self._progress_last: tuple[int, int, int] | None = None
         self._store: RecordingStore | None = None
 
-        # Tracking is opt-in via ``tracking.report_to`` in the YAML config. Under
-        # sharding, per-episode and per-eval hooks would race between shards, so
-        # we drop them on every shard and let ``vla-eval merge`` push the final
-        # aggregate from a single process. The orchestrator still instantiates
-        # the trackers so config errors (unknown backend name, missing lib) fail
-        # fast on every shard rather than at the merge step.
+        # Trackers are instantiated on every shard so config errors surface
+        # fast, but live emission only fires when there's a single writer —
+        # ``vla-eval merge`` owns the aggregate push for sharded runs.
         self._trackers: list[Tracker] = get_reporting_trackers((config.get("tracking") or {}).get("report_to"))
         self._live_tracking = num_shards is None
         if self._trackers and not self._live_tracking:
@@ -281,9 +278,8 @@ class Orchestrator:
                 failure_reason=ep_dict.get("failure_reason"),
                 failure_detail=ep_dict.get("failure_detail"),
             )
-            # Trackers see every termination — success / fail / error — through the
-            # same `close_recorder` site that Recording uses, so error paths can't
-            # silently bypass them.
+            # Fire from this site so error terminations (status != "success") reach
+            # trackers too — collector.record() above misses the reconnect paths.
             if self._live_tracking:
                 call_each(self._trackers, "on_episode_end", name, task_name, ep_dict, status)
 
