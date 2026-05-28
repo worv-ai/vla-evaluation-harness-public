@@ -147,6 +147,10 @@ class RoboMMEBenchmark(StepBenchmark):
         send_state: Include proprioceptive state in observations.
         send_video_history: Send conditioning video on the first observation.
         send_subgoal: Attach the per-step subgoal text to ``obs["subgoal"]``.
+        send_scene_state: Attach per-step GT scene state to ``obs["scene_state"]`` +
+            ``obs["scene_state_window"]`` (env-step ring) + ``obs["eef_xyz"]``.
+            Lets the server reproduce trail / trajectory-text overlays seen at
+            training (issue #228). Actor refs cached at reset.
         subgoal_mode: ``"grounded"`` sends ``info['grounded_subgoal_online']``
             (subgoal with image-coord placeholders filled, e.g. ``"pick up the
             green cube at <77, 170>"``); ``"simple"`` sends
@@ -171,6 +175,7 @@ class RoboMMEBenchmark(StepBenchmark):
         send_state: bool = True,
         send_video_history: bool = True,
         send_subgoal: bool = False,
+        send_scene_state: bool = False,
         subgoal_mode: Literal["grounded", "simple"] = "grounded",
     ) -> None:
         super().__init__()
@@ -184,6 +189,7 @@ class RoboMMEBenchmark(StepBenchmark):
         self.send_state = send_state
         self.send_video_history = send_video_history
         self.send_subgoal = send_subgoal
+        self.send_scene_state = send_scene_state
         self.subgoal_mode = subgoal_mode
 
         self._env: Any = None
@@ -192,6 +198,16 @@ class RoboMMEBenchmark(StepBenchmark):
         self._video_frames: list[np.ndarray] = []
         self._wrist_video_frames: list[np.ndarray] = []
         self._current_subgoal: str = ""
+        # Actor refs are discovered once per episode (in reset) and reused on
+        # every step. dir() scan is ~ms on a 50-attr env; doing it per step
+        # would dominate sim cost.
+        self._actor_refs: list = []
+        # Env-step-rate (20 Hz) scene_state ring, shipped as
+        # ``obs["scene_state_window"]``. Server-side accumulation at chunk
+        # cadence would be 20× sparser than the training collator's per-row
+        # parquet stream — same OOD failure mode as in issue #228.
+        self._scene_state_buf: list[dict] = []
+        self._scene_state_buf_max: int = 100  # ~2.5× the longest training window
 
     def get_tasks(self) -> list[Task]:
         return [{"name": t, "env_id": t} for t in self.tasks]
@@ -375,6 +391,22 @@ class RoboMMEBenchmark(StepBenchmark):
         if self.send_subgoal:
             self._current_subgoal = self._extract_subgoal(info_flat)
 
+        if self.send_scene_state:
+            from .scene_state import discover_actors, extract_scene_state
+
+            try:
+                self._actor_refs = discover_actors(self._env.unwrapped)
+            except Exception as e:
+                logger.warning("discover_actors failed at reset: %s — scene_state will be empty", e)
+                self._actor_refs = []
+            # Seed the ring with the reset-time scene_state so make_obs's
+            # first call has a non-empty window.
+            self._scene_state_buf = []
+            try:
+                self._scene_state_buf.append(extract_scene_state(self._env.unwrapped, self._actor_refs))
+            except Exception:
+                pass
+
         self._recorder.record_video(self._extract_frame(obs_batch))
         return obs_batch
 
@@ -392,6 +424,17 @@ class RoboMMEBenchmark(StepBenchmark):
 
         if self.send_subgoal:
             self._current_subgoal = self._extract_subgoal(info)
+
+        if self.send_scene_state:
+            # Sample env-step-rate (20 Hz) scene_state. Bounded ring.
+            from .scene_state import extract_scene_state
+
+            try:
+                self._scene_state_buf.append(extract_scene_state(self._env.unwrapped, self._actor_refs))
+                if len(self._scene_state_buf) > self._scene_state_buf_max:
+                    del self._scene_state_buf[: len(self._scene_state_buf) - self._scene_state_buf_max]
+            except Exception as e:
+                logger.warning("extract_scene_state in step() failed: %s — buffer not updated", e)
 
         terminated = bool(terminated)
         truncated = bool(truncated)
@@ -476,6 +519,20 @@ class RoboMMEBenchmark(StepBenchmark):
         if self.send_subgoal:
             obs["subgoal"] = self._current_subgoal
 
+        if self.send_scene_state:
+            # Ship the full env-step ring so the server can reconstruct the
+            # training-time 2 s window even when `make_obs` runs at chunk cadence.
+            if self._scene_state_buf:
+                latest = self._scene_state_buf[-1]
+            else:
+                latest = {"actors": [], "tcp_p": [0.0, 0.0, 0.0], "tcp_q": [1.0, 0.0, 0.0, 0.0]}
+            obs["scene_state"] = latest
+            obs["scene_state_window"] = list(self._scene_state_buf)
+            # Datagen also wrote ``eef_xyz`` as a separate parquet column (tcp_p
+            # was zero on RouteStick at extraction time); ``tcp_p`` works fine at
+            # inference. Keep the duplicate field for server-side parity.
+            obs["eef_xyz"] = list(latest["tcp_p"])
+
         return obs
 
     def check_done(self, step_result: StepResult) -> bool:
@@ -502,9 +559,14 @@ class RoboMMEBenchmark(StepBenchmark):
             spec["state"] = RAW
         if self.send_subgoal:
             spec["subgoal"] = LANGUAGE
+        if self.send_scene_state:
+            spec["scene_state"] = RAW
+            spec["scene_state_window"] = RAW
+            spec["eef_xyz"] = RAW
         return spec
 
     def cleanup(self) -> None:
+        self._scene_state_buf = []
         if self._env is not None:
             try:
                 self._env.close()
