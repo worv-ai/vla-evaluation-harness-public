@@ -489,6 +489,7 @@ def cmd_merge(args: argparse.Namespace) -> None:
             _stderr_console().print(f"[red]ERROR merging {db}: {exc}[/red]")
             sys.exit(1)
         for agg in aggs:
+            call_each(trackers, "on_benchmark_begin", agg.get("benchmark", ""), {})
             call_each(trackers, "on_benchmark_end", agg.get("benchmark", ""), agg)
         all_aggregates.extend(aggs)
 
