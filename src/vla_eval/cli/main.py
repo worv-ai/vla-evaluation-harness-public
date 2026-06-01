@@ -290,9 +290,13 @@ def cmd_run(args: argparse.Namespace) -> None:
         if cli_cpus is not None:
             docker_section["cpus"] = cli_cpus
 
-    # Decide whether to run via Docker
+    # VLA_EVAL_FORCE_DOCKER=1 forces docker dispatch when the host is itself a
+    # container — in-process the benchmark's deps are absent and every episode errors.
     docker_cfg = DockerConfig.from_dict(config.get("docker"))
-    use_docker = bool(docker_cfg.image) and not getattr(args, "no_docker", False) and not _inside_docker()
+    force_docker = os.environ.get("VLA_EVAL_FORCE_DOCKER", "").lower() not in ("", "0", "false", "no")
+    use_docker = (
+        bool(docker_cfg.image) and not getattr(args, "no_docker", False) and (force_docker or not _inside_docker())
+    )
 
     eval_id = getattr(args, "eval_id", None)
     no_save = getattr(args, "no_save", False)
