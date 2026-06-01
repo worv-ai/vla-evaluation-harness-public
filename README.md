@@ -204,20 +204,37 @@ docker/build.sh behavior1k --accept-license behavior1k    # build a gated image
 
 ---
 
-## Tracking (wandb / trackio)
+## Observability
 
-Mirror eval episodes and aggregate metrics to a dashboard by adding one line to the eval config:
+Two opt-in systems capture eval data. Both key on `eval_id` so recordings and tracker runs stay linked.
+
+### Recording
+
+Every `vla-eval run` persists raw data to `<output_dir>/recording-<eval_id>.sqlite` — per-step rows, episode results, and eval metadata. Configure via each benchmark's `recording:` key:
+
+```yaml
+benchmarks:
+  - benchmark: ...
+    recording:
+      record_video: true
+      record_step: true
+      video_fps: 10
+```
+
+`vla-eval merge` materializes per-episode JSONL + aggregate JSON from the DB. Single-shard runs auto-merge; sharded runs call `vla-eval merge` once after all shards exit. `--no-save` skips recording entirely.
+
+### Tracking (wandb / trackio)
+
+Mirror aggregate metrics to a remote dashboard:
 
 ```yaml
 tracking:
-  report_to: wandb           # "wandb" | ["wandb", "trackio"] | "all" | "none" | absent
+  report_to: wandb           # "wandb" | ["wandb", "trackio"] | "all" | "none"
 ```
 
-The harness only owns the on/off switch and injects ``id=<eval_id>`` + ``resume="allow"`` so the live (``vla-eval run``) and merge (``vla-eval merge``) paths converge on the same run. Everything else — project, entity, name, group, tags, mode, dir, api key — is read from the backend's native env vars (``WANDB_*``, ``TRACKIO_*``). See the [W&B env reference](https://docs.wandb.ai/guides/track/environment-variables) and the trackio docs for the full list.
+The harness injects `id=<eval_id>` + `resume="allow"` so live (`vla-eval run`) and merge (`vla-eval merge`) paths converge on the same run. All other settings — project, entity, API key — come from the backend's native env vars (`WANDB_*`, `TRACKIO_*`). See the [W&B env reference](https://docs.wandb.ai/guides/track/environment-variables) for details. Install the backend yourself: `pip install wandb` / `pip install trackio`.
 
-Backends are detected lazily; if the lib isn't installed, instantiation raises ``RuntimeError`` with the ``pip install`` hint. No extras to enable — ``pip install wandb`` / ``pip install trackio`` is enough.
-
-Under sharding, per-episode and per-eval emission are deferred to ``vla-eval merge`` (live emission across N shards would race). The orchestrator still instantiates the trackers on every shard so config errors fail fast.
+Under sharding, aggregate emission defers to `vla-eval merge`; per-episode tracking is live-path only.
 
 ---
 

@@ -67,6 +67,6 @@ CLI (cli/main.py)
 
 ### Tracking
 
-Optional sibling to recording: top-level `tracking.report_to: wandb` (or list / `"all"`) in the eval YAML mirrors per-episode + aggregate metrics to wandb/trackio. Backend settings come from native env vars (`WANDB_*`, `TRACKIO_*`); the harness only injects `eval_id` + `resume="allow"` so live and merge paths converge on the same run. Sharded mode defers all tracker emission to `vla-eval merge`. See the README "Tracking" section.
+Optional sibling to recording: top-level `tracking.report_to: wandb` (or list / `"all"`) in the eval YAML mirrors aggregate metrics to wandb/trackio. Backend settings come from native env vars (`WANDB_*`, `TRACKIO_*`); the harness only injects `eval_id` + `resume="allow"` so live and merge paths converge on the same run. Per-episode tracking fires on the live path only; sharded mode defers aggregate emission to `vla-eval merge`. See the README "Observability" section.
 
 Read `CONTRIBUTING.md` before any integration work (adding benchmarks/model servers, PR workflow).
