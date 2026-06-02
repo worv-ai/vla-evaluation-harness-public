@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import sqlite3
+import time
 
 # Old-libsqlite3 hosts (Ubuntu 22.04 ships 3.37): prefer the stdlib module, but
 # fall back to the drop-in ``pysqlite3-binary`` wheel (bundles a modern SQLite)
@@ -144,8 +145,12 @@ class RecordingStore:
         _require_sqlite()
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(str(self.db_path), isolation_level=None, timeout=30.0)
-        self._conn.executescript(SCHEMA_SQL)
+        self._conn = sqlite3.connect(str(self.db_path), isolation_level=None, timeout=60.0)
+        # journal_mode=WAL (SCHEMA_SQL line 1) switches under an exclusive lock
+        # SQLite won't reliably retry; arm busy_timeout first + retry so N shards
+        # opening one fresh DB at once don't lose the race ("database is locked").
+        self._conn.execute("PRAGMA busy_timeout=60000")
+        self._init_schema()
         # Mode 666 on main + WAL/SHM so external writers (different uid) can
         # co-write via field-union upsert. SQLite WAL needs SHM writable.
         for suffix in ("", "-wal", "-shm"):
@@ -153,6 +158,18 @@ class RecordingStore:
                 os.chmod(str(self.db_path) + suffix, 0o666)
             except OSError:
                 pass
+
+    def _init_schema(self) -> None:
+        """Run the idempotent schema script, retrying the WAL-switch lock race
+        that surfaces when many writers open a fresh DB concurrently."""
+        for attempt in range(40):
+            try:
+                self._conn.executescript(SCHEMA_SQL)
+                return
+            except sqlite3.OperationalError as exc:
+                if "locked" not in str(exc).lower() or attempt == 39:
+                    raise
+                time.sleep(min(1.0, 0.1 * (attempt + 1)))
 
     def close(self) -> None:
         self._conn.close()
