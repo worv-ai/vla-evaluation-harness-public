@@ -339,15 +339,6 @@ class EpisodeRecorder:
             return
         self._closed = True
 
-        if self._video is not None:
-            try:
-                self._video.save(status=status)
-            except FileExistsError as exc:
-                logger.warning("Episode video already exists: %s", exc)
-            except Exception:
-                logger.exception("video.save failed for sid=%s eid=%s", self._sid, self._eid)
-            self._video = None
-
         try:
             jsonl_name = (self._filename_stem + ".jsonl").format(status=status, **self._context)
         except Exception:
@@ -387,6 +378,12 @@ class EpisodeRecorder:
             )
         except Exception:
             logger.exception("Failed to upsert episode result for sid=%s eid=%s", self._sid, self._eid)
+
+        # Finalize video LAST (DB rows already safe) and never swallow: a save
+        # collision/error must surface, not silently drop the rollout.
+        if self._video is not None:
+            video, self._video = self._video, None
+            video.save(status=status)
 
 
 class NullEpisodeRecorder(EpisodeRecorder):

@@ -482,3 +482,33 @@ def test_recording_store_chmods_db_world_writable(tmp_path):
             assert mode == 0o666, f"{f.name}: expected 0o666, got {oct(mode)}"
     finally:
         store.close()
+
+
+def test_close_propagates_video_collision_and_still_writes_db(tmp_path: Path) -> None:
+    """A video-save name collision must surface from close() (not be silently
+    dropped), and the DB rows must already be written when it does."""
+    db = tmp_path / "recording.sqlite"
+    store = RecordingStore(db)
+    (tmp_path / "vid_success.mp4").write_bytes(b"pre-existing")  # force the collision
+    rec = EpisodeRecorder(
+        store=store,
+        sid="s",
+        eid="e",
+        eval_id="ev",
+        output_dir=tmp_path,
+        filename_stem="vid_{status}",
+        context={},
+    )
+    rec.record_video(np.zeros((4, 4, 3), dtype=np.uint8))
+    rec.record_step(step=0, reward=1.0)
+    try:
+        with pytest.raises(FileExistsError):
+            rec.close(status="success", metrics={"success": True}, task_name="T", episode_id=0, steps=1)
+        conn = sqlite3.connect(str(db))
+        er = conn.execute("SELECT status FROM episode_results WHERE sid='s' AND eid='e'").fetchall()
+        sr = conn.execute("SELECT step_id FROM step_rows WHERE sid='s' AND eid='e'").fetchall()
+        conn.close()
+        assert er == [("success",)]  # episode recorded despite the video failure
+        assert sr == [(0,)]
+    finally:
+        store.close()
