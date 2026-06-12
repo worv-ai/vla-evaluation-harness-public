@@ -191,13 +191,10 @@ class MimicDroidBenchmark(StepBenchmark):
         return os.path.join(self.data_dir, "TaskDemos", task_name, self.env_instance, "demo.hdf5")
 
     def _make_env(self, task_name: str) -> Any:
-        import json
-
-        import h5py
         import robosuite
+        from robocasa.utils.mimicdroid_utils import get_env_args_from_dataset  # registers the envs
 
-        with h5py.File(self._demo_path(task_name), "r") as f:
-            env_kwargs = json.loads(f["data"].attrs["env_args"])["env_kwargs"]
+        env_kwargs = get_env_args_from_dataset(self._demo_path(task_name))["env_kwargs"]
         env_kwargs["robots"] = [self.robot]
         for k in ("has_renderer", "use_camera_obs", "renderer", "camera_segmentations", "eval_mode"):
             env_kwargs.pop(k, None)
