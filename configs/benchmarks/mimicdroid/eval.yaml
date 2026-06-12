@@ -1,0 +1,23 @@
+# MimicDroid-RoboCasa (arXiv 2509.09769) — Abstract embodiment, 12 tasks x 3 levels.
+#
+# Few-shot in-context benchmark: the model server receives task_description =
+# the task name and loads that task's in-context demonstrations from its own
+# copy of the dataset (HF Rutav/MimicDroidDataset). Paired deterministic reset
+# seeds per (task, episode) make runs comparable across servers.
+#
+# No docker image yet (sim deps via the host env; run with --no-docker).
+server:
+  url: "ws://localhost:8000"
+
+output_dir: "./results"
+
+benchmarks:
+  - benchmark: "vla_eval.benchmarks.mimicdroid.benchmark:MimicDroidBenchmark"
+    mode: sync
+    episodes_per_task: 50
+    params:
+      data_dir: "${oc.env:MIMICDROID_DATA,/data/MimicDroidDataset}"
+      robot: DemoTwoHand
+      camera_size: 128
+      warm_start_steps: 20
+      max_steps: 350
