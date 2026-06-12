@@ -17,16 +17,21 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-# ``json_patch`` was added in SQLite 3.38.0 (Feb 2022). Check once at import
-# rather than at first write so old libsqlite3 fails fast with a useful message
-# (Ubuntu 22.04 ships 3.37.2; uv-bundled Python ships a much newer sqlite).
+# ``json_patch`` was added in SQLite 3.38.0 (Feb 2022). Checked when a recording
+# DB is actually opened — NOT at import: this module is imported by runners and
+# benchmarks.base, so an import-time raise bricked every no-recording eval on
+# hosts with an old libsqlite3 (Ubuntu 22.04 ships 3.37.2). The no-recording
+# path (NullEpisodeRecorder) never touches sqlite.
 _MIN_SQLITE = (3, 38, 0)
-if sqlite3.sqlite_version_info < _MIN_SQLITE:
-    raise RuntimeError(
-        f"vla_eval.recording requires SQLite >= {'.'.join(map(str, _MIN_SQLITE))} "
-        f"(json_patch); detected {sqlite3.sqlite_version}. "
-        "Upgrade libsqlite3 or run via uv-bundled Python."
-    )
+
+
+def _require_sqlite() -> None:
+    if sqlite3.sqlite_version_info < _MIN_SQLITE:
+        raise RuntimeError(
+            f"vla_eval.recording requires SQLite >= {'.'.join(map(str, _MIN_SQLITE))} "
+            f"(json_patch); detected {sqlite3.sqlite_version}. "
+            "Upgrade libsqlite3 or run via uv-bundled Python."
+        )
 
 
 EpisodeStatus = Literal["success", "fail", "error"]
@@ -127,6 +132,7 @@ class RecordingStore:
     """SQLite connection holder. One per process; same-file concurrency via WAL."""
 
     def __init__(self, db_path: str | Path) -> None:
+        _require_sqlite()
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(str(self.db_path), isolation_level=None, timeout=30.0)
