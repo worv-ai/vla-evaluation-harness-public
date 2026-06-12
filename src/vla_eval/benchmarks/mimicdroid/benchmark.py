@@ -35,7 +35,8 @@ from vla_eval.specs import IMAGE_RGB, LANGUAGE, DimSpec
 from vla_eval.types import Action, EpisodeResult, Observation, Task
 
 os.environ.setdefault("MUJOCO_GL", "egl")
-os.environ.setdefault("PYOPENGL_PLATFORM", "egl")
+# PyOpenGL must agree with the mujoco backend (osmesa shards on driver-flaky hosts).
+os.environ.setdefault("PYOPENGL_PLATFORM", os.environ["MUJOCO_GL"])
 
 ALL_TASKS: list[dict[str, str]] = [
     {"name": "PnPSinkToRightCounterPlate", "suite": "L1"},
