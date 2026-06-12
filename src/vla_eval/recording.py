@@ -6,6 +6,15 @@ import json
 import logging
 import os
 import sqlite3
+
+# Old-libsqlite3 hosts (Ubuntu 22.04 ships 3.37): prefer the stdlib module, but
+# fall back to the drop-in ``pysqlite3-binary`` wheel (bundles a modern SQLite)
+# when the stdlib one predates json_patch. Same pattern as the wider ecosystem.
+if sqlite3.sqlite_version_info < (3, 38, 0):  # pragma: no cover - env-dependent
+    try:
+        import pysqlite3 as sqlite3  # type: ignore[no-redef]  # noqa: F811
+    except ImportError:
+        pass
 from collections.abc import Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
