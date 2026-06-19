@@ -180,7 +180,9 @@ class RoboCasaDCBenchmark(StepBenchmark):
             num_parallel_envs=1,
             env_idx=0,
         )
-        return self._wrapper.reset()
+        raw_obs = self._wrapper.reset()
+        self._recorder.record_video(self._extract_frame(raw_obs))
+        return raw_obs
 
     def step(self, action: Action) -> StepResult:
         raw_act = np.asarray(action["actions"], dtype=np.float64)
@@ -192,6 +194,7 @@ class RoboCasaDCBenchmark(StepBenchmark):
             )
         self._step_dbg += 1
         obs, reward, done, info = self._wrapper.step(act)
+        self._recorder.record_video(self._extract_frame(obs))
         success = bool(info.get("success", False))
         return StepResult(obs=obs, reward=float(reward), done=bool(done) or success, info={"success": success})
 
@@ -300,6 +303,29 @@ class RoboCasaDCBenchmark(StepBenchmark):
                         img = (img * 255).astype(np.uint8) if img.max() <= 1.0 else img.astype(np.uint8)
                     images[gk] = np.ascontiguousarray(img)
         return images
+
+    def _extract_frame(self, raw_obs: Any) -> np.ndarray | None:
+        """High-res 3rd-person frame for the rollout video. Renders ``robot0_agentview_center`` at
+        512 directly from the sim — RoboCasa's own eval video camera (center-framed, keeps the whole
+        arm+task in view), independent of the policy obs cams (which stay robot-mounted / low-res).
+        Falls back to a policy obs cam if the center camera is unavailable."""
+        env = self._base_env
+        if env is not None:
+            try:
+                img = env.sim.render(height=512, width=512, camera_name="robot0_agentview_center")[::-1, :, :]
+                return np.ascontiguousarray(img)
+            except Exception as e:  # noqa: BLE001
+                print(f"[robocasa_dc] agentview_center render failed ({e}); falling back to policy cam")
+        if not isinstance(raw_obs, dict):
+            return None
+        for cam in self._camera_names:
+            rk = f"{cam}_image"
+            if rk in raw_obs:
+                img = np.asarray(raw_obs[rk])[::-1, :, :]
+                if img.dtype != np.uint8:
+                    img = (img * 255).astype(np.uint8) if img.max() <= 1.0 else img.astype(np.uint8)
+                return np.ascontiguousarray(img)
+        return None
 
     @staticmethod
     def _build_state(raw_obs: Any) -> np.ndarray:
