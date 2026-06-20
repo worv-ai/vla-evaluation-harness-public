@@ -114,6 +114,10 @@ class RoboCasaDCBenchmark(StepBenchmark):
         max_steps: episode horizon at 20 Hz (SeeTraceAct uses 300 for DC).
     """
 
+    # Per-step diagnostic fields (step_rows): action/eef_pos/gripper are JSON lists, so an
+    # offline pass can tell a competent rollout from one that incidentally trips success.
+    _ALL_RECORD_FIELDS = frozenset({"action", "eef_pos", "gripper", "reward", "done", "success"})
+
     def __init__(
         self,
         predefined_envs_root: str,
@@ -196,6 +200,14 @@ class RoboCasaDCBenchmark(StepBenchmark):
         obs, reward, done, info = self._wrapper.step(act)
         self._recorder.record_video(self._extract_frame(obs))
         success = bool(info.get("success", False))
+        self._recorder.record_step(
+            action=act.tolist(),
+            eef_pos=self._diag_vec(obs, "robot0_eef_pos"),
+            gripper=self._diag_vec(obs, "robot0_gripper_qpos"),
+            reward=float(reward),
+            done=bool(done),
+            success=success,
+        )
         return StepResult(obs=obs, reward=float(reward), done=bool(done) or success, info={"success": success})
 
     def make_obs(self, raw_obs: Any, task: Task) -> Observation:
@@ -326,6 +338,13 @@ class RoboCasaDCBenchmark(StepBenchmark):
                     img = (img * 255).astype(np.uint8) if img.max() <= 1.0 else img.astype(np.uint8)
                 return np.ascontiguousarray(img)
         return None
+
+    @staticmethod
+    def _diag_vec(raw_obs: Any, key: str) -> list[float] | None:
+        """Small obs vector (eef_pos / gripper_qpos) as a JSON list for step_rows, or None if absent."""
+        if not isinstance(raw_obs, dict) or key not in raw_obs:
+            return None
+        return np.asarray(raw_obs[key], dtype=np.float32).reshape(-1).tolist()
 
     @staticmethod
     def _build_state(raw_obs: Any) -> np.ndarray:
