@@ -105,6 +105,9 @@ class RLTModelServer(StarVLAModelServer):
         succ_ema_decay: float = 0.95,
         ckpt_dir: str | None = None,
         save_every: int = 5,
+        candidate_n: int = 0,
+        candidate_std: float = 0.05,
+        candidate_margin: float = 0.0,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -127,6 +130,9 @@ class RLTModelServer(StarVLAModelServer):
         self.succ_ema_decay = succ_ema_decay
         self.ckpt_dir = Path(ckpt_dir) if ckpt_dir else None
         self.save_every = save_every
+        self.candidate_n = candidate_n  # best-of-N candidate selection at greedy via the Q critic (0=off)
+        self.candidate_std = candidate_std
+        self.candidate_margin = candidate_margin
 
         self._rl_device = next(self._model.parameters()).device
         self._replay: deque = deque(maxlen=replay_size)
@@ -156,14 +162,17 @@ class RLTModelServer(StarVLAModelServer):
         self._act_flat = act_flat
         self._actor = _mlp([embed_dim, self.hidden, self.hidden, act_flat]).to(self._rl_device)
         self._value = _mlp([embed_dim, self.hidden, self.hidden, 1]).to(self._rl_device)  # per-state baseline
+        self._q = _mlp([embed_dim + act_flat, self.hidden, self.hidden, 1]).to(self._rl_device)  # action-conditioned critic (candidate selection)
         self._opt = torch.optim.Adam(
-            list(self._actor.parameters()) + list(self._value.parameters()), lr=self.lr
+            list(self._actor.parameters()) + list(self._value.parameters()) + list(self._q.parameters()), lr=self.lr
         )
         if self.ckpt_dir and (self.ckpt_dir / "actor.pt").is_file():
             sd = torch.load(self.ckpt_dir / "actor.pt", map_location=self._rl_device)
             self._actor.load_state_dict(sd["actor"])
             if "value" in sd:
                 self._value.load_state_dict(sd["value"])
+            if "q" in sd:
+                self._q.load_state_dict(sd["q"])
             self._succ_ema = sd.get("succ_ema")
             self._episodes = sd.get("episodes", 0)
             logger.info("RLT loaded actor from %s (episodes=%d succ_ema=%s)", self.ckpt_dir, self._episodes, self._succ_ema)
@@ -180,6 +189,7 @@ class RLTModelServer(StarVLAModelServer):
             {
                 "actor": self._actor.state_dict(),
                 "value": self._value.state_dict(),
+                "q": self._q.state_dict(),
                 "succ_ema": self._succ_ema,
                 "episodes": self._episodes,
             },
@@ -245,7 +255,11 @@ class RLTModelServer(StarVLAModelServer):
                 self._ep_buf.setdefault(sid, []).append(
                     (aq[i].detach().cpu().numpy().astype(np.float32), r.astype(np.float32))
                 )
-            r_exec = r * float(gate[i, 0])  # value-gate: suppress residual on states the base already solves (do-no-harm)
+                r_exec = r * float(gate[i, 0])
+            elif self.candidate_n > 0 and self.residual_scale > 0:
+                r_exec = self._select_candidate(aq[i], residual[i])  # best-of-N via Q (base r=0 is a candidate -> do-no-harm)
+            else:
+                r_exec = r * float(gate[i, 0])  # value-gate: suppress residual where the base already wins
             a_norm = np.clip(norm_batch[i] + r_exec.reshape(T, D), -1.0, 1.0)
             outputs.append({"actions": self._to_env_action(a_norm, ctx_batch[i])})
         return outputs
@@ -264,6 +278,21 @@ class RLTModelServer(StarVLAModelServer):
                 axis, angle = euler2axangle(actions[t, 3], actions[t, 4], actions[t, 5])
                 actions[t, 3:6] = axis * angle
         return actions
+
+    def _select_candidate(self, aq_i, r_actor):
+        """Best-of-N candidate selection: score {base r=0, actor, actor+noise×N} with the Q critic
+        and pick argmax. Including r=0 makes this do-no-harm by construction; deviate only if Q beats base by margin."""
+        import torch
+
+        cands = [np.zeros_like(r_actor), r_actor.astype(np.float32)]
+        for _ in range(self.candidate_n):
+            cands.append((r_actor + np.random.normal(0, self.candidate_std, r_actor.shape)).astype(np.float32))
+        cand = torch.as_tensor(np.stack(cands), device=self._rl_device)  # [M, act_flat]
+        aqr = aq_i.reshape(1, -1).repeat(cand.shape[0], 1)  # [M, H]
+        with torch.no_grad():
+            s = self._q(torch.cat([aqr, cand], dim=1)).squeeze(1).cpu().numpy()  # [M] success logits
+        best = int(np.argmax(s))
+        return cands[best] if s[best] > s[0] + self.candidate_margin else cands[0]
 
     # ── learning: episode-level advantage → AWR on the residuals taken ──
     async def on_episode_end(self, result: dict[str, Any], ctx: SessionContext) -> None:
@@ -309,7 +338,8 @@ class RLTModelServer(StarVLAModelServer):
         pred = self._actor(aq).tanh() * self.residual_scale
         # AWR: reinforce residuals beating the state's value baseline; L2 keeps near base (do-no-harm)
         actor_loss = (w * (pred - rtaken).pow(2).mean(dim=1, keepdim=True)).mean() + self.l2_coef * pred.pow(2).mean()
-        loss = actor_loss + value_loss
+        q_loss = F.binary_cross_entropy_with_logits(self._q(torch.cat([aq, rtaken], dim=1)), ret)  # action-conditioned critic
+        loss = actor_loss + value_loss + q_loss
         self._opt.zero_grad(set_to_none=True)
         loss.backward()
         self._opt.step()
