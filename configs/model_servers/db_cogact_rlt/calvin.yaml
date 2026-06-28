@@ -1,0 +1,8 @@
+# DB-CogACT RLT — CALVIN (residual RL post-training on frozen DB-CogACT)
+# Graded progress return = completed_subtasks/5. Override rl_train/ckpt_dir/etc. via --arg.
+script: "src/vla_eval/model_servers/dexbotic/dbcogact_rlt.py"
+args:
+  port: 8000
+  use_text_template: true
+  model_path: Dexmal/calvin-db-cogact
+  chunk_size: 7
