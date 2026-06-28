@@ -111,14 +111,15 @@ class RLTModelServer(StarVLAModelServer):
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
-        import torch
 
         self.rl_train = rl_train
         self.residual_scale = residual_scale
         self.explore_std = explore_std
         self.base_bias = base_bias  # diagnostic handicap: known constant shift on base position dims
         self.value_gate = value_gate  # gate residual by (1-V); disable to isolate actor recovery
-        self.explore_episode = explore_episode  # one constant offset per episode (vs per-step noise) -> discovers directional corrections
+        self.explore_episode = (
+            explore_episode  # one constant offset per episode (vs per-step noise) -> discovers directional corrections
+        )
         self.hidden = hidden
         self.lr = lr
         self.batch_size = batch_size
@@ -162,7 +163,9 @@ class RLTModelServer(StarVLAModelServer):
         self._act_flat = act_flat
         self._actor = _mlp([embed_dim, self.hidden, self.hidden, act_flat]).to(self._rl_device)
         self._value = _mlp([embed_dim, self.hidden, self.hidden, 1]).to(self._rl_device)  # per-state baseline
-        self._q = _mlp([embed_dim + act_flat, self.hidden, self.hidden, 1]).to(self._rl_device)  # action-conditioned critic (candidate selection)
+        self._q = _mlp([embed_dim + act_flat, self.hidden, self.hidden, 1]).to(
+            self._rl_device
+        )  # action-conditioned critic (candidate selection)
         self._opt = torch.optim.Adam(
             list(self._actor.parameters()) + list(self._value.parameters()) + list(self._q.parameters()), lr=self.lr
         )
@@ -175,7 +178,9 @@ class RLTModelServer(StarVLAModelServer):
                 self._q.load_state_dict(sd["q"])
             self._succ_ema = sd.get("succ_ema")
             self._episodes = sd.get("episodes", 0)
-            logger.info("RLT loaded actor from %s (episodes=%d succ_ema=%s)", self.ckpt_dir, self._episodes, self._succ_ema)
+            logger.info(
+                "RLT loaded actor from %s (episodes=%d succ_ema=%s)", self.ckpt_dir, self._episodes, self._succ_ema
+            )
         self._rl_built = True
         logger.info("RLT actor+value built: embed=%d act_flat=%d hidden=%d", embed_dim, act_flat, self.hidden)
 
@@ -257,7 +262,9 @@ class RLTModelServer(StarVLAModelServer):
                 )
                 r_exec = r * float(gate[i, 0])
             elif self.candidate_n > 0 and self.residual_scale > 0:
-                r_exec = self._select_candidate(aq[i], residual[i])  # best-of-N via Q (base r=0 is a candidate -> do-no-harm)
+                r_exec = self._select_candidate(
+                    aq[i], residual[i]
+                )  # best-of-N via Q (base r=0 is a candidate -> do-no-harm)
             else:
                 r_exec = r * float(gate[i, 0])  # value-gate: suppress residual where the base already wins
             a_norm = np.clip(norm_batch[i] + r_exec.reshape(T, D), -1.0, 1.0)
@@ -302,8 +309,10 @@ class RLTModelServer(StarVLAModelServer):
             metrics = result.get("metrics", result) if isinstance(result, dict) else {}
             success = float(bool(metrics.get("success", result.get("success", False))))
             adv_log = success - (self._succ_ema if self._succ_ema is not None else success)
-            self._succ_ema = success if self._succ_ema is None else (
-                self.succ_ema_decay * self._succ_ema + (1 - self.succ_ema_decay) * success
+            self._succ_ema = (
+                success
+                if self._succ_ema is None
+                else (self.succ_ema_decay * self._succ_ema + (1 - self.succ_ema_decay) * success)
             )
             for aq, r in buf:
                 self._replay.append((aq, r, np.float32(success)))  # store return; baseline learned by V(aq)
@@ -315,7 +324,11 @@ class RLTModelServer(StarVLAModelServer):
                 self._save()
             logger.info(
                 "RLT ep=%d success=%.0f adv=%+.3f succ_ema=%.3f |replay|=%d awr_loss=%s",
-                self._episodes, success, adv_log, self._succ_ema or 0.0, len(self._replay),
+                self._episodes,
+                success,
+                adv_log,
+                self._succ_ema or 0.0,
+                len(self._replay),
                 f"{loss:.4f}" if loss is not None else "warmup",
             )
         await super().on_episode_end(result, ctx)
@@ -338,7 +351,9 @@ class RLTModelServer(StarVLAModelServer):
         pred = self._actor(aq).tanh() * self.residual_scale
         # AWR: reinforce residuals beating the state's value baseline; L2 keeps near base (do-no-harm)
         actor_loss = (w * (pred - rtaken).pow(2).mean(dim=1, keepdim=True)).mean() + self.l2_coef * pred.pow(2).mean()
-        q_loss = F.binary_cross_entropy_with_logits(self._q(torch.cat([aq, rtaken], dim=1)), ret)  # action-conditioned critic
+        q_loss = F.binary_cross_entropy_with_logits(
+            self._q(torch.cat([aq, rtaken], dim=1)), ret
+        )  # action-conditioned critic
         loss = actor_loss + value_loss + q_loss
         self._opt.zero_grad(set_to_none=True)
         loss.backward()

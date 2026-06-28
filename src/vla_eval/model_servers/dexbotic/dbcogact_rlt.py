@@ -157,7 +157,9 @@ class DBCogACTRLTServer(CogACTModelServer):
                 self._q.load_state_dict(sd["q"])
             self._succ_ema = sd.get("succ_ema")
             self._episodes = sd.get("episodes", 0)
-            logger.info("DB-CogACT RLT loaded from %s (episodes=%d succ_ema=%s)", self.ckpt_dir, self._episodes, self._succ_ema)
+            logger.info(
+                "DB-CogACT RLT loaded from %s (episodes=%d succ_ema=%s)", self.ckpt_dir, self._episodes, self._succ_ema
+            )
         self._rl_built = True
         logger.info("DB-CogACT RLT built: embed=%d act_flat=%d hidden=%d", embed_dim, act_flat, self.hidden)
 
@@ -183,7 +185,10 @@ class DBCogACTRLTServer(CogACTModelServer):
             a0 = np.asarray(result["actions"], dtype=np.float32)
             logger.info(
                 "DB-CogACT base action stats: shape=%s min=%.3f max=%.3f std=%.3f",
-                a0.shape, float(a0.min()), float(a0.max()), float(a0.std()),
+                a0.shape,
+                float(a0.min()),
+                float(a0.max()),
+                float(a0.std()),
             )
             self._logged_scale = True
 
@@ -242,8 +247,10 @@ class DBCogACTRLTServer(CogACTModelServer):
         progress = float(metrics.get("completed_subtasks", metrics.get("success", 0.0))) / 5.0  # graded [0,1]
         if self.rl_train and buf:
             adv_log = progress - (self._succ_ema if self._succ_ema is not None else progress)
-            self._succ_ema = progress if self._succ_ema is None else (
-                self.succ_ema_decay * self._succ_ema + (1 - self.succ_ema_decay) * progress
+            self._succ_ema = (
+                progress
+                if self._succ_ema is None
+                else (self.succ_ema_decay * self._succ_ema + (1 - self.succ_ema_decay) * progress)
             )
             for z, r in buf:
                 self._replay.append((z, r, np.float32(progress)))
@@ -257,7 +264,11 @@ class DBCogACTRLTServer(CogACTModelServer):
                 self._save()
             logger.info(
                 "DBRLT ep=%d progress=%.2f adv=%+.3f ema=%.3f |replay|=%d awr_loss=%s",
-                self._episodes, progress, adv_log, self._succ_ema or 0.0, len(self._replay),
+                self._episodes,
+                progress,
+                adv_log,
+                self._succ_ema or 0.0,
+                len(self._replay),
                 f"{loss:.4f}" if loss is not None else "warmup",
             )
         else:
