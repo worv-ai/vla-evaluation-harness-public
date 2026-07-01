@@ -1,4 +1,4 @@
-"""AsyncEpisodeRunner: real-time wall-clock evaluation.
+"""RealtimeEpisodeRunner: real-time wall-clock evaluation.
 
 Ties the environment clock to wall-clock time.  The environment advances at
 a fixed Hz whether or not the model has returned an action.
@@ -30,7 +30,7 @@ from vla_eval.types import EpisodeResult, Task
 logger = logging.getLogger(__name__)
 
 
-class AsyncEpisodeRunner(EpisodeRunner):
+class RealtimeEpisodeRunner(EpisodeRunner):
     """Real-time episode runner with clock-based pacing.
 
     Args:

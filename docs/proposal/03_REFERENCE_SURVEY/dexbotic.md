@@ -273,7 +273,7 @@ class AdaptiveEnsemble:
 
 ### 회피할 패턴
 
-1. **에피소드 루프의 서브클래스 하드코딩**: 가장 큰 설계 문제. Evaluator마다 거의 동일한 루프를 재구현한다 → 우리의 **EpisodeRunner**(SyncEpisodeRunner/AsyncEpisodeRunner)가 "어떻게"를 분리하여 해결. Benchmark는 "무엇"만 정의.
+1. **에피소드 루프의 서브클래스 하드코딩**: 가장 큰 설계 문제. Evaluator마다 거의 동일한 루프를 재구현한다 → 우리의 **EpisodeRunner**(SyncEpisodeRunner/RealtimeEpisodeRunner)가 "어떻게"를 분리하여 해결. Benchmark는 "무엇"만 정의.
 
 2. **모놀리식 Docker 이미지**: 단일 이미지에 모든 벤치마크 환경을 패키징하면 이미지 크기가 폭발하고, 하나의 벤치마크 의존성 변경이 전체 빌드를 트리거한다 → 우리의 **벤치마크별 독립 Docker 이미지** 전략.
 

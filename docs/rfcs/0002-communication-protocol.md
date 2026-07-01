@@ -98,7 +98,7 @@ Key design points:
 
 - **`act()` uses `asyncio.Future`** internally — it awaits the server's action response without busy-polling.
 - **Sync mode**: `act()` sends an observation and returns the matching action (matched by `seq`).
-- **Real-time mode**: `send_observation()` fires and forgets; incoming actions are dispatched to the registered `on_action` callback. The `AsyncEpisodeRunner` uses this with an `ActionBuffer` and a hold policy.
+- **Real-time mode**: `send_observation()` fires and forgets; incoming actions are dispatched to the registered `on_action` callback. The `RealtimeEpisodeRunner` uses this with an `ActionBuffer` and a hold policy.
 - **Sequence numbering** is managed internally; callers never set `seq` manually.
 - **Context manager** support (`async with Connection(...) as conn`) for automatic connect/close.
 

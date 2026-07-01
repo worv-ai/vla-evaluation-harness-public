@@ -29,7 +29,7 @@ from vla_eval.recording import (
 from vla_eval.registry import resolve_import_string
 from vla_eval.specs import DimSpec, check_specs
 from vla_eval.results.collector import EpisodeResult, ResultCollector
-from vla_eval.runners.async_runner import AsyncEpisodeRunner
+from vla_eval.runners.realtime_runner import RealtimeEpisodeRunner
 from vla_eval.runners.clock import Clock
 from vla_eval.runners.sync_runner import SyncEpisodeRunner
 from vla_eval.tracking import Tracker, call_each, get_reporting_trackers
@@ -226,7 +226,7 @@ class Orchestrator:
                     f"Benchmark {name} is configured for real-time mode but does not implement "
                     "get_hold_action(); declare the embodiment's safe do-nothing action."
                 ) from exc
-            runner = AsyncEpisodeRunner(
+            runner = RealtimeEpisodeRunner(
                 hz=cfg.hz,
                 clock=Clock(pace=1.0 if cfg.paced else math.inf),
                 wait_first_action=cfg.wait_first_action,

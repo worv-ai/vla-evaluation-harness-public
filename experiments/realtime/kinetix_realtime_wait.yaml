@@ -1,4 +1,4 @@
-# Kinetix evaluation — sim2live mode with wait_first_action (12 RTC tasks × 10 episodes)
+# Kinetix evaluation — real-time mode with wait_first_action (12 RTC tasks × 10 episodes)
 # Isolates the step-0 zero-action artifact from continuous timing pressure.
 server:
   url: "ws://localhost:8000"

@@ -213,7 +213,7 @@ RFC 001에서 명시적으로 프레이밍한 핵심 문제:
 
 OpenEnv의 step-based API는 **암묵적으로 simulation time**을 사용. 내장 real-time 실행 모드 없음. RFC에서 이 문제를 인식하고 있으나 해결은 future work으로 남김.
 
-**우리 설계에 대한 시사점**: 이것이 정확히 우리 `AsyncEpisodeRunner`의 존재 이유. OpenEnv가 해결하지 않은 문제를 우리가 해결해야 함. "환경 시간이 에이전트 추론과 독립적으로 흐르는" 비동기 평가 모드는 우리 프로젝트의 핵심 차별점.
+**우리 설계에 대한 시사점**: 이것이 정확히 우리 `RealtimeEpisodeRunner`의 존재 이유. OpenEnv가 해결하지 않은 문제를 우리가 해결해야 함. "환경 시간이 에이전트 추론과 독립적으로 흐르는" 비동기 평가 모드는 우리 프로젝트의 핵심 차별점.
 
 ### Auto-discovery 시스템
 
@@ -303,9 +303,9 @@ class Rubric(ABC):
 
 4. **ContainerProvider ABC → Orchestrator의 Docker 관리**: Docker/Swarm/K8s를 추상화한 컨테이너 관리 인터페이스. 우리 설계에서는 `Orchestrator`가 벤치마크별 Docker 컨테이너 기동·종료·health check를 담당. OpenEnv의 `LocalDockerProvider`(포트 할당, health check 폴링)를 Orchestrator 내부 구현의 참고로 활용.
 
-5. **Dual-mode 아키텍처 → SyncEpisodeRunner / AsyncEpisodeRunner**: 동일 코드가 모드에 따라 다른 인터페이스를 노출하는 개념. 우리 설계에서는 동일한 `Benchmark` 구현이 `SyncEpisodeRunner`(시뮬레이션 시간 — 추론 완료까지 대기)와 `AsyncEpisodeRunner`(실시간 — wall-clock Hz + hold_policy)에 모두 조합됨. 벤치마크 코드 수정 없이 실행 모드만 전환.
+5. **Dual-mode 아키텍처 → SyncEpisodeRunner / RealtimeEpisodeRunner**: 동일 코드가 모드에 따라 다른 인터페이스를 노출하는 개념. 우리 설계에서는 동일한 `Benchmark` 구현이 `SyncEpisodeRunner`(시뮬레이션 시간 — 추론 완료까지 대기)와 `RealtimeEpisodeRunner`(실시간 — wall-clock Hz + hold_policy)에 모두 조합됨. 벤치마크 코드 수정 없이 실행 모드만 전환.
 
-6. **The Time Problem → AsyncEpisodeRunner의 존재 이유**: OpenEnv RFC 001이 명시적으로 프레이밍한 simulation time vs real time 문제. OpenEnv는 이를 future work으로 남겼으나, 우리 설계에서는 `AsyncEpisodeRunner`가 정확히 이 문제를 해결 — wall-clock 기반 고정 Hz로 환경을 step하고, 추론이 완료되지 않으면 `hold_policy`(`repeat_last`, `zero`, callable)를 적용.
+6. **The Time Problem → RealtimeEpisodeRunner의 존재 이유**: OpenEnv RFC 001이 명시적으로 프레이밍한 simulation time vs real time 문제. OpenEnv는 이를 future work으로 남겼으나, 우리 설계에서는 `RealtimeEpisodeRunner`가 정확히 이 문제를 해결 — wall-clock 기반 고정 Hz로 환경을 step하고, 추론이 완료되지 않으면 `hold_policy`(`repeat_last`, `zero`, callable)를 적용.
 
 7. **Auto-discovery → 데코레이터 기반 Registry**: OpenEnv는 `importlib.metadata` 기반 패키지 자동 발견. 우리 설계에서는 lm-eval-harness 스타일의 데코레이터 기반 명시적 Registry를 채택 (벤치마크 수가 제한적이므로 더 적합). Convention-over-configuration 원칙은 YAML 설정의 벤치마크명 → Benchmark 클래스 매핑에 적용.
 
@@ -331,7 +331,7 @@ class Rubric(ABC):
 
 ### 열린 질문
 
-1. **OpenEnv의 dual-mode(sim/prod)를 우리의 sync/async 평가 모드에 어떻게 매핑할 것인가?** → **부분적으로 해결됨.** Simulation mode ≈ 우리 `SyncEpisodeRunner` (step-based, 추론 완료까지 환경 시간 멈춤). 그러나 OpenEnv의 Production mode는 MCP 도구 호출 기반이므로 우리 `AsyncEpisodeRunner`(wall-clock Hz + hold_policy)와는 직접 대응하지 않음. 우리의 sync/async 구분은 OpenEnv의 sim/prod과 다른 축 — "시간 모델"의 차이이지 "인터페이스 노출 범위"의 차이가 아님.
+1. **OpenEnv의 dual-mode(sim/prod)를 우리의 sync/async 평가 모드에 어떻게 매핑할 것인가?** → **부분적으로 해결됨.** Simulation mode ≈ 우리 `SyncEpisodeRunner` (step-based, 추론 완료까지 환경 시간 멈춤). 그러나 OpenEnv의 Production mode는 MCP 도구 호출 기반이므로 우리 `RealtimeEpisodeRunner`(wall-clock Hz + hold_policy)와는 직접 대응하지 않음. 우리의 sync/async 구분은 OpenEnv의 sim/prod과 다른 축 — "시간 모델"의 차이이지 "인터페이스 노출 범위"의 차이가 아님.
 
 2. **Container provider 추상화를 어느 수준까지 채택할 것인가?** → **우리 Orchestrator는 LocalDocker로 시작하되 확장 가능한 인터페이스를 유지.** OpenEnv의 `ContainerProvider` ABC 구조를 참고하여, Orchestrator 내부에 Docker 관리 로직을 추상화. 초기에는 로컬 Docker만 지원하지만, 인터페이스 변경 없이 Swarm/K8s 등으로 확장 가능한 구조.
 

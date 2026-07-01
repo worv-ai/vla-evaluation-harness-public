@@ -69,7 +69,7 @@ class SyncEpisodeRunner(EpisodeRunner):
         return result
 ```
 
-### AsyncEpisodeRunner (→ RFC-0001)
+### RealtimeEpisodeRunner (→ RFC-0001)
 
 Ties the simulation clock to wall-clock time — the environment keeps advancing whether or not the model has returned an action. If inference hasn't completed, a hold policy is applied (e.g., repeat last action). Used for real-time evaluation.
 
@@ -128,7 +128,7 @@ Coordinates the full evaluation flow:
 1. **Start container**: launch the benchmark's Docker container, manage ports and volumes
 2. **Health check**: poll `/healthz` until ready (timeout 120s, then skip to next benchmark)
 3. **Connect**: WebSocket to model server with exponential backoff (max 5 retries)
-4. **Select runner**: `SyncEpisodeRunner` or `AsyncEpisodeRunner` based on config `mode`
+4. **Select runner**: `SyncEpisodeRunner` or `RealtimeEpisodeRunner` based on config `mode`
 5. **Run episodes**: iterate `benchmark.get_tasks()`, call `runner.run_episode()` for each
 6. **Collect results**: pass episode metrics to `ResultCollector`
 7. **Shutdown**: SIGTERM → 10s wait → SIGKILL, generate final report
@@ -204,7 +204,7 @@ Output: structured JSON (`BenchmarkResult`) + human-readable summary table. Infe
 
 - ✅ Benchmark ABC (`benchmarks/base.py`), StepResult dataclass
 - ✅ SyncEpisodeRunner (`runners/sync_runner.py`)
-- ✅ AsyncEpisodeRunner (`runners/async_runner.py`)
+- ✅ RealtimeEpisodeRunner (`runners/realtime_runner.py`)
 - ✅ Orchestrator (`orchestrator.py`)
 - ✅ Import resolution via `resolve_import_string()` (`registry.py`)
 - ✅ YAML configuration loading

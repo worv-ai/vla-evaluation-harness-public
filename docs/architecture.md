@@ -29,7 +29,7 @@ Status markers: ✅ implemented, 🚧 partial, 🔜 planned.
 | **Model Server** | Runs model inference. User implements `predict()`. | ✅ |
 | **Connection** | Client library for benchmark→server communication. Framework-provided. | ✅ |
 | **Benchmark** | Environment interface ABC (reset, step, make_obs, is_done). User implements per benchmark. | ✅ |
-| **EpisodeRunner** | Episode execution strategy. Combines Benchmark + Connection. | ✅ Sync, ✅ Async (Sim2Live) |
+| **EpisodeRunner** | Episode execution strategy. Combines Benchmark + Connection. | ✅ Sync, ✅ Real-time |
 | **Orchestrator** | Coordinates evaluation: config parsing, benchmark creation, episode iteration, result saving. | ✅ |
 | **ResultCollector** | Aggregates episode→task→benchmark metrics. JSON output + summary table. | ✅ |
 | **Import Resolution** | Resolves `"module:Class"` import strings from config to actual classes. | ✅ |

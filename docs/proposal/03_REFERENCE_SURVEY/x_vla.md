@@ -390,7 +390,7 @@ SLURM에서 서버/클라이언트를 다른 노드에 배치 가능. 클라이�
 
 ### 열린 질문
 
-1. **Flow-matching 모델의 추론 step 수와 품질 트레이드오프**: 기본 10 steps인데, step 수를 줄이면 (예: 1-2 steps) 실시간 제어가 가능한가? → **우리 설계에서는 모델 구현 내부의 디테일.** `PredictModelServer.predict()` 내부에서 연구자가 step 수를 자유롭게 설정하며, 프레임워크는 이를 노출하거나 관여하지 않음. 추론 속도가 느려지면 `AsyncEpisodeRunner`의 hold_policy가 자동으로 대응.
+1. **Flow-matching 모델의 추론 step 수와 품질 트레이드오프**: 기본 10 steps인데, step 수를 줄이면 (예: 1-2 steps) 실시간 제어가 가능한가? → **우리 설계에서는 모델 구현 내부의 디테일.** `PredictModelServer.predict()` 내부에서 연구자가 step 수를 자유롭게 설정하며, 프레임워크는 이를 노출하거나 관여하지 않음. 추론 속도가 느려지면 `RealtimeEpisodeRunner`의 hold_policy가 자동으로 대응.
 
 2. **domain_id vs model configuration**: → **우리 설계로 해결됨.** 프레임워크는 모델-불가지론적이므로 domain_id를 프레임워크 레벨에서 다루지 않음. 모델이 domain_id를 필요로 하면, Benchmark가 `make_obs()`에서 observation dict에 포함 (예: `{"domain_id": 3, ...}`). `dict[str, Any]` 페이로드이므로 어떤 모델 특화 파라미터든 자유롭게 전달 가능.
 

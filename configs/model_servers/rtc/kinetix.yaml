@@ -1,2 +1,2 @@
-# RTC model server — sync / sim2live (chunk buffer, no CI)
+# RTC model server — sync / real-time (chunk buffer, no CI)
 extends: _base.yaml

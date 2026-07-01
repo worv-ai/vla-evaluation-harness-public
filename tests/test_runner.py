@@ -1,4 +1,4 @@
-"""Tests for SyncEpisodeRunner, AsyncEpisodeRunner, ActionBuffer, batched PredictModelServer, and CI/LAAS."""
+"""Tests for SyncEpisodeRunner, RealtimeEpisodeRunner, ActionBuffer, batched PredictModelServer, and CI/LAAS."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ import pytest
 from vla_eval.benchmarks.base import repeat_last_hold
 from vla_eval.connection import Connection
 from vla_eval.runners.action_buffer import ActionBuffer
-from vla_eval.runners.async_runner import AsyncEpisodeRunner
+from vla_eval.runners.realtime_runner import RealtimeEpisodeRunner
 from vla_eval.runners.sync_runner import SyncEpisodeRunner
 from vla_eval.model_servers.predict import PredictModelServer
 from vla_eval.model_servers.base import SessionContext
@@ -253,15 +253,15 @@ def test_action_buffer_metrics():
 
 
 # ---------------------------------------------------------------------------
-# AsyncEpisodeRunner tests
+# RealtimeEpisodeRunner tests
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.anyio
-async def test_async_runner_completes(echo_server):
-    """AsyncEpisodeRunner finishes when benchmark reports done."""
+async def test_realtime_runner_completes(echo_server):
+    """RealtimeEpisodeRunner finishes when benchmark reports done."""
     benchmark = StubBenchmark(done_at_step=3)
-    runner = AsyncEpisodeRunner(hz=100.0)
+    runner = RealtimeEpisodeRunner(hz=100.0)
     task = {"name": "task_0"}
 
     async with Connection(echo_server) as conn:
@@ -273,10 +273,10 @@ async def test_async_runner_completes(echo_server):
 
 
 @pytest.mark.anyio
-async def test_async_runner_respects_max_steps(echo_server):
-    """AsyncEpisodeRunner stops at max_steps even if benchmark is not done."""
+async def test_realtime_runner_respects_max_steps(echo_server):
+    """RealtimeEpisodeRunner stops at max_steps even if benchmark is not done."""
     benchmark = StubBenchmark(done_at_step=100)
-    runner = AsyncEpisodeRunner(hz=100.0)
+    runner = RealtimeEpisodeRunner(hz=100.0)
     task = {"name": "task_0"}
 
     async with Connection(echo_server) as conn:

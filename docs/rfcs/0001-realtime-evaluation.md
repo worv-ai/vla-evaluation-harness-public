@@ -44,7 +44,7 @@ The base `ModelServer` interface is `async` because in real-time mode, observati
 
 ### Benchmark ≠ EpisodeRunner (→ RFC-0004)
 
-`Benchmark` defines the environment interface (reset, step, observation format, success criteria). `EpisodeRunner` defines the execution strategy (sync vs. real-time, timing, hold policies). This separation exists so that a single benchmark implementation (e.g. `LIBEROBenchmark`) works with both `SyncEpisodeRunner` and `AsyncEpisodeRunner` without modification. If the benchmark owned the execution loop, every benchmark would need to implement real-time logic.
+`Benchmark` defines the environment interface (reset, step, observation format, success criteria). `EpisodeRunner` defines the execution strategy (sync vs. real-time, timing, hold policies). This separation exists so that a single benchmark implementation (e.g. `LIBEROBenchmark`) works with both `SyncEpisodeRunner` and `RealtimeEpisodeRunner` without modification. If the benchmark owned the execution loop, every benchmark would need to implement real-time logic.
 
 ### Connection Dual API
 
@@ -62,10 +62,10 @@ class Connection:
 
 `act()` is request-response: send observation, await action. `send_observation()` + `on_action()` is fire-and-forget: observations flow out, actions arrive asynchronously via callback. The EpisodeRunner chooses which API to use.
 
-## AsyncEpisodeRunner Design
+## RealtimeEpisodeRunner Design
 
 ```python
-class AsyncEpisodeRunner(EpisodeRunner):
+class RealtimeEpisodeRunner(EpisodeRunner):
     hz: float = 10.0                    # environment step frequency
     hold_policy: str = "repeat_last"    # what to do when no new action
     max_steps: int = 300
@@ -117,7 +117,7 @@ Real-time evaluation introduces metrics that sync evaluation cannot capture:
 - ✅ Client-server architecture — WebSocket + msgpack protocol operational
 - ✅ Protocol timestamps — `seq` and `timestamp` fields on every message
 - ✅ `Connection.send_observation()` / `on_action()` / `start_listener()` / `stop_listener()`
-- ✅ `AsyncEpisodeRunner` — fully implemented (`runners/async_runner.py`)
+- ✅ `RealtimeEpisodeRunner` — fully implemented (`runners/realtime_runner.py`)
 - ✅ `ActionBuffer` + hold policies (`repeat_last`, `zero`, callable) — (`runners/action_buffer.py`)
 - ✅ Real-time metrics collection — effective control Hz, step timing, stale action ratio
 - ✅ `Clock` abstraction for pace control (`runners/clock.py`)

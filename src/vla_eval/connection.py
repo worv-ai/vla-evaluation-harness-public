@@ -236,7 +236,7 @@ class Connection:
     async def _listener_loop(self) -> None:
         """Background loop: read messages and dispatch to on_action callback.
 
-        Only used in realtime mode (AsyncEpisodeRunner).  Sync mode uses
+        Only used in realtime mode (RealtimeEpisodeRunner).  Sync mode uses
         ``act()`` (send + recv) directly and never starts the listener.
 
         On connection loss the listener exits instead of reconnecting.

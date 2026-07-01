@@ -1,4 +1,4 @@
-# Real-time (Sim2Live) evaluation example: wall-clock-paced async runner.
+# Real-time evaluation example: wall-clock-paced runner.
 # Uses Kinetix, which supports real-time mode (implements get_hold_action).
 # NOTE: LIBERO is sync-only and cannot run here.
 server:
