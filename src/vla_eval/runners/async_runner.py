@@ -65,9 +65,9 @@ class AsyncEpisodeRunner(EpisodeRunner):
         The clock resets right before the first observation is sent, so setup
         time (env reset, model server episode_start) is NOT counted.  The step
         loop starts immediately — no waiting for the first action.  Until the
-        model server responds, the hold policy (zero or repeat_last) supplies
-        actions, faithfully reflecting real deployment where physics does not
-        pause for the controller to warm up.
+        model server responds, the benchmark's hold action (``get_hold_action``)
+        supplies actions, faithfully reflecting real deployment where physics does
+        not pause for the controller to warm up.
         """
         clock = self.clock
 

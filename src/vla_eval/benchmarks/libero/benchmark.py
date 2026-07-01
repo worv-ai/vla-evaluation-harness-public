@@ -287,8 +287,12 @@ class LIBEROBenchmark(StepBenchmark):
         }
 
     def get_hold_action(self, last_action: Action | None) -> Action:
-        # Absolute-target semantics at deploy → repeat last (7-DoF pose+gripper).
-        return repeat_last_hold(last_action, 7)
+        # Hold matches the control mode (get_action_spec advertises POSITION_DELTA):
+        # absolute → repeat the last target (hold pose); delta (default) → null
+        # action, since repeating a delta keeps moving.
+        if self.absolute_action:
+            return repeat_last_hold(last_action, 7)
+        return {"actions": np.zeros(7, dtype=np.float32)}
 
     def get_action_spec(self) -> dict[str, DimSpec]:
         return {

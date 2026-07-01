@@ -215,6 +215,17 @@ class Orchestrator:
         max_steps = cfg.max_steps if cfg.max_steps is not None else metadata.get("max_steps", 300)
 
         if cfg.mode.startswith("realtime"):
+            # Fail fast before any episode: a real-time benchmark must declare its
+            # stale-tick hold, else every episode would raise mid-run and the
+            # per-episode error isolation would flood logs while wasting resources.
+            try:
+                benchmark.get_hold_action(None)
+            except NotImplementedError as exc:
+                await conn.close()
+                raise RuntimeError(
+                    f"Benchmark {name} is configured for real-time mode but does not implement "
+                    "get_hold_action(); declare the embodiment's safe do-nothing action."
+                ) from exc
             runner = AsyncEpisodeRunner(
                 hz=cfg.hz,
                 clock=Clock(pace=1.0 if cfg.paced else math.inf),

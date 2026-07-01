@@ -6,11 +6,13 @@ import asyncio
 import anyio
 import threading
 import time
+from functools import partial
 from typing import Any
 
 import numpy as np
 import pytest
 
+from vla_eval.benchmarks.base import repeat_last_hold
 from vla_eval.connection import Connection
 from vla_eval.runners.action_buffer import ActionBuffer
 from vla_eval.runners.async_runner import AsyncEpisodeRunner
@@ -179,9 +181,8 @@ async def test_batch_server_predict_batch_exception_propagates(free_port):
 # ---------------------------------------------------------------------------
 
 
-def _repeat_hold(last):
-    """Test hold_fn: repeat the last fresh action, zeros before the first."""
-    return last if last is not None else {"actions": np.zeros(7, dtype=np.float32)}
+# Reuse the shared hold helper (absolute-control repeat-last, action_dim=7).
+_repeat_hold = partial(repeat_last_hold, action_dim=7)
 
 
 def test_action_buffer_initial_state():
