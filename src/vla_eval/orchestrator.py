@@ -217,8 +217,6 @@ class Orchestrator:
         if cfg.mode.startswith("realtime"):
             runner = AsyncEpisodeRunner(
                 hz=cfg.hz,
-                hold_policy=cfg.hold_policy,
-                action_dim=metadata.get("action_dim", 7),
                 clock=Clock(pace=1.0 if cfg.paced else math.inf),
                 wait_first_action=cfg.wait_first_action,
             )

@@ -179,9 +179,14 @@ async def test_batch_server_predict_batch_exception_propagates(free_port):
 # ---------------------------------------------------------------------------
 
 
+def _repeat_hold(last):
+    """Test hold_fn: repeat the last fresh action, zeros before the first."""
+    return last if last is not None else {"actions": np.zeros(7, dtype=np.float32)}
+
+
 def test_action_buffer_initial_state():
     """Buffer starts with no action and zero metrics."""
-    buf = ActionBuffer()
+    buf = ActionBuffer(hold_fn=_repeat_hold)
     assert not buf.has_action()
     assert not buf.is_new()
     assert buf.update_count == 0
@@ -190,7 +195,7 @@ def test_action_buffer_initial_state():
 
 def test_action_buffer_update_and_get():
     """update() then get() returns the action."""
-    buf = ActionBuffer()
+    buf = ActionBuffer(hold_fn=_repeat_hold)
     action = {"actions": np.ones(7)}
     buf.update(action)
     assert buf.has_action()
@@ -201,29 +206,30 @@ def test_action_buffer_update_and_get():
     assert buf.stale_count == 0
 
 
-def test_action_buffer_repeat_last_policy():
-    """Default hold policy repeats the last action."""
-    buf = ActionBuffer(hold_policy="repeat_last")
+def test_action_buffer_hold_repeats_last():
+    """On a stale tick, hold_fn receives the last fresh action (repeat semantics)."""
+    buf = ActionBuffer(hold_fn=_repeat_hold)
     buf.update({"actions": np.ones(7) * 2})
     buf.get()  # consume the "new" flag
-    result = buf.get()  # stale → repeat
+    result = buf.get()  # stale → hold_fn(last_fresh) → repeat
     assert np.array_equal(result["actions"], np.ones(7) * 2)
     assert buf.stale_count == 1
 
 
-def test_action_buffer_zero_policy():
-    """Zero hold policy returns zeros when stale."""
-    buf = ActionBuffer(hold_policy="zero", action_dim=7)
+def test_action_buffer_hold_null_action():
+    """hold_fn can return a fixed null action (delta/velocity control)."""
+    null = {"actions": np.zeros(7, dtype=np.float32)}
+    buf = ActionBuffer(hold_fn=lambda last: null)
     buf.update({"actions": np.ones(7)})
     buf.get()  # consume new
-    result = buf.get()  # stale → zero
+    result = buf.get()  # stale → null
     assert np.allclose(result["actions"], np.zeros(7))
     assert buf.stale_count == 1
 
 
 def test_action_buffer_reset():
     """reset() clears all state."""
-    buf = ActionBuffer()
+    buf = ActionBuffer(hold_fn=_repeat_hold)
     buf.update({"actions": np.ones(7)})
     buf.get()
     buf.reset()
@@ -234,7 +240,7 @@ def test_action_buffer_reset():
 
 def test_action_buffer_metrics():
     """get_metrics() returns correct stale ratio."""
-    buf = ActionBuffer()
+    buf = ActionBuffer(hold_fn=_repeat_hold)
     buf.update({"actions": np.ones(7)})
     buf.get()  # 1 fresh get
     buf.get()  # 1 stale get
