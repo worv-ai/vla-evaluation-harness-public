@@ -271,8 +271,8 @@ class RoboDojoBenchmark(StepBenchmark):
     def reset(self, task: Task) -> Any:
         task_name = str(task["name"])
         if self._env is not None and task_name != self._current_task_name:
-            # Isaac's SimulationContext is process-global and env teardown hangs, so a
-            # second task cannot run in this process (upstream is one task per process).
+            # Measured: env.close() on a clean stack_blocks scene never returns (>180s), so
+            # clear_instance() is never reached and a second env raises "context already exists".
             raise RuntimeError(
                 "RoboDojo runs one task per process; split multi-task configs into "
                 "one `vla-eval run` per task (see scripts/run_robodojo_protocol.sh)"
@@ -452,8 +452,8 @@ class RoboDojoBenchmark(StepBenchmark):
             except Exception:
                 logger.exception("RoboDojo env close failed")
 
-        # EvalEnv.close() can hang forever in Isaac teardown; bound it so callers
-        # always make progress and the harness can still write results.
+        # EvalEnv.close() has been measured to hang past 180s even on a clean scene;
+        # bound it so callers make progress and the harness can still write results.
         closer = threading.Thread(target=_close, name="robodojo-env-close", daemon=True)
         closer.start()
         closer.join(timeout=60)

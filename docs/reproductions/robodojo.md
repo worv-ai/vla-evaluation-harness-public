@@ -40,9 +40,13 @@ mapping, chunked inference, action encoding, and native reward path are all exer
 
 ## Integration findings (validated empirically)
 
-- **One task per process.** Isaac's `SimulationContext` is process-global and `EvalEnv.close()`
-  hangs in Isaac teardown, so a task switch inside a run is impossible (upstream is shaped the
-  same way). `scripts/run_robodojo_protocol.sh` drives one `vla-eval run` per task.
+- **One task per process.** In principle Isaac Lab supports teardown-and-recreate
+  (`DirectRLEnv.close()` → `SimulationContext.clear_instance()`, then build a new env). In
+  practice `close()` hangs: measured on a *clean* `stack_blocks` scene (dual-X5, `camera_config`,
+  Isaac Sim 5.1), `close()` did not return within 180 s, so `clear_instance()` is never reached
+  and the next `create_eval_env` raises `RuntimeError: Simulation context already exists`. So a
+  task switch inside a run is not viable (upstream `eval_policy.sh` is one-task-per-process for the
+  same reason). `scripts/run_robodojo_protocol.sh` drives one `vla-eval run` per task.
 - **`utils` namespace collision.** RoboDojo and XPolicyLab both ship a top-level `utils` package,
   and XPolicyLab's `load_file` is a subset (no `load_object_metadata` / `load_desc_info` /
   `load_pkl`). The image bakes `PYTHONPATH=/workspace/RoboDojo`, so a naive skip-if-present
