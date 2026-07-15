@@ -114,6 +114,7 @@ class RoboDojoBenchmark(StepBenchmark):
         self._current_task_name = ""
         self._layout_cursor = 0
         self._current_layout_id = -1
+        self._recorder: EpisodeRecorder = NullEpisodeRecorder()
 
     # -----------------------------------------------------------------
     # Isaac app + env construction
@@ -224,7 +225,7 @@ class RoboDojoBenchmark(StepBenchmark):
         info = env.robot_action_dim_info
         actual_dims = tuple(dim for pair in zip(info["arm_dim"], info["ee_dim"]) for dim in pair)
         if actual_dims != ACTION_DIMS:
-            env.close()
+            self._bounded_close(env)
             raise RuntimeError(f"RoboDojo embodiment reports action dims {actual_dims}, expected {ACTION_DIMS}")
         logger.info(
             "RoboDojo env built: task=%s step_lim=%s native_eval_num=%s layout_group=%s",
@@ -370,14 +371,14 @@ class RoboDojoBenchmark(StepBenchmark):
         return np.ascontiguousarray(array[..., :3])
 
     def _extract_frame(self, raw_obs: Any) -> np.ndarray | None:
-        vision = raw_obs.get("vision", {}) if isinstance(raw_obs, dict) else {}
+        vision = (raw_obs.get("vision") or {}) if isinstance(raw_obs, dict) else {}
         for camera in vision.values():
             if isinstance(camera, dict) and "color" in camera:
                 return self._to_rgb(camera["color"])
         return None
 
     def make_obs(self, raw_obs: Any, task: Task) -> Observation:
-        vision = raw_obs.get("vision", {})
+        vision = raw_obs.get("vision") or {}
         camera_names = self._camera_names or list(vision)
         images: dict[str, np.ndarray] = {}
         for name in camera_names:

@@ -148,7 +148,7 @@ class RoboDojoPi05ModelServer(PredictModelServer):
         return {"images": IMAGE_RGB, "state": RAW, "language": LANGUAGE}
 
     def predict(self, obs: Observation, ctx: SessionContext) -> Action:
-        images_in = obs.get("images", {})
+        images_in = obs.get("images") or {}
         images: dict[str, np.ndarray] = {}
         for target, sources in _CAMERA_MAP.items():
             source = next((s for s in sources if s in images_in), None)

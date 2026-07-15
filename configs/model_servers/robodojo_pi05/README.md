@@ -32,7 +32,11 @@ them matched preserves the exact upstream deploy path).
 
 ```bash
 vla-eval serve -c configs/model_servers/robodojo_pi05/pi05.yaml
-vla-eval run   -c configs/benchmarks/robodojo/eval.yaml
+# One smoke task:
+vla-eval run  -c configs/benchmarks/robodojo/smoke_test.yaml
+# Full protocol (one process per task — Isaac's SimulationContext is process-global,
+# so a single `vla-eval run` on eval.yaml would only complete the first task):
+scripts/run_robodojo_protocol.sh
 ```
 
 Input contract mirrors XPolicyLab `policy/Pi_05/model.py`: three CHW uint8

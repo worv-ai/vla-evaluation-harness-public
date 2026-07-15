@@ -41,7 +41,7 @@ if ! python3 - "$CONFIG" "$TMPDIR_CFG" > "${TMPDIR_CFG}/rows.tsv" <<'EOF'
 import copy, sys, yaml
 
 config_path, out_dir = sys.argv[1], sys.argv[2]
-cfg = yaml.safe_load(open(config_path))
+cfg = yaml.safe_load(open(config_path, encoding="utf-8")) or {}
 for entry in cfg.get("benchmarks", []):
     for task in entry.get("params", {}).get("tasks", []):
         single = copy.deepcopy(cfg)
@@ -49,7 +49,7 @@ for entry in cfg.get("benchmarks", []):
         one["params"]["tasks"] = [task]
         single["benchmarks"] = [one]
         path = f"{out_dir}/{task}.yaml"
-        yaml.safe_dump(single, open(path, "w"), sort_keys=False)
+        yaml.safe_dump(single, open(path, "w", encoding="utf-8"), sort_keys=False)
         print(f"{task}\t{entry.get('episodes_per_task', 50)}\t{path}")
 EOF
 then
