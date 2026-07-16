@@ -25,8 +25,9 @@ Reported column is the paper's 3-seed mean.
 | Open | — | 1.98 / 1.67% | Not run |
 | **Average** | — | **11.41 / 6.91%** | — |
 
-The reproduced Memory figure counts the two Isaac-crash-incomplete tasks (`press_by_number`,
-`swap_blocks`) as 0; over the four clean tasks the mean is 9.6 / 8.4%. Per-task breakdown below.
+The reproduced Memory figure counts the two layout-blocked tasks (`press_by_number`,
+`swap_blocks`; upstream bug, see Known gaps) as 0; over the four tasks that build the mean is
+9.6 / 8.3%. Per-task breakdown below.
 
 A probe also produced a real success on `classify_objects` (Open dimension: score 1.0, terminated
 early at 774/1100 steps), with the recorded video showing purposeful bimanual sorting. The
@@ -51,9 +52,10 @@ end to end.
 - Server: `configs/model_servers/robodojo_pi05/pi05.yaml` — OpenPI direct inference through
   XPolicyLab's openpi fork (which carries the RoboDojo train configs), reproducing the upstream
   input contract (3 CHW cameras, 14-D packed qpos, instruction prompt, open-loop action chunk).
-- Deviation from the published protocol: one training seed (0) instead of three, so no std is
-  reported. Everything else (layout groups, episode counts, step limits, metrics) follows the
-  official protocol.
+- Deviations from the published protocol: one training seed (0) instead of three (so no std),
+  and the partial run below used 15 of the protocol's 50 episodes per task. Everything else
+  (layout groups, step limits, metrics) follows the official protocol; `eval.yaml` encodes the
+  full 50-episode counts.
 
 ### Memory dimension — reproduced (per task)
 
@@ -65,14 +67,14 @@ end to end.
 | `match_and_pick_from_conveyor` | 15 | 6.7 | 6.7% |
 | `swap_T` | 15 | 0.0 | 0.0% |
 | `imitate_sorting_sequence` | 15 | 0.0 | 0.0% |
-| `press_by_number` | — | crash | — |
-| `swap_blocks` | — | crash | — |
-| **Mean (6 tasks, crash = 0)** | | **6.4** | **5.6%** |
+| `press_by_number` | — | blocked | — |
+| `swap_blocks` | — | blocked | — |
+| **Mean (6 tasks, blocked = 0)** | | **6.4** | **5.6%** |
 
 Episode counts are 15/50: a pipeline validation, not the full statistical protocol. `press_by_number`
 and `swap_blocks` fail deterministically at layout build (every layout raises in
 `check_layout_stability`; see Known gaps), yielding zero valid episodes; they are counted as 0 in the
-mean. The four tasks that build average 9.6 / 8.4%.
+mean. The four tasks that build average 9.6 / 8.3%.
 
 ## Integration findings (validated empirically)
 

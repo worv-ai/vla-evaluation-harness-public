@@ -171,7 +171,7 @@ Sharding and batching multiply together (DB-CogACT 7B, LIBERO Spatial, 1× H100-
 
 ## Docker Images
 
-All benchmark environments are packaged as standalone Docker images based on `base`.
+All benchmark environments are packaged as standalone Docker images, based on `base` unless noted.
 
 | Image | Size | Benchmark | Python | Base |
 |-------|------|-----------|--------|------|
