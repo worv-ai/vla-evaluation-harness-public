@@ -9,11 +9,29 @@
 
 **Integration:** ✅ Benchmark + configs + Docker recipe + smoke pass (echo server, result JSON verified).
 **Trained-VLA reproduction:** 🚧 π₀.₅ (officially released leaderboard checkpoint, seed 0), Memory
-dimension (6 tasks × 50 episodes) — run in progress.
+dimension only, partial (see below). The other four dimensions use the same machinery but were not run.
 
-A probe already produced a real success on `classify_objects` (score 1.0, terminated early at
-774/1100 steps), with the recorded video showing purposeful bimanual sorting — the observation
-mapping, chunked inference, action encoding, and native reward path are all exercised end to end.
+### Results Summary
+
+Each cell is `score / success-rate`, both ×100 (paper convention). Reproduced column is π₀.₅ seed 0;
+Reported column is the paper's 3-seed mean.
+
+| Dimension | Reproduced | Reported | Status |
+|---|:--:|:--:|---|
+| Memory | 6.4 / 5.6% | 5.78 / 4.56% | Partial: 4/6 tasks, 15/50 ep |
+| Generalization | — | 13.37 / 8.17% | Not run |
+| Precision | — | 12.40 / 5.50% | Not run |
+| Long-Horizon | — | 23.54 / 14.67% | Not run |
+| Open | — | 1.98 / 1.67% | Not run |
+| **Average** | — | **11.41 / 6.91%** | — |
+
+The reproduced Memory figure counts the two Isaac-crash-incomplete tasks (`press_by_number`,
+`swap_blocks`) as 0; over the four clean tasks the mean is 9.6 / 8.4%. Per-task breakdown below.
+
+A probe also produced a real success on `classify_objects` (Open dimension: score 1.0, terminated
+early at 774/1100 steps), with the recorded video showing purposeful bimanual sorting. The
+observation mapping, chunked inference, action encoding, and native reward path are all exercised
+end to end.
 
 ## Published protocol (leaderboard freeze 2026-07-03)
 
@@ -22,9 +40,8 @@ mapping, chunked inference, action encoding, and native reward path are all exer
   dimension means (not the per-task mean).
 - Metrics: `success` (binary, native reward manager) and `score` (1.0 on success, else the task's
   partial progress). Both are reported ×100.
-- π₀.₅ reference row (score / SR, 3-seed mean): Generalization 13.37 / 8.17%, Precision
-  12.40 / 5.50%, Long-Horizon 23.54 / 14.67%, **Memory 5.78 / 4.56%**, Open 1.98 / 1.67%,
-  Average 11.41 / 6.91%. (Appendix K: fine-tuned from `pi05_base`, batch 256, 60K steps.)
+- π₀.₅ reference numbers are in the Results Summary above (Appendix K: fine-tuned from `pi05_base`,
+  batch 256, 60K steps, 3-seed mean).
 
 ## Reproduction setup
 
@@ -37,6 +54,25 @@ mapping, chunked inference, action encoding, and native reward path are all exer
 - Deviation from the published protocol: one training seed (0) instead of three, so no std is
   reported. Everything else (layout groups, episode counts, step limits, metrics) follows the
   official protocol.
+
+### Memory dimension — reproduced (per task)
+
+π₀.₅, seed 0. Scores ×100.
+
+| Task | Episodes | Score | SR |
+|---|--:|--:|--:|
+| `cover_blocks` | 15 | 31.7 | 26.7% |
+| `match_and_pick_from_conveyor` | 15 | 6.7 | 6.7% |
+| `swap_T` | 15 | 0.0 | 0.0% |
+| `imitate_sorting_sequence` | 15 | 0.0 | 0.0% |
+| `press_by_number` | — | crash | — |
+| `swap_blocks` | — | crash | — |
+| **Mean (6 tasks, crash = 0)** | | **6.4** | **5.6%** |
+
+Episode counts are 15/50: a pipeline validation, not the full statistical protocol. `press_by_number`
+and `swap_blocks` fail deterministically at layout build (every layout raises in
+`check_layout_stability`; see Known gaps), yielding zero valid episodes; they are counted as 0 in the
+mean. The four tasks that build average 9.6 / 8.4%.
 
 ## Integration findings (validated empirically)
 
@@ -52,8 +88,9 @@ mapping, chunked inference, action encoding, and native reward path are all exer
   `load_pkl`). The image bakes `PYTHONPATH=/workspace/RoboDojo`, so a naive skip-if-present
   `sys.path` insert leaves the RoboDojo root *behind* XPolicyLab and layout loading dies with a
   confusing `NameError`. The adapter force-repositions both roots and verifies the resolution.
-- **Bad layouts are skipped, not counted.** Some published layouts fail to build or settle
-  (e.g. `press_by_number` layouts 1–3). The groups ship 55–65 layouts for 50 counted episodes;
+- **Bad layouts are skipped, not counted.** Some published layouts fail to build or settle. The
+  adapter skips them, but when *every* layout in a group fails the group is exhausted with zero
+  episodes (`press_by_number`, `swap_blocks`; see Known gaps). Groups ship 55–65 layouts for 50 counted episodes;
   the adapter consumes them in order and skips failures, recording each episode's `layout_id`.
   Never `close()` the env to recover: teardown destroys the cameras and the next `reset()` dies
   in `init_cameras`.
@@ -89,10 +126,15 @@ mapping, chunked inference, action encoding, and native reward path are all exer
   (`imitate_sorting_sequence`, `make_kong`, `play_tic_tac_toe`) can mark an episode "unstable"
   when the scripted Franka move fails; upstream *excludes* those from the denominator, but
   vla-eval's collector counts every episode, so they score as failures here (slightly pessimistic).
-- **Isaac Sim crashes are unrecoverable mid-task.** Some tasks (e.g. `press_by_number`,
-  `swap_blocks`) occasionally hit an Isaac breakpad crash that takes down the process; the task's
-  aggregate is then incomplete and must be re-run. `run_robodojo_protocol.sh` runs one process per
-  task, so a crash is isolated to that task.
+- **`press_by_number` and `swap_blocks` fail deterministically at layout build.** Every layout in
+  both groups (all 65 / all 55) raises in RoboDojo's `check_layout_stability` (`layout_manager.py:430`:
+  `get_instance_pose` → `obj._get_object_transform()` on a `None` instance), so the adapter exhausts
+  the group with zero valid episodes. This is upstream/asset-side (a layout references a scene
+  instance that is never created), not a flaky crash, so re-running does not help; it needs an
+  upstream fix. The other four Memory tasks build fine.
+- **Isaac Sim process crashes are unrecoverable mid-task.** A run can also hit a breakpad crash that
+  takes down the process; the aggregate is then incomplete. `run_robodojo_protocol.sh` runs one
+  process per task, so any crash is isolated to that task.
 - Only the Memory dimension is reproduced so far; the other four dimensions use the same
   machinery and configs (`configs/benchmarks/robodojo/eval.yaml` covers all 42 tasks).
 
