@@ -15,6 +15,7 @@ import numpy as np
 import pytest
 import websockets.exceptions
 
+from vla_eval.exceptions import HardwareFaultError
 from vla_eval.orchestrator import Orchestrator
 
 from tests.conftest import BrokenTracker, RecordingTracker, StubBenchmark
@@ -50,6 +51,55 @@ async def test_orchestrator_runs_to_completion(echo_server, tmp_path):
     assert len(result["tasks"]) == 2
     assert "partial" not in result
     assert list(tmp_path.glob("*.sqlite")) == []
+
+
+@pytest.mark.anyio
+async def test_orchestrator_aborts_on_hardware_fault(echo_server, tmp_path):
+    """A faulted embodiment aborts the benchmark instead of failing every episode.
+
+    Per-episode isolation would replay the identical fault across all remaining
+    episodes and report 0% — a fabricated score for a robot that never moved.
+    """
+
+    class FaultingBenchmark(StubBenchmark):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            self.resets = 0
+
+        def reset(self, task):
+            self.resets += 1
+            if self.resets > 1:
+                raise HardwareFaultError("eval_01: driver.connect failed — Joint limit exceeded")
+            return super().reset(task)
+
+    config = {
+        "server": {"url": echo_server},
+        "output_dir": str(tmp_path),
+        "benchmarks": [
+            {
+                "benchmark": "tests.conftest:StubBenchmark",
+                "name": "fault_test",
+                "episodes_per_task": 1,
+                "max_steps": 50,
+                "params": {"done_at_step": 3, "num_tasks": 5},
+            }
+        ],
+    }
+
+    with patch(
+        "vla_eval.orchestrator.resolve_import_string",
+        return_value=FaultingBenchmark,
+    ):
+        orchestrator = Orchestrator(config, no_save=True)
+        results = await orchestrator.run()
+
+    assert len(results) == 1
+    assert results[0].get("partial") is True
+    # Episode 1 ran, episode 2 faulted and aborted — the other 3 never started.
+    episodes = [ep for t in results[0]["tasks"] for ep in t["episodes"]]
+    assert len(episodes) == 2
+    assert episodes[-1]["failure_reason"] == "hardware_fault"
+    assert "Joint limit exceeded" in episodes[-1]["failure_detail"]
 
 
 @pytest.mark.anyio
@@ -433,3 +483,101 @@ async def test_orchestrator_fails_fast_on_bad_filename_template(echo_server, tmp
         orch = Orchestrator(config, eval_id="ev-bad", no_save=False)
         with pytest.raises(ValueError, match="filename_stem"):
             await orch.run()
+
+
+# -- server/benchmark contract ------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_config_contradicting_server_requirements_fails_at_connect(tmp_path):
+    """A server asking for an observation the config refuses is fatal, not an override.
+
+    2026-07-15: mme_vla served with use_history=true asked for video_history; the
+    config set send_video_history=false. The config silently won, every
+    observation raised server-side, and ten 50s episodes were recorded as model
+    FAILUREs with the arm motionless. Refuse before a scene is staged.
+    """
+
+    class NeedsHistoryConnection:
+        def __init__(self, url, **kwargs):
+            self.url = url
+            self.server_info = {"observation_params": {"send_video_history": True}}
+
+        async def connect(self, **kwargs):
+            pass
+
+        async def close(self):
+            self.closed = True
+
+    class HistoryBenchmark(StubBenchmark):
+        def __init__(self, send_video_history: bool = False, **kw):
+            super().__init__(**kw)
+            self.send_video_history = send_video_history
+
+    config = {
+        "server": {"url": "ws://fake:9999"},
+        "output_dir": str(tmp_path),
+        "benchmarks": [
+            {
+                "benchmark": "tests.conftest:StubBenchmark",
+                "name": "conflict",
+                "params": {"send_video_history": False},  # contradicts the server
+            }
+        ],
+    }
+
+    with patch("vla_eval.orchestrator.resolve_import_string", return_value=HistoryBenchmark), patch(
+        "vla_eval.orchestrator.Connection", NeedsHistoryConnection
+    ):
+        with pytest.raises(ValueError, match="contradicts what the model server requires"):
+            await Orchestrator(config, no_save=True).run()
+
+
+@pytest.mark.anyio
+async def test_server_requirement_matching_the_config_is_fine(tmp_path):
+    """Agreement must not trip the conflict check."""
+
+    class NeedsHistoryConnection:
+        def __init__(self, url, **kwargs):
+            self.url = url
+            self.server_info = {"observation_params": {"send_video_history": True}}
+
+        async def connect(self, **kwargs):
+            pass
+
+        async def close(self):
+            pass
+
+        async def start_episode(self, cfg):
+            pass
+
+        async def end_episode(self, result):
+            pass
+
+        async def act(self, obs):
+            return {"actions": np.ones(7, dtype=np.float32)}
+
+    class HistoryBenchmark(StubBenchmark):
+        def __init__(self, send_video_history: bool = False, **kw):
+            super().__init__(**kw)
+            self.send_video_history = send_video_history
+
+    config = {
+        "server": {"url": "ws://fake:9999"},
+        "output_dir": str(tmp_path),
+        "benchmarks": [
+            {
+                "benchmark": "tests.conftest:StubBenchmark",
+                "name": "agree",
+                "episodes_per_task": 1,
+                "max_steps": 5,
+                "params": {"send_video_history": True, "done_at_step": 2, "num_tasks": 1},
+            }
+        ],
+    }
+
+    with patch("vla_eval.orchestrator.resolve_import_string", return_value=HistoryBenchmark), patch(
+        "vla_eval.orchestrator.Connection", NeedsHistoryConnection
+    ):
+        results = await Orchestrator(config, no_save=True).run()
+    assert len(results) == 1

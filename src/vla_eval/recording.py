@@ -61,6 +61,7 @@ CREATE TABLE IF NOT EXISTS episode_results (
     episode_id      INTEGER,
     status          TEXT,            -- 'success' | 'fail' | 'error'
     metrics         TEXT,            -- JSON
+    rt_metrics      TEXT,            -- JSON: live-mode pacing (tick_hz, stale_action_ratio, loop_time_*)
     steps           INTEGER,
     elapsed_sec     REAL,
     context         TEXT,            -- JSON
@@ -241,11 +242,31 @@ class RecordingStore:
         for attempt in range(40):
             try:
                 self._conn.executescript(SCHEMA_SQL)
-                return
+                break
             except sqlite3.OperationalError as exc:
                 if "locked" not in str(exc).lower() or attempt == 39:
                     raise
                 time.sleep(min(1.0, 0.1 * (attempt + 1)))
+        self._migrate_columns()
+
+    def _migrate_columns(self) -> None:
+        """Add columns introduced after a DB was first created.
+
+        ``CREATE TABLE IF NOT EXISTS`` is a no-op on an existing file, so a DB
+        written by an older harness keeps the old column set and every later
+        write raises "no column named ...". Adding them here keeps re-running a
+        shard against an existing recording working across a version bump.
+        """
+        for table, column, decl in (("episode_results", "rt_metrics", "TEXT"),):
+            existing = {row[1] for row in self._conn.execute(f"PRAGMA table_info({table})")}
+            if column in existing:
+                continue
+            try:
+                self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+            except sqlite3.OperationalError as exc:
+                # A concurrent shard may have added it between the check and here.
+                if "duplicate column" not in str(exc).lower():
+                    raise
 
     def close(self) -> None:
         self._conn.close()
@@ -274,16 +295,17 @@ class RecordingStore:
         jsonl_path: str,
         failure_reason: str | None,
         failure_detail: str | None,
+        rt_metrics: dict[str, Any] | None = None,
     ) -> None:
         """Insert-or-replace; safe under orchestrator retry with the same (sid, eid)."""
         with self._conn:
             self._conn.execute(
                 """
                 INSERT OR REPLACE INTO episode_results
-                  (sid, eid, eval_id, task_name, episode_id, status, metrics,
+                  (sid, eid, eval_id, task_name, episode_id, status, metrics, rt_metrics,
                    steps, elapsed_sec, context, jsonl_path,
                    failure_reason, failure_detail)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     sid,
@@ -293,6 +315,7 @@ class RecordingStore:
                     episode_id,
                     status,
                     json.dumps(metrics, default=_json_default),
+                    json.dumps(rt_metrics, default=_json_default) if rt_metrics else None,
                     steps,
                     elapsed_sec,
                     json.dumps(context, default=_json_default),
@@ -442,6 +465,7 @@ class EpisodeRecorder:
         elapsed_sec: float = 0.0,
         failure_reason: str | None = None,
         failure_detail: str | None = None,
+        rt_metrics: dict[str, Any] | None = None,
     ) -> None:
         if self._closed:
             return
@@ -486,6 +510,7 @@ class EpisodeRecorder:
                 episode_id=episode_id,
                 status=status,
                 metrics=metrics,
+                rt_metrics=rt_metrics,
                 steps=steps,
                 elapsed_sec=elapsed_sec,
                 context=self._context,
@@ -542,6 +567,7 @@ class NullEpisodeRecorder(EpisodeRecorder):
         elapsed_sec: float = 0.0,
         failure_reason: str | None = None,
         failure_detail: str | None = None,
+        rt_metrics: dict[str, Any] | None = None,
     ) -> None:
         pass
 

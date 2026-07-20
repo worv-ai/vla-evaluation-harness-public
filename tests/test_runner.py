@@ -457,3 +457,130 @@ async def test_predict_serialised_under_concurrent_clients(free_port):
             await c.close()
     finally:
         await stop_server(task)
+
+
+# -- loop-cost instrumentation -------------------------------------------------
+#
+# A slow loop and a slow model both read as "it ran slow" but are different
+# failures. These pin the split, because the harness previously timed only
+# apply_action and therefore could not see its own dominant cost.
+
+
+class SlowObsBenchmark(StubBenchmark):
+    """Cost sits in get_observation, not apply_action — like sensor reads and
+    image encoding, where the real cost actually lives."""
+
+    def __init__(self, obs_delay: float = 0.0, **kw: Any) -> None:
+        super().__init__(**kw)
+        self.obs_delay = obs_delay
+
+    async def get_observation(self) -> dict:
+        await anyio.sleep(self.obs_delay)
+        return await super().get_observation()
+
+
+@pytest.mark.anyio
+async def test_rt_metrics_separate_loop_cost_from_apply_action(echo_server):
+    """loop_time must capture cost that step_time (apply_action) cannot see."""
+    benchmark = SlowObsBenchmark(obs_delay=0.02, done_at_step=1000)
+    runner = LiveEpisodeRunner(hz=30.0)  # 33ms period; 20ms of obs alone
+
+    async with Connection(echo_server) as conn:
+        result = await runner.run_episode(benchmark, {"name": "t"}, conn, max_steps=15)
+
+    rt = result["rt_metrics"]
+    assert rt["loop_time_mean"] >= 0.02, "loop_time missed the get_observation cost"
+    assert rt["step_time_mean"] < 0.01, "apply_action was cheap — the old metric saw nothing"
+    assert rt["loop_time_mean"] > rt["step_time_mean"] * 2
+
+
+@pytest.mark.anyio
+async def test_tick_hz_reports_the_rate_the_robot_actually_got(echo_server):
+    """tick_hz is the loop's real rate, distinct from the requested hz."""
+    benchmark = SlowObsBenchmark(obs_delay=0.05, done_at_step=1000)
+    runner = LiveEpisodeRunner(hz=30.0)  # asks 30, obs alone forces <=20
+
+    async with Connection(echo_server) as conn:
+        result = await runner.run_episode(benchmark, {"name": "t"}, conn, max_steps=10)
+
+    rt = result["rt_metrics"]
+    assert rt["tick_hz"] < 25.0, f"tick_hz should expose the shortfall, got {rt['tick_hz']}"
+    assert rt["tick_hz"] > 5.0
+
+
+@pytest.mark.anyio
+async def test_slow_loop_warns_and_points_past_apply_action(echo_server, caplog):
+    benchmark = SlowObsBenchmark(obs_delay=0.05, done_at_step=1000)
+    runner = LiveEpisodeRunner(hz=30.0)
+
+    with caplog.at_level("WARNING"):
+        async with Connection(echo_server) as conn:
+            await runner.run_episode(benchmark, {"name": "t"}, conn, max_steps=8)
+
+    warned = "\n".join(r.getMessage() for r in caplog.records)
+    assert "exceeds the step period" in warned
+    # The warning has to name where to look, or it repeats 2026-07-15: a loop
+    # 4x under target for days while apply_action looked fine.
+    assert "image encoding" in warned and "image_format" in warned
+
+
+@pytest.mark.anyio
+async def test_fast_loop_does_not_warn(echo_server, caplog):
+    benchmark = SlowObsBenchmark(obs_delay=0.0, done_at_step=1000)
+    runner = LiveEpisodeRunner(hz=10.0)
+
+    with caplog.at_level("WARNING"):
+        async with Connection(echo_server) as conn:
+            result = await runner.run_episode(benchmark, {"name": "t"}, conn, max_steps=8)
+
+    assert "exceeds the step period" not in "\n".join(r.message for r in caplog.records)
+    assert result["rt_metrics"]["tick_hz"] == pytest.approx(10.0, rel=0.35)
+
+
+class MuteServerConnection:
+    """Accepts observations, never sends an action back — a server erroring on
+    every observation looks exactly like this from the runner's side."""
+
+    def __init__(self) -> None:
+        self.server_info: dict = {}
+        self._cb = None
+
+    def on_action(self, cb) -> None:
+        self._cb = cb
+
+    async def start_listener(self) -> None: ...
+    async def stop_listener(self) -> None: ...
+    async def start_episode(self, payload) -> None: ...
+    async def end_episode(self, result) -> None: ...
+    async def send_observation(self, obs) -> None: ...
+
+
+@pytest.mark.anyio
+async def test_episode_with_zero_actions_is_not_scored():
+    """No actions all episode = nothing evaluated; refuse to call it a failure.
+
+    2026-07-15: mme_vla raised on every observation for 1459 straight steps. The
+    arm held home the whole time and the episode was recorded as a model FAIL —
+    indistinguishable from a policy that tried and missed.
+    """
+    from vla_eval.exceptions import NoActionsError
+
+    benchmark = StubBenchmark(done_at_step=10_000)
+    runner = LiveEpisodeRunner(hz=200.0)
+
+    with pytest.raises(NoActionsError, match="no actions for the entire episode"):
+        await runner.run_episode(benchmark, {"name": "t"}, MuteServerConnection(), max_steps=12)
+
+
+@pytest.mark.anyio
+async def test_episode_with_even_one_action_is_still_scored(echo_server):
+    """The guard must not fire on a merely slow server — that's the deployment
+    gap the harness exists to measure, and it is a real result."""
+    benchmark = StubBenchmark(done_at_step=6)
+    runner = LiveEpisodeRunner(hz=30.0)
+
+    async with Connection(echo_server) as conn:
+        result = await runner.run_episode(benchmark, {"name": "t"}, conn, max_steps=20)
+
+    assert result["rt_metrics"]["update_count"] >= 1
+    assert "metrics" in result

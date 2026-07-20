@@ -17,6 +17,7 @@ import websockets
 from vla_eval import __version__, watchdog
 from vla_eval.config import EvalConfig, ServerConfig
 from vla_eval.connection import Connection
+from vla_eval.exceptions import HardwareFaultError, NoActionsError, TimingContractError
 from vla_eval.recording import (
     DEFAULT_FILENAME_STEM,
     EpisodeRecorder,
@@ -26,6 +27,7 @@ from vla_eval.recording import (
     db_path_for_eval,
     serializable_task_kwargs,
 )
+from vla_eval.protocol.numpy_codec import set_image_format
 from vla_eval.registry import resolve_import_string
 from vla_eval.specs import DimSpec, check_specs
 from vla_eval.results.collector import EpisodeResult, ResultCollector
@@ -56,6 +58,12 @@ class Orchestrator:
     Error recovery:
         - ``ConnectionError`` (server unreachable after retries): abort the
           benchmark, return partial.
+        - ``HardwareFaultError`` (embodiment unusable): abort the benchmark,
+          return partial.
+        - ``NoActionsError`` (server answered nothing all episode): record the
+          episode as an error rather than a scored failure, continue.
+        - ``TimingContractError`` (paced live loop never held its target rate):
+          record the episode as an error rather than a scored failure, continue.
         - ``ConnectionClosed`` / ``TimeoutError``: mark episode failed,
           reconnect, continue.
         - Other exceptions: mark episode failed, continue.
@@ -72,6 +80,9 @@ class Orchestrator:
     ) -> None:
         self.config = config
         self._server_cfg = ServerConfig.from_dict(config.get("server"))
+        # The codec's format is module-global (it hooks encode_ndarray), so set
+        # it once here rather than threading it through every send site.
+        set_image_format(self._server_cfg.image_format)
         self.shard_id = shard_id
         self.num_shards = num_shards
         self.no_save = no_save
@@ -167,10 +178,31 @@ class Orchestrator:
         obs_params = conn.server_info.get("observation_params", {})
         merged_params = dict(cfg.params)
         if obs_params:
+            conflicts = []
             for key, value in obs_params.items():
-                if key not in merged_params and key in sig.parameters:
+                if key not in sig.parameters:
+                    continue
+                if key not in merged_params:
                     merged_params[key] = value
                     logger.info("Auto-configured from model server: %s=%s", key, value)
+                elif merged_params[key] != value:
+                    conflicts.append(f"{key}: server needs {value!r}, config sets {merged_params[key]!r}")
+            # The config used to win silently here. It cannot: observation_params
+            # is the server stating what it needs to run at all, not a default to
+            # be overridden. On 2026-07-15 a server asking for video_history met a
+            # config refusing to send it, and the run produced ten 50-second
+            # episodes in which every observation raised server-side, zero actions
+            # came back, and the arm sat still — all recorded as model FAILUREs.
+            # Refuse before the operator stages a scene.
+            if conflicts:
+                await conn.close()
+                raise ValueError(
+                    f"Benchmark {name} contradicts what the model server requires: "
+                    + "; ".join(conflicts)
+                    + ". The server cannot run without these; either serve a variant that does not "
+                    "need them (e.g. mme_vla use_history=false for a task with no demo clip) or "
+                    "change the benchmark config to supply them."
+                )
 
         try:
             benchmark = benchmark_cls(**merged_params)
@@ -230,6 +262,7 @@ class Orchestrator:
                 hz=cfg.hz,
                 clock=Clock(pace=1.0 if cfg.paced else math.inf),
                 wait_first_action=cfg.wait_first_action,
+                min_tick_hz_ratio=cfg.min_tick_hz_ratio,
             )
         else:
             runner = SyncEpisodeRunner()
@@ -265,13 +298,19 @@ class Orchestrator:
         if rec_cfg and work_items:
             self._validate_filename_stem(rec_cfg, work_items[0][0])
 
-        def record_failure(reason: str, detail: str) -> dict[str, Any]:
+        def record_failure(reason: str, detail: str, exc: BaseException | None = None) -> dict[str, Any]:
             fail: dict[str, Any] = {
                 "episode_id": ep,
                 "metrics": {"success": False},
                 "failure_reason": reason,
                 "failure_detail": detail,
             }
+            # The live runner attaches the pacing metrics to the errors it raises:
+            # they are the evidence for *why* the episode failed, so they have to
+            # survive the failure path, not just the scored one.
+            rt = getattr(exc, "rt_metrics", None)
+            if rt:
+                fail["rt_metrics"] = rt
             collector.record(task_name, cast(EpisodeResult, fail))
             self._update_progress(item_idx + 1, total_items, collector.error_count)
             return fail
@@ -280,6 +319,7 @@ class Orchestrator:
             recorder.close(
                 status=status,
                 metrics=ep_dict.get("metrics") or {},
+                rt_metrics=ep_dict.get("rt_metrics"),
                 task_name=task_name,
                 episode_id=int(ep_dict.get("episode_id", ep)),
                 steps=int(ep_dict.get("steps", 0)),
@@ -331,6 +371,55 @@ class Orchestrator:
                         ep,
                     )
                     fail = record_failure("server_unreachable", str(exc))
+                    close_recorder(fail, "error")
+                    return self._finalize_benchmark(
+                        collector, cfg, safe_name, partial=True, server_info=conn.server_info
+                    )
+                except NoActionsError as exc:
+                    # Not a model failure: nothing was evaluated. Record it as
+                    # such and keep going — the cause is nearly always the
+                    # server's config, so the next episode will say the same
+                    # thing, but a transient shouldn't end the run.
+                    logger.error(
+                        "  [%d/%d] %s ep%d: no actions from the server — not scored: %s",
+                        item_idx + 1,
+                        total_items,
+                        task_name,
+                        ep,
+                        exc,
+                    )
+                    fail = record_failure("no_actions", str(exc), exc)
+                    close_recorder(fail, "error")
+                    continue
+                except TimingContractError as exc:
+                    # Same shape as NoActionsError: the episode ran, but the
+                    # harness — not the model — decided the outcome, so scoring it
+                    # would file a harness bug as a model result. The cause is
+                    # per-setup and will repeat; let it repeat visibly.
+                    logger.error(
+                        "  [%d/%d] %s ep%d: target rate not held — not scored: %s",
+                        item_idx + 1,
+                        total_items,
+                        task_name,
+                        ep,
+                        exc,
+                    )
+                    fail = record_failure("timing_contract", str(exc), exc)
+                    close_recorder(fail, "error")
+                    continue
+                except HardwareFaultError as exc:
+                    # Per-episode isolation is wrong here: the embodiment is
+                    # broken, so every remaining episode would fail identically
+                    # and report 0% as if the model had been evaluated.
+                    logger.error(
+                        "  [%d/%d] %s ep%d: hardware fault, aborting benchmark: %s",
+                        item_idx + 1,
+                        total_items,
+                        task_name,
+                        ep,
+                        exc,
+                    )
+                    fail = record_failure("hardware_fault", str(exc))
                     close_recorder(fail, "error")
                     return self._finalize_benchmark(
                         collector, cfg, safe_name, partial=True, server_info=conn.server_info

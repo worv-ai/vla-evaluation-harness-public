@@ -46,18 +46,33 @@ class ServerConfig:
     Attributes:
         url: WebSocket URL of the model server.
         timeout: Seconds to wait for each server response in ``Connection.act()``.
+        image_format: Wire encoding for HWC uint8 observation images —
+            ``"png"`` (lossless), ``"jpeg"`` (lossy, ~50x faster to encode and
+            several times smaller), or ``"raw"`` (no encode, largest payload).
+
+            This is a real-time knob, not a preference. Encoding runs inline in
+            the episode loop, so it sets a hard ceiling on control rate: at
+            640x480x2 cameras, png costs ~81 ms/tick (~12 Hz max) against
+            jpeg's ~1.6 ms. A live benchmark asking for 30 Hz cannot reach it on
+            png. Lossless also buys less than it appears when the policy was
+            trained on compressed video frames.
     """
 
     url: str = "ws://localhost:8000"
     timeout: float = 30.0
+    image_format: str = "png"
 
     @classmethod
     def from_dict(cls, data: dict[str, Any] | None) -> ServerConfig:
         if not data:
             return cls()
+        fmt = data.get("image_format", cls.image_format)
+        if fmt not in ("png", "jpeg", "raw"):
+            raise ValueError(f"server.image_format must be 'png', 'jpeg', or 'raw'; got {fmt!r}")
         return cls(
             url=data.get("url", cls.url),
             timeout=float(data.get("timeout", cls.timeout)),
+            image_format=fmt,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -148,6 +163,9 @@ class EvalConfig:
     paced: bool = True
     # Wait for first action before starting step loop (sanity check: should match sync)
     wait_first_action: bool = False
+    # Fraction of `hz` a paced live loop must actually tick at for the episode to be
+    # scored; below it the episode fails as `timing_contract`. 0 disables the check.
+    min_tick_hz_ratio: float = 0.8
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> EvalConfig:
@@ -170,6 +188,7 @@ class EvalConfig:
             throughput_mode=data.get("throughput_mode", False),
             paced=_parse_paced(data),
             wait_first_action=data.get("wait_first_action", False),
+            min_tick_hz_ratio=data.get("min_tick_hz_ratio", 0.8),
         )
 
     def resolved_name(self) -> str:

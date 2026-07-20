@@ -22,9 +22,19 @@ Loads MME-VLA suite checkpoints (pi0.5 baseline + memory-augmented
 variants) and runs inference in-process.  Supports the ``video_history``
 conditioning protocol used by the RoboMME benchmark.
 
-Memory-augmented models (FrameSamp, TokenDrop, TTT, RMT) receive the
-conditioning video via ``add_buffer`` on the first observation of each
-episode.  The baseline pi0.5 model ignores video history.
+Memory-augmented models (FrameSamp, TokenDrop, TTT, RMT) carry a streaming
+memory of the episode. Their ``infer`` asserts on an empty buffer, so with
+``use_history=true`` every observation is staged and the batch since the last
+inference is handed to ``add_buffer`` right before each ``infer`` — mirroring the
+upstream rollout's ``add_observation`` / ``add_buffer`` + ``clear_buffers`` pair.
+A conditioning demo clip, for the tasks that have one, is merely the prefix of
+the first batch and sets ``exec_start_idx``; a task without one (``exec_start_idx``
+0 throughout) still works and simply remembers only its own history. The baseline
+pi0.5 model has no memory and ignores all of this.
+
+``use_history`` must match the checkpoint, not the task: the assertion lives in
+the policy, so a memory variant raises on every observation when it is served
+with ``use_history=false``, demo clip or not.
 
 The ``openpi`` PEP 723 dependency installs the RoboMME fork of OpenPI,
 which includes both the ``openpi`` and ``mme_vla_suite`` Python modules.
@@ -87,8 +97,10 @@ class MmeVlaModelServer(PredictModelServer):
         config_name: MME-VLA config — ``"pi05_baseline"`` or ``"mme_vla_suite"`` (memory variants).
         checkpoint: HuggingFace model ID or local path.  For the multi-variant repo, use
             ``Yinpei/mme_vla_suite/subdir``.
-        use_history: Enable memory lifecycle (reset + add_buffer).  Must be ``True`` for all
-            memory-augmented variants.
+        use_history: Enable the memory lifecycle (reset + streaming add_buffer). This is a
+            property of the CHECKPOINT, not the task: memory-augmented variants assert on an
+            empty buffer inside ``infer``, so they require ``True`` even for tasks with no
+            conditioning demo. Leave ``False`` only for the pi0.5 baseline.
         image_key: Key for the front camera in the OpenPI obs dict.
         wrist_image_key: Key for the wrist camera (``None`` to disable).
         state_key: Key for proprioceptive state (``None`` to disable).
@@ -125,6 +137,8 @@ class MmeVlaModelServer(PredictModelServer):
         self.state_dim = state_dim
         self.image_resolution = image_resolution
         self._state_warned = False
+        # Per-session frames staged since the last inference (see _stage_frame).
+        self._pending: dict[str, dict[str, Any]] = {}
 
         _ensure_mme_vla_suite()
 
@@ -223,30 +237,85 @@ class MmeVlaModelServer(PredictModelServer):
     # Video history → add_buffer
     # ------------------------------------------------------------------
 
-    def _process_video_history(self, obs: Observation) -> None:
-        """Convert ``video_history`` frames into the policy's memory buffer.
+    def _stage_frame(self, obs: Observation, ctx: SessionContext) -> None:
+        """Accumulate one observation into the pending memory batch.
 
-        The ``MME_VLA_Policy.add_buffer`` expects:
+        Mirrors ``EpisodeState.add_observation`` in the upstream rollout: every
+        observation is staged, and the batch accumulated since the last
+        inference is handed to ``add_buffer`` when inference next runs. Only the
+        base camera enters memory (the buffer carries ``num_views=1``); the wrist
+        image is a per-step input, not a remembered one.
+        """
+        images_dict = obs.get("images", {})
+        img_list = list(images_dict.values()) if isinstance(images_dict, dict) else []
+        if not img_list:
+            return
+        pend = self._pending.setdefault(ctx.session_id, {"images": [], "states": [], "exec_start_idx": 0})
+
+        # A demo clip, when the task has one, is the prefix of the very first
+        # batch — exactly as upstream seeds image_buffer from get_init_obs()
+        # before appending the first live frame.
+        if ctx.is_first:
+            demo = obs.get("video_history") or []
+            if demo:
+                pend["images"].extend(self._maybe_resize(np.asarray(f, dtype=np.uint8)) for f in demo)
+                pend["states"].extend(np.zeros(self.state_dim, dtype=np.float32) for _ in demo)
+                pend["exec_start_idx"] = len(demo)
+
+        pend["images"].append(self._maybe_resize(np.asarray(img_list[0], dtype=np.uint8)))
+        pend["states"].append(self._obs_state(obs).astype(np.float32))
+
+    def _flush_buffer(self, ctx: SessionContext) -> None:
+        """Hand the staged batch to the policy's memory, then clear it.
+
+        ``MME_VLA_Policy.add_buffer`` expects:
             images: ``(T, 1, H, W, 3)`` uint8 — the extra axis is ``num_views``
             state:  ``(T, state_dim)`` float32
-            exec_start_idx: int — index where execution starts (= len of demo)
+            exec_start_idx: int — index of the first execution frame
+
+        Called immediately before every inference, and the staged batch is
+        incremental: the policy advances its own ``step_idx`` by ``len(images)``,
+        so re-sending frames it already holds would corrupt the timeline. This is
+        upstream's ``add_buffer(...)`` + ``clear_buffers()`` pair.
+
+        ``exec_start_idx`` is only meaningful on the first batch — the policy
+        keeps its own copy and ignores 0 on later calls, so a task with no demo
+        (exec_start_idx 0 throughout) simply remembers its own history. That is
+        the normal case here: the real-robot task1 data was converted with
+        ``is_video_demo=False`` on every frame, so the model was trained with a
+        buffer holding nothing but the episode's own past.
         """
-        frames = obs.get("video_history", [])
-        if not frames:
+        pend = self._pending.get(ctx.session_id)
+        if not pend or not pend["images"]:
             return
-
-        resized = [self._maybe_resize(np.asarray(f, dtype=np.uint8)) for f in frames]
-        images = np.stack(resized)[:, np.newaxis]  # (T, 1, H, W, 3)
-
+        images = np.stack(pend["images"])[:, np.newaxis]  # (T, 1, H, W, 3)
         buffer_obs = {
             "images": images,
-            "state": np.zeros((len(frames), self.state_dim), dtype=np.float32),
-            "exec_start_idx": len(frames),  # execution starts after the demo
+            "state": np.stack(pend["states"]),
+            "exec_start_idx": pend["exec_start_idx"],
         }
-
         assert self._policy is not None
         self._policy.add_buffer(buffer_obs)
-        logger.debug("Added %d video history frames to memory buffer", len(frames))
+        logger.debug(
+            "add_buffer: %d frame(s), exec_start_idx=%d, session=%s",
+            len(pend["images"]),
+            pend["exec_start_idx"],
+            ctx.session_id[:8],
+        )
+        self._pending[ctx.session_id] = {"images": [], "states": [], "exec_start_idx": 0}
+
+    def _obs_state(self, obs: Observation) -> np.ndarray:
+        """Proprioceptive state, truncated to the model's width."""
+        raw_state = obs.get("states", obs.get("state"))
+        if raw_state is None:
+            return np.zeros(self.state_dim, dtype=np.float64)
+        state = np.asarray(raw_state, dtype=np.float64)
+        if state.shape[0] > self.state_dim:
+            if not self._state_warned:
+                logger.info("Truncating state from %dD to %dD", state.shape[0], self.state_dim)
+                self._state_warned = True
+            state = state[: self.state_dim]
+        return state
 
     # ------------------------------------------------------------------
     # Specs and params
@@ -278,17 +347,34 @@ class MmeVlaModelServer(PredictModelServer):
 
     async def on_episode_start(self, config: dict[str, Any], ctx: SessionContext) -> None:
         await super().on_episode_start(config, ctx)
+        self._pending.pop(ctx.session_id, None)
         if self.use_history and self._policy is not None and hasattr(self._policy, "reset"):
             self._policy.reset()
+
+    async def on_observation(self, obs: Observation, ctx: SessionContext) -> None:
+        """Stage every observation before the base class decides whether to infer.
+
+        Memory must see the episode at full rate. Inference does not run on every
+        observation — the base class serves most of them from the action chunk
+        buffer and only calls :meth:`predict` once the chunk is exhausted — so
+        staging here rather than in ``predict`` is what keeps the remembered
+        history continuous instead of subsampled to one frame per chunk. The
+        dataset builder adds one frame per step; this matches it.
+        """
+        if self.use_history:
+            self._stage_frame(obs, ctx)
+        await super().on_observation(obs, ctx)
 
     # ------------------------------------------------------------------
     # Inference
     # ------------------------------------------------------------------
 
     def predict(self, obs: Observation, ctx: SessionContext) -> Action:
-        # Handle video history on first observation
-        if self.use_history and ctx.is_first and obs.get("video_history"):
-            self._process_video_history(obs)
+        # Memory variants assert on an empty buffer inside infer(), so the staged
+        # frames must land before it — upstream pairs add_buffer with every
+        # inference, not just the first.
+        if self.use_history:
+            self._flush_buffer(ctx)
 
         # Build OpenPI observation dict
         openpi_obs: dict[str, Any] = {}
@@ -310,17 +396,7 @@ class MmeVlaModelServer(PredictModelServer):
 
         # State (truncate to model's expected dimension)
         if self.state_key:
-            raw_state = obs.get("states", obs.get("state"))
-            if raw_state is not None:
-                state = np.asarray(raw_state, dtype=np.float64)
-                if state.shape[0] > self.state_dim:
-                    if not self._state_warned:
-                        logger.info("Truncating state from %dD to %dD", state.shape[0], self.state_dim)
-                        self._state_warned = True
-                    state = state[: self.state_dim]
-                openpi_obs[self.state_key] = state
-            else:
-                openpi_obs[self.state_key] = np.zeros(self.state_dim, dtype=np.float64)
+            openpi_obs[self.state_key] = self._obs_state(obs)
 
         result = self._policy.infer(openpi_obs)
         return {"actions": result["actions"]}
