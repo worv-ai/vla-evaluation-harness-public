@@ -1,0 +1,27 @@
+# cat-balanced cross-emb eval with rollout-video recording enabled.
+# Same as gating_cat.yaml but record_video=true: the benchmark records the
+# robot0_agentview_center 3rd-person view per episode (see benchmark.py
+# _extract_frame). Videos land under output_dir as <name>_ep<NNNN>_<status>.mp4.
+server:
+  url: "ws://localhost:8000"
+  timeout: 300
+
+output_dir: "./gating_cat_rec"
+
+benchmarks:
+  - benchmark: "vla_eval.benchmarks.robocasa_dc.benchmark:RoboCasaDCBenchmark"
+    mode: sync
+    episodes_per_task: 50
+    recording:
+      record_video: true
+      record_step: false
+      filename_stem: "{name}_ep{episode_idx:04d}_{status}"
+      video_fps: 20
+    params:
+      predefined_envs_root: "${oc.env:ROBOCASA_DC_EVAL_ENVS,data/robocasa_dc/eval_envs}"
+      robocasa_eval_py: "${oc.env:ROBOCASA_DC_EVAL_PY,/path/to/SeeTraceAct/src/robocasa/eval.py}"
+      robots: PandaOmron
+      controllers: OSC_POSE
+      camera_size: 128
+      max_steps: 1000
+      tasks: ["CloseDrawer", "TurnOffSinkFaucet", "OpenDoubleDoor", "CoffeeServeMug", "PnPCounterToMicrowave"]

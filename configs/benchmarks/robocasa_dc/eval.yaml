@@ -1,0 +1,23 @@
+# RoboCasa-DC cross-embodiment eval (SeeTraceAct, arXiv 2606.02745).
+#
+# The reflex-dual model server loads the GR-1 demo per episode (obs.episode_idx = the seed);
+# this benchmark restores the predefined Panda scene from eval_envs/<task>/<seed>/ and checks
+# success. The sim deps (robosuite + the SeeTraceAct robocasa fork) live in a robocasa venv /
+# Docker image, not vla-eval's own env — run with --no-docker from that venv, or build
+# docker/Dockerfile.robocasa_dc.
+server:
+  url: "ws://localhost:8000"
+
+output_dir: "./results"
+
+benchmarks:
+  - benchmark: "vla_eval.benchmarks.robocasa_dc.benchmark:RoboCasaDCBenchmark"
+    mode: sync
+    episodes_per_task: 50
+    params:
+      predefined_envs_root: "${oc.env:ROBOCASA_DC_EVAL_ENVS,data/robocasa_dc/eval_envs}"
+      robocasa_eval_py: "${oc.env:ROBOCASA_DC_EVAL_PY,/path/to/SeeTraceAct/src/robocasa/eval.py}"
+      robots: PandaOmron
+      controllers: OSC_POSE
+      camera_size: 128
+      max_steps: 300
