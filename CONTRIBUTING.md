@@ -90,7 +90,7 @@ src/vla_eval/
 6. Add a config YAML in `configs/`
 7. Add a Dockerfile in `docker/Dockerfile.<name>`
 8. Register the name in the `BENCHMARKS` array in `docker/build.sh` and the `IMAGES` array in `docker/push.sh`
-9. Smoke-test: `vla-eval test -c configs/<name>.yaml` (runs 1 episode with an EchoModelServer; no real model or GPU needed, but requires Docker + the benchmark image)
+9. Smoke-test: `vla-eval test -c configs/<name>.yaml` (runs 1 episode with an EchoModelServer; no real model or GPU needed, but requires Docker + the benchmark image). Without Docker, `vla-eval run --runtime charliecloud` runs the same image (see docs/runtimes.md).
 
 See `benchmarks/libero/` for a complete reference implementation.
 
