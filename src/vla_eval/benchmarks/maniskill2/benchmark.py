@@ -14,7 +14,7 @@ Key details:
 from __future__ import annotations
 
 import os
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 
@@ -153,7 +153,7 @@ class ManiSkill2Benchmark(StepBenchmark):
             truncated=bool(truncated),
             success=bool(info.get("success", False)),
         )
-        return StepResult(obs=obs, reward=reward, done=done, info=info)
+        return StepResult(obs=obs, reward=float(reward), done=done, info=info)
 
     def _extract_frame(self, raw_obs: Any) -> np.ndarray | None:
         if not isinstance(raw_obs, dict):
@@ -201,7 +201,7 @@ class ManiSkill2Benchmark(StepBenchmark):
         """Extract object name from the environment for goal description."""
         try:
             assert self._env is not None
-            obj = self._env.unwrapped.obj
+            obj = cast(Any, self._env.unwrapped).obj  # ManiSkill2-specific attribute
             return " ".join(obj.name.split("_")[1:])
         except (AttributeError, IndexError):
             return "object"

@@ -227,7 +227,8 @@ class SimplerEnvBenchmark(StepBenchmark):
         import simpler_env  # noqa: F401 -- registers ManiSkill2 envs
         import gymnasium as gym
 
-        make_kwargs = {"obs_mode": "rgbd", **self.env_build_kwargs, **self._common_make_kwargs()}
+        assert self.env_name is not None, "VA path requires env_name"
+        make_kwargs: dict[str, Any] = {"obs_mode": "rgbd", **self.env_build_kwargs, **self._common_make_kwargs()}
         if self.scene_name is not None:
             make_kwargs["scene_name"] = self.scene_name
         env = gym.make(self.env_name, **make_kwargs)
