@@ -10,7 +10,8 @@
 # Hardware requirements: NVIDIA GPU (RTX 2070+), 8 GB+ VRAM, Vulkan ICD.
 
 ARG BASE_IMAGE=ghcr.io/allenai/vla-evaluation-harness/base:latest
-FROM ${BASE_IMAGE}
+ARG RUNTIME_IMAGE=ghcr.io/allenai/vla-evaluation-harness/base-runtime:latest
+FROM ${BASE_IMAGE} AS builder
 
 # Build-time license confirmation.  The user must explicitly opt in
 # the same way Stanford's setup.sh requires --accept-nvidia-eula.
@@ -94,9 +95,14 @@ RUN find /opt/conda/envs/behavior/lib/python3.10/site-packages/isaacsim/extscach
         -exec rm -rf {} + 2>/dev/null || true
 
 # ── Clone BEHAVIOR-1K (OmniGibson + bddl3 + joylo/gello) ───────────
-ARG BEHAVIOR1K_REF=v3.7.2
-RUN git clone --depth 1 --branch "${BEHAVIOR1K_REF}" \
-        https://github.com/StanfordVL/BEHAVIOR-1K.git /app/BEHAVIOR-1K
+# StanfordVL/BEHAVIOR-1K v3.7.2
+ARG BEHAVIOR1K_REF=88454bd04f75dc57c00ab1f1a00bcde1ff505950
+RUN mkdir -p /app/BEHAVIOR-1K && cd /app/BEHAVIOR-1K \
+    && git init -q \
+    && git remote add origin https://github.com/StanfordVL/BEHAVIOR-1K.git \
+    && git fetch -q --depth 1 origin "${BEHAVIOR1K_REF}" \
+    && git checkout -q FETCH_HEAD \
+    && { git remote get-url origin; git rev-parse HEAD; } >> /usr/local/share/vla-build/sources.txt
 RUN cd /app/BEHAVIOR-1K && uv pip install --no-cache-dir -e ./bddl3
 RUN cd /app/BEHAVIOR-1K && uv pip install --no-cache-dir -e "./OmniGibson[eval]"
 RUN cd /app/BEHAVIOR-1K && uv pip install --no-cache-dir -e ./joylo
@@ -116,5 +122,20 @@ ENV SETUPTOOLS_SCM_PRETEND_VERSION=${HARNESS_VERSION}
 RUN uv pip install --no-cache-dir -e .
 COPY configs/ configs/
 
-ENTRYPOINT ["conda", "run", "--no-capture-output", "-n", "behavior", "vla-eval"]
-CMD ["run", "--config", "/workspace/configs/behavior1k_eval.yaml"]
+# Export the final filesystem state; superseded wheels and build layers stay behind.
+RUN python /usr/local/lib/vla/export_runtime.py /opt/conda/envs/behavior /app /workspace /root
+
+FROM ${RUNTIME_IMAGE} AS runtime
+COPY --from=builder /runtime-root/ /
+RUN dpkg-query -W > /usr/local/share/vla-build/dpkg-runtime.txt
+ENV CONDA_PREFIX=/opt/conda/envs/behavior \
+    CONDA_DEFAULT_ENV=behavior \
+    PATH=/opt/conda/envs/behavior/bin:$PATH
+ENV OMNIGIBSON_HEADLESS=1 \
+    OMNI_KIT_ACCEPT_EULA=YES \
+    ACCEPT_EULA=Y \
+    PRIVACY_CONSENT=Y
+WORKDIR /workspace
+RUN vla-eval --help > /dev/null
+ENTRYPOINT ["vla-eval"]
+CMD ["run", "--config", "/workspace/configs/benchmarks/behavior1k/eval.yaml"]

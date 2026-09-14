@@ -12,7 +12,7 @@
 # Eval assets (~90 GiB) are licence-restricted and mounted at runtime under
 # /workspace/RoboDojo/Assets — see configs/benchmarks/robodojo/README.md.
 ARG BASE_IMAGE=robodojo:cuda12.8
-FROM ${BASE_IMAGE}
+FROM ${BASE_IMAGE} AS builder
 
 # Build-time license confirmation, same pattern as behavior1k: the upstream
 # image bundles Isaac Sim, so redistribution is gated on the NVIDIA EULA.
@@ -29,12 +29,22 @@ COPY pyproject.toml README.md ./
 COPY src/ src/
 ARG HARNESS_VERSION=0.0.0
 ENV SETUPTOOLS_SCM_PRETEND_VERSION=${HARNESS_VERSION}
-RUN /root/miniconda3/envs/RoboDojo/bin/python -m pip install --no-cache-dir -e .
+COPY --from=ghcr.io/astral-sh/uv:0.11.25@sha256:1e3808aa9023d0980e7c15b1fa7c1ac16ff35925780cf5c459858b2d693f01a9 /uv /usr/local/bin/uv
+# pip sees inherited site-packages; uv pip would reinstall and shadow the simulator stack.
+# Keep the upstream installer semantics inside an isolated uv-created environment.
+RUN uv venv --python /root/miniconda3/envs/RoboDojo/bin/python \
+        --system-site-packages /opt/harness \
+    && /opt/harness/bin/python -m pip install --no-cache-dir -e .
 COPY configs/ configs/
+
+FROM ${BASE_IMAGE} AS runtime
+COPY --from=builder /opt/harness/ /opt/harness/
+COPY --from=builder /workspace/vla-evaluation-harness/ /workspace/vla-evaluation-harness/
+ENV PATH=/opt/harness/bin:$PATH
 
 # Harness convention: relative `output_dir: ./results` resolves against
 # /workspace, where the runners mount the host results dir. Bypass the upstream
 # entrypoint (it cd's into /workspace/RoboDojo); the adapter chdirs itself.
 WORKDIR /workspace
-ENTRYPOINT ["conda", "run", "--no-capture-output", "-n", "RoboDojo", "vla-eval"]
+ENTRYPOINT ["conda", "run", "--no-capture-output", "-n", "RoboDojo", "/opt/harness/bin/vla-eval"]
 CMD ["run", "--config", "/workspace/vla-evaluation-harness/configs/benchmarks/robodojo/smoke_test.yaml"]

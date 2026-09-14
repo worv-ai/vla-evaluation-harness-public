@@ -4,13 +4,17 @@
 #   3. kwargs.setdefault to preserve user control_mode override
 
 ARG BASE_IMAGE=ghcr.io/allenai/vla-evaluation-harness/simpler:latest
+ARG BUILD_IMAGE=ghcr.io/allenai/vla-evaluation-harness/base:latest
+FROM ${BUILD_IMAGE} AS tools
+
 FROM ${BASE_IMAGE}
 
-SHELL ["conda", "run", "-n", "simpler", "/bin/bash", "-c"]
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 # 1. Add absolute EE controller + euler interpretation to WidowX config
 COPY docker/xvla_absolute_ee.patch /tmp/xvla_absolute_ee.patch
-RUN cd /app/ManiSkill2_real2sim \
+RUN --mount=type=bind,from=tools,source=/usr/bin/patch,target=/usr/bin/patch \
+    cd /app/ManiSkill2_real2sim \
     && patch -p1 < /tmp/xvla_absolute_ee.patch \
     && rm /tmp/xvla_absolute_ee.patch
 

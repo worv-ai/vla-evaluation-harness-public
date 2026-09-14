@@ -12,8 +12,4 @@ if [ $retries -eq 0 ]; then
     echo "Xvfb failed to start" >&2
     exit 1
 fi
-# Activate conda env directly instead of `conda run` — conda run waits
-# for all child processes (including CoppeliaSim) which prevents exit.
-eval "$(conda shell.bash hook 2>/dev/null)"
-conda activate rlbench
-vla-eval "$@"
+exec vla-eval "$@"

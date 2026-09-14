@@ -1,0 +1,340 @@
+[
+  {
+    "image": "base",
+    "baseline": {
+      "reference": "ghcr.io/allenai/vla-evaluation-harness/base:0.5.0",
+      "id": "sha256:8dca68f674ce526879141a09f45b1ae009fec89ab883ff6809cdc17444700ef3",
+      "bytes": 3297596153
+    },
+    "slim": {
+      "reference": "ghcr.io/allenai/vla-evaluation-harness/base:slim-validation",
+      "id": "sha256:46ba91e754c09652956197c83c4c4cadd4b21f322285b17514bdeb675e9e8112",
+      "bytes": 3299552377
+    },
+    "reduction_percent": -0.1
+  },
+  {
+    "image": "base-cpu",
+    "slim": {
+      "reference": "ghcr.io/allenai/vla-evaluation-harness/base-cpu:slim-validation",
+      "id": "sha256:f0e8329562907c1805b46884a94481c0a4a401d242ad554bccc199d16b32e7b7",
+      "bytes": 378497404
+    }
+  },
+  {
+    "image": "base-runtime",
+    "slim": {
+      "reference": "ghcr.io/allenai/vla-evaluation-harness/base-runtime:slim-validation",
+      "id": "sha256:22f17d671420b6c0969216ee1bfead74a284c8aeb7dba7784af3a1d2cd394510",
+      "bytes": 2544546269
+    }
+  },
+  {
+    "image": "behavior1k",
+    "baseline": {
+      "reference": "ghcr.io/allenai/vla-evaluation-harness/behavior1k:0.4.0",
+      "id": "sha256:4cab134b1fa077216b96d5f2adfd9e3ff71c706621789dee8e93e5e8d827a821",
+      "bytes": 23258123556
+    },
+    "slim": {
+      "reference": "ghcr.io/allenai/vla-evaluation-harness/behavior1k:slim-validation",
+      "id": "sha256:05dec3b38fcaf879e558c5d0b9c8b95f0b1a252d5ecc8e261c8a37f784012428",
+      "bytes": 21891000532
+    },
+    "reduction_percent": 5.9
+  },
+  {
+    "image": "calvin",
+    "baseline": {
+      "reference": "ghcr.io/allenai/vla-evaluation-harness/calvin:0.5.0",
+      "id": "sha256:ba0831a3c0197d481bea1ba6a92ca46afc8ef63d0d8bcf1f7eca8a8c59c063a3",
+      "bytes": 9534321189
+    },
+    "slim": {
+      "reference": "ghcr.io/allenai/vla-evaluation-harness/calvin:slim-validation",
+      "id": "sha256:ef47ef8896fbdbebb89bf939c228520f4c87378bac04173e77081ed6afa944e2",
+      "bytes": 4591949133
+    },
+    "reduction_percent": 51.8
+  },
+  {
+    "image": "duobench",
+    "baseline": {
+      "reference": "ghcr.io/allenai/vla-evaluation-harness/duobench:0.5.0",
+      "id": "sha256:178457c18c50693d30353c200f9ed30b81b3d965c2e00aeb57d6e57a7023a750",
+      "bytes": 5447286562
+    },
+    "slim": {
+      "reference": "ghcr.io/allenai/vla-evaluation-harness/duobench:slim-validation",
+      "id": "sha256:2fec213a0fe48cf3c56236332cba71284698d1cdb143f0e136f96e394c4f4de3",
+      "bytes": 2489344637
+    },
+    "reduction_percent": 54.3
+  },
+  {
+    "image": "kinetix",
+    "baseline": {
+      "reference": "ghcr.io/allenai/vla-evaluation-harness/kinetix:0.5.0",
+      "id": "sha256:054c5b1a8472bb9f01beee15197d1389e9053126d7f6b6963d6155d7309a0057",
+      "bytes": 10129204283
+    },
+    "slim": {
+      "reference": "ghcr.io/allenai/vla-evaluation-harness/kinetix:slim-validation",
+      "id": "sha256:92f2ef4d016d9d26dd8c91ba653b9254744c86f2b52d47742c7cdf753ebe1f56",
+      "bytes": 6796332082
+    },
+    "reduction_percent": 32.9
+  },
+  {
+    "image": "libero",
+    "baseline": {
+      "reference": "ghcr.io/allenai/vla-evaluation-harness/libero:0.5.0",
+      "id": "sha256:89a7dd5f28a3ee6aa6bf2b76af4c57b7d38b924b538565441aee003f1696b37b",
+      "bytes": 5989718682
+    },
+    "slim": {
+      "reference": "ghcr.io/allenai/vla-evaluation-harness/libero:slim-validation",
+      "id": "sha256:8853ef7460819cb65d2b318be9fa23482da13e5bdf529d9be766233c354df089",
+      "bytes": 3082668201
+    },
+    "reduction_percent": 48.5
+  },
+  {
+    "image": "libero-mem",
+    "baseline": {
+      "reference": "ghcr.io/allenai/vla-evaluation-harness/libero-mem:0.5.0",
+      "id": "sha256:21a557ed0623418ac19c62c2359d3a3cc3fcbc2bf724fc30abc5b7d1950a56f5",
+      "bytes": 11212101787
+    },
+    "slim": {
+      "reference": "ghcr.io/allenai/vla-evaluation-harness/libero-mem:slim-validation",
+      "id": "sha256:926235dfcdf411e59db27f144c41f20cad38fce33f0050b0f4e83c0f75299d97",
+      "bytes": 3284872167
+    },
+    "reduction_percent": 70.7
+  },
+  {
+    "image": "libero-plus",
+    "baseline": {
+      "reference": "ghcr.io/allenai/vla-evaluation-harness/libero-plus:0.5.0",
+      "id": "sha256:964f35a51055947c465cb6dcc59a3c0e385e1a7221c0d7682bcb3e5c9a476abd",
+      "bytes": 14836734137
+    },
+    "slim": {
+      "reference": "ghcr.io/allenai/vla-evaluation-harness/libero-plus:slim-validation",
+      "id": "sha256:fb3e8cc4c83e68d5090e7fa565b55e8b4af57893173cd45c5d3540a7c186525b",
+      "bytes": 11789605449
+    },
+    "reduction_percent": 20.5
+  },
+  {
+    "image": "libero-pro",
+    "baseline": {
+      "reference": "ghcr.io/allenai/vla-evaluation-harness/libero-pro:0.5.0",
+      "id": "sha256:c591c1b2a39af7015a49e495e69d2431998215d91a5bc52de855b44d3775f597",
+      "bytes": 6225231882
+    },
+    "slim": {
+      "reference": "ghcr.io/allenai/vla-evaluation-harness/libero-pro:slim-validation",
+      "id": "sha256:c09b0322dc94bedce13719b3fdf36a1a1a1cb9a991dc97b6f13dd038bcffad33",
+      "bytes": 3318181395
+    },
+    "reduction_percent": 46.7
+  },
+  {
+    "image": "maniskill2",
+    "baseline": {
+      "reference": "ghcr.io/allenai/vla-evaluation-harness/maniskill2:0.5.0",
+      "id": "sha256:a7ee6841b7217d7ea263739a3198c3c9b6480043e7b0412d6000543796c14066",
+      "bytes": 9780530690
+    },
+    "slim": {
+      "reference": "ghcr.io/allenai/vla-evaluation-harness/maniskill2:slim-validation",
+      "id": "sha256:b89cd5d260e93d96b6e453da7420e123025148c48889447dc339314f0f74650b",
+      "bytes": 6683618439
+    },
+    "reduction_percent": 31.7
+  },
+  {
+    "image": "mikasa-robo",
+    "baseline": {
+      "reference": "ghcr.io/allenai/vla-evaluation-harness/mikasa-robo:0.5.0",
+      "id": "sha256:2cc5a935cd7146571536b904768474b5520219c307f0bb3b21bf9deeccfb7127",
+      "bytes": 10785054264
+    },
+    "slim": {
+      "reference": "ghcr.io/allenai/vla-evaluation-harness/mikasa-robo:slim-validation",
+      "id": "sha256:5097e10f85baeb69a865f1181210f13e2b6d9435fbb4cc019702c39a2f3ab0a4",
+      "bytes": 7363521307
+    },
+    "reduction_percent": 31.7
+  },
+  {
+    "image": "molmospaces",
+    "baseline": {
+      "reference": "ghcr.io/allenai/vla-evaluation-harness/molmospaces:0.5.0",
+      "id": "sha256:f12915cc1d42bafa44dd675818ad39899e56be2d4063f632b8bf6537aa8db973",
+      "bytes": 29262528778
+    },
+    "slim": {
+      "reference": "ghcr.io/allenai/vla-evaluation-harness/molmospaces:slim-validation",
+      "id": "sha256:9b7ca51fd5a47452eb3916ae3ce9bccfd92366afc6321b380a8ac36960cf41b8",
+      "bytes": 21235131268
+    },
+    "reduction_percent": 27.4
+  },
+  {
+    "image": "rlbench",
+    "baseline": {
+      "reference": "ghcr.io/allenai/vla-evaluation-harness/rlbench:latest",
+      "id": "sha256:517cc5f091e2b95ffbb3314f6bb8d06bc5d0ecc71847b5b9d1ff503bb8835b49",
+      "bytes": 4804949800
+    },
+    "slim": {
+      "reference": "ghcr.io/allenai/vla-evaluation-harness/rlbench:slim-validation",
+      "id": "sha256:c161311e150abcd34e6b796affd29b60ee8cc1237343d94db1f193ec547d2159",
+      "bytes": 1884981603
+    },
+    "reduction_percent": 60.8
+  },
+  {
+    "image": "robocasa",
+    "baseline": {
+      "reference": "ghcr.io/allenai/vla-evaluation-harness/robocasa:0.5.0",
+      "id": "sha256:d5496e58123d6046722d3bd16fccec91fab6b891ce9e7f85b07115d067ae4f34",
+      "bytes": 21366148782
+    },
+    "slim": {
+      "reference": "ghcr.io/allenai/vla-evaluation-harness/robocasa:slim-validation",
+      "id": "sha256:60a5837a7862ae9f2e5e9709859b689e57939d845679eea80b3ddd14bf8b97ec",
+      "bytes": 11191184190
+    },
+    "reduction_percent": 47.6
+  },
+  {
+    "image": "robocasa365",
+    "baseline": {
+      "reference": "ghcr.io/allenai/vla-evaluation-harness/robocasa365:0.5.0",
+      "id": "sha256:25dce2d47d8b22dffd87c3f0bca6ba35fde506efaf077299717b60072783b107",
+      "bytes": 35648659234
+    },
+    "slim": {
+      "reference": "ghcr.io/allenai/vla-evaluation-harness/robocasa365:slim-validation",
+      "id": "sha256:1ef818f070d253da8f49a42a8cfcdb7f5e26b73839a209ba43f8d05a49595305",
+      "bytes": 27504277195
+    },
+    "reduction_percent": 22.8
+  },
+  {
+    "image": "robocerebra",
+    "baseline": {
+      "reference": "ghcr.io/allenai/vla-evaluation-harness/robocerebra:0.5.0",
+      "id": "sha256:4258693ef487621deac02f5aea4b9d6c8edb8cf4468ea9e876cdb0fecf00e86e",
+      "bytes": 6363599077
+    },
+    "slim": {
+      "reference": "ghcr.io/allenai/vla-evaluation-harness/robocerebra:slim-validation",
+      "id": "sha256:ec9977fd35b57b9259de15a238ffe2c023c53d0911ff7efd2a3bef4da9b1f546",
+      "bytes": 3454766682
+    },
+    "reduction_percent": 45.7
+  },
+  {
+    "image": "robodojo",
+    "baseline": {
+      "reference": "ghcr.io/allenai/vla-evaluation-harness/robodojo:latest",
+      "id": "sha256:311a86d5c3675cd8c465e08c7c354e64239b61dcaf8ccc8e87b14a690ac3fe5a",
+      "bytes": 36308773433
+    },
+    "slim": {
+      "reference": "ghcr.io/allenai/vla-evaluation-harness/robodojo:slim-validation",
+      "id": "sha256:3d8c371a53e7edd80fe8988f07736ef27faaf32af371fa2df1f07098c04677be",
+      "bytes": 36308688993
+    },
+    "reduction_percent": 0.0
+  },
+  {
+    "image": "robomme",
+    "baseline": {
+      "reference": "ghcr.io/allenai/vla-evaluation-harness/robomme:0.5.0",
+      "id": "sha256:44b991c19108f75b10b46a0499933c59593921bc00ed65a0f49a22c99facc5ef",
+      "bytes": 16980462204
+    },
+    "slim": {
+      "reference": "ghcr.io/allenai/vla-evaluation-harness/robomme:slim-validation",
+      "id": "sha256:c0c79ed0ebbbc0d5f29acf69068636bb36b9895f36dd8442ec060b0b9082ef99",
+      "bytes": 8859406100
+    },
+    "reduction_percent": 47.8
+  },
+  {
+    "image": "robotwin",
+    "baseline": {
+      "reference": "ghcr.io/allenai/vla-evaluation-harness/robotwin:0.5.0",
+      "id": "sha256:74ab4a17e6a956e72bd2bf54e7196f3b4976778b3ce698802c1b0d8566276c18",
+      "bytes": 28617456289
+    },
+    "slim": {
+      "reference": "ghcr.io/allenai/vla-evaluation-harness/robotwin:slim-validation",
+      "id": "sha256:edb17c4f5fc7f6c2147336833a0dc589a210ede48e96bb6af90af64f20bea6ac",
+      "bytes": 28274664474
+    },
+    "reduction_percent": 1.2
+  },
+  {
+    "image": "simpler",
+    "baseline": {
+      "reference": "ghcr.io/allenai/vla-evaluation-harness/simpler:0.5.0",
+      "id": "sha256:74a21d9b7bab8b80bd33abb101b845058844bcd5ed80af1b0c1bd92805a85f14",
+      "bytes": 4883468813
+    },
+    "slim": {
+      "reference": "ghcr.io/allenai/vla-evaluation-harness/simpler:slim-validation",
+      "id": "sha256:ea94b167f4557ce7be4899a7c4b00125b71927d1c101b9cdad79cb0eaedbda47",
+      "bytes": 1653046683
+    },
+    "reduction_percent": 66.2
+  },
+  {
+    "image": "simpler-groot",
+    "baseline": {
+      "reference": "ghcr.io/allenai/vla-evaluation-harness/simpler-groot:0.5.0",
+      "id": "sha256:bf90f1b6dfe3a100a74fb00c4e0d45df886b02280a9977df61274050e2080c46",
+      "bytes": 4883538654
+    },
+    "slim": {
+      "reference": "ghcr.io/allenai/vla-evaluation-harness/simpler-groot:slim-validation",
+      "id": "sha256:167cac530283d3fbc7746c73290c589ee738206ae5d2ec286b11afb5732ea3ec",
+      "bytes": 1653097910
+    },
+    "reduction_percent": 66.1
+  },
+  {
+    "image": "simpler-xvla",
+    "baseline": {
+      "reference": "ghcr.io/allenai/vla-evaluation-harness/simpler-xvla:0.5.0",
+      "id": "sha256:f8292d27de2d3fd70808491d6979e0847fdaacd72c06dde13904830a69ca6bf7",
+      "bytes": 4883754978
+    },
+    "slim": {
+      "reference": "ghcr.io/allenai/vla-evaluation-harness/simpler-xvla:slim-validation",
+      "id": "sha256:4c92a19c050b8c624dc58c3ed7c9a8c3a48435b9d4488aee7ef1c00c851c4dfd",
+      "bytes": 1653297847
+    },
+    "reduction_percent": 66.1
+  },
+  {
+    "image": "vlabench",
+    "baseline": {
+      "reference": "ghcr.io/allenai/vla-evaluation-harness/vlabench:0.5.0",
+      "id": "sha256:64addeb9a1e56d674cce8ebe0a48c39c3789150200d9deac24168198df12034a",
+      "bytes": 17724247792
+    },
+    "slim": {
+      "reference": "ghcr.io/allenai/vla-evaluation-harness/vlabench:slim-validation",
+      "id": "sha256:5420737d6873193093d41f2b61a2e4feb4becd93f2a1900d8b8d093d12459d1a",
+      "bytes": 14630002352
+    },
+    "reduction_percent": 17.5
+  }
+]

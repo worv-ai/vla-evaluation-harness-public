@@ -1,137 +1,138 @@
 #!/usr/bin/env bash
-# Build Docker images locally.
+# Build Docker images locally with BuildKit.
 # Usage:
-#   docker/build.sh                                 # build all (gated images skipped without opt-in)
-#   docker/build.sh libero                          # build a single benchmark image
-#   docker/build.sh --tag 0.1.0                     # build all with a specific tag
+#   docker/build.sh [benchmark] [--tag VERSION] [--dry-run]
 #   docker/build.sh behavior1k --accept-license behavior1k
-#                                                   # opt in to a gated image's licence
-#   docker/build.sh --accept-license behavior1k --accept-license rlbench
-#                                                   # build all + opt in to multiple gated images
+#   docker/build.sh robodojo --base-image robodojo:cuda12.8 --accept-license robodojo
+#   docker/build.sh libero --base-image BUILDER@sha256:... --runtime-image RUNTIME@sha256:...
+#   docker/build.sh libero --build-arg LIBERO_REF=COMMIT
+# Base targets: base (builder), base-runtime (CUDA), base-cpu (CPU compute + GPU rendering).
 set -euo pipefail
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
-TAG="latest"
+TAG=latest
 BASE_IMAGE=""
+RUNTIME_IMAGE=""
 TARGET=""
+DRY_RUN=false
 ACCEPTED_LICENSES=()
-
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --tag)              TAG="$2"; shift 2 ;;
-    --base-image)       BASE_IMAGE="$2"; shift 2 ;;
-    --accept-license)   ACCEPTED_LICENSES+=("$2"); shift 2 ;;
-    -h|--help)
-      sed -n '2,/^[^#]/{ s/^# \?//p; }' "$0"
-      exit 0 ;;
-    -*)                 echo "Unknown flag: $1"; exit 1 ;;
-    *)                  TARGET="$1"; shift ;;
-  esac
-done
-
+EXTRA_BUILD_ARGS=()
+REGISTRY=ghcr.io/allenai/vla-evaluation-harness
 BENCHMARKS=(simpler libero libero_pro libero_plus libero_mem robocerebra maniskill2 calvin mikasa_robo vlabench rlbench robotwin robocasa robocasa365 kinetix robomme molmospaces behavior1k duobench robodojo)
-
-# Derived images that extend a benchmark image instead of base
 DERIVED_BENCHMARKS=(simpler_groot simpler_xvla)
-
-# Images whose Dockerfile gates the build behind an ``ARG ACCEPT_*=YES``
-# build-arg.  Map: image-name → "<arg-name> <licence-url>".  Adding a new
-# gated image means one line here — no CLI flag changes required.
+NO_SYSTEM_CUDA_BENCHMARKS=(maniskill2 mikasa_robo robomme molmospaces kinetix duobench simpler libero libero_pro libero_plus libero_mem robocerebra calvin rlbench robocasa robocasa365 vlabench)
 declare -A EULA_GATED=(
   [rlbench]="ACCEPT_RLBENCH_LICENCE https://github.com/stepjam/RLBench/blob/master/LICENSE"
   [behavior1k]="ACCEPT_NVIDIA_EULA https://docs.omniverse.nvidia.com/eula/"
   [robodojo]="ACCEPT_NVIDIA_EULA https://docs.omniverse.nvidia.com/eula/"
 )
 
-REGISTRY="ghcr.io/allenai/vla-evaluation-harness"
-
-# Default BASE_IMAGE follows TAG unless explicitly overridden
-BASE_IMAGE="${BASE_IMAGE:-${REGISTRY}/base:${TAG}}"
-
-# Derive harness version via hatch-vcs (PEP 440 compliant).
-# Both layers (NO_COLOR=1 + -q on each tool): hatch writes ANSI escapes and a
-# "Inspecting build dependencies" status line to stdout even without a TTY, and
-# either alone leaks one or the other into the captured value, which breaks
-# setuptools-scm parsing inside the Docker build.
-# Env override lets a post-tag checkout (e.g. tag + build fixes) stamp the release version.
-HARNESS_VERSION="${HARNESS_VERSION:-$(NO_COLOR=1 uvx -q hatch -q version 2>/dev/null || echo "0.0.0")}"
-
-is_license_accepted() {
-  local n="$1"
-  for a in "${ACCEPTED_LICENSES[@]+"${ACCEPTED_LICENSES[@]}"}"; do
-    [[ "$a" == "$n" ]] && return 0
+contains() {
+  local needle="$1" item
+  shift
+  for item in "$@"; do
+    [[ "$item" == "$needle" ]] && return 0
   done
   return 1
 }
 
-is_derived() {
-  local n="$1"
-  for d in "${DERIVED_BENCHMARKS[@]}"; do
-    [[ "$d" == "$n" ]] && return 0
-  done
-  return 1
-}
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --tag|--base-image|--runtime-image|--accept-license|--build-arg)
+      [[ $# -ge 2 && -n "$2" && "$2" != --* ]] || { echo "Missing value for $1" >&2; exit 1; }
+      case "$1" in
+        --tag) TAG="$2" ;;
+        --base-image) BASE_IMAGE="$2" ;;
+        --runtime-image) RUNTIME_IMAGE="$2" ;;
+        --accept-license) ACCEPTED_LICENSES+=("$2") ;;
+        --build-arg) EXTRA_BUILD_ARGS+=(--build-arg "$2") ;;
+      esac
+      shift 2 ;;
+    --dry-run) DRY_RUN=true; shift ;;
+    -h|--help) sed -n '2,/^[^#]/{ s/^# \?//p; }' "$0"; exit 0 ;;
+    -*) echo "Unknown flag: $1" >&2; exit 1 ;;
+    *) [[ -z "$TARGET" ]] || { echo "Specify one target" >&2; exit 1; }; TARGET="$1"; shift ;;
+  esac
+done
 
-build_image() {
-  local name="$1"
-  local image_name="${name//_/-}"
-  local dockerfile="docker/Dockerfile.${name}"
-  local image_tag="${REGISTRY}/${image_name}:${TAG}"
-  local build_args=()
+if [[ -n "$TARGET" ]] && ! contains "$TARGET" base base-runtime base-cpu "${BENCHMARKS[@]}" "${DERIVED_BENCHMARKS[@]}"; then
+  echo "Unknown image: $TARGET" >&2
+  exit 1
+fi
+for license in "${ACCEPTED_LICENSES[@]}"; do
+  [[ -n "${EULA_GATED[$license]:-}" ]] || { echo "Unknown license: $license" >&2; exit 1; }
+done
+# An upstream RoboDojo base cannot also serve as the common benchmark builder.
+if [[ -z "$TARGET" && -n "$BASE_IMAGE" ]] && contains robodojo "${ACCEPTED_LICENSES[@]}"; then
+  echo "Build robodojo separately when overriding --base-image" >&2
+  exit 1
+fi
 
-  if is_derived "$name"; then
-    local parent="${name%%_*}"
-    local parent_image="${parent//_/-}"
-    build_args=(
-      --build-arg "BASE_IMAGE=${REGISTRY}/${parent_image}:${TAG}"
-      --build-arg "HARNESS_VERSION=${HARNESS_VERSION}"
-    )
-  elif [[ "$name" != "base" ]]; then
-    build_args=(--build-arg "BASE_IMAGE=${BASE_IMAGE}" --build-arg "HARNESS_VERSION=${HARNESS_VERSION}")
+if $DRY_RUN; then
+  HARNESS_VERSION="${HARNESS_VERSION:-0.0.0}"
+else
+  HARNESS_VERSION="${HARNESS_VERSION:-$(NO_COLOR=1 uvx -q hatch -q version 2>/dev/null || echo 0.0.0)}"
+fi
+
+run_build() {
+  if $DRY_RUN; then
+    printf '%q ' docker build "$@"
+    printf '\n'
+  else
+    DOCKER_BUILDKIT=1 docker build "$@"
   fi
+}
 
+declare -A BUILT=()
+build_image() {
+  local name="$1" runtime_name=base-runtime
+  local dockerfile="docker/Dockerfile.${name}" arg_name url
+  local build_args=()
+  [[ -z "${BUILT[$name]:-}" ]] || return 0
   if [[ -n "${EULA_GATED[$name]:-}" ]]; then
     read -r arg_name url <<< "${EULA_GATED[$name]}"
-    if ! is_license_accepted "$name"; then
-      echo "Skipping ${image_tag}: pass --accept-license ${name} to build it"
-      echo "  See ${url}"
+    if ! contains "$name" "${ACCEPTED_LICENSES[@]}"; then
+      echo "Skipping $name: pass --accept-license $name ($url)"
       return 0
     fi
     build_args+=(--build-arg "${arg_name}=YES")
   fi
-
-  echo "========================================="
-  echo "Building: ${image_tag}"
-  echo "========================================="
-  docker build -t "${image_tag}" -f "${dockerfile}" "${build_args[@]+"${build_args[@]}"}" .
+  case "$name" in
+    base|base-runtime|base-cpu)
+      dockerfile=docker/Dockerfile.base
+      if [[ "$name" == base ]]; then
+        build_args+=(--target builder)
+      else
+        build_args+=(--target runtime)
+      fi
+      [[ "$name" != base-cpu ]] || build_args+=(--build-arg CUDA_IMAGE=ubuntu:22.04@sha256:829f6df217bcbae2b371026e81711d1a787c61b2967ad09d015063663ebafbf7)
+      ;;
+    robodojo)
+      build_args+=(--build-arg "BASE_IMAGE=${BASE_IMAGE:-robodojo:cuda12.8}")
+      ;;
+    simpler_groot|simpler_xvla)
+      build_image simpler
+      build_args+=(--build-arg "BASE_IMAGE=${REGISTRY}/simpler:${TAG}")
+      build_args+=(--build-arg "BUILD_IMAGE=${BASE_IMAGE:-${REGISTRY}/base:${TAG}}")
+      ;;
+    *)
+      [[ -n "$BASE_IMAGE" ]] || build_image base
+      contains "$name" "${NO_SYSTEM_CUDA_BENCHMARKS[@]}" && runtime_name=base-cpu
+      [[ -n "$RUNTIME_IMAGE" ]] || build_image "$runtime_name"
+      build_args+=(--build-arg "BASE_IMAGE=${BASE_IMAGE:-${REGISTRY}/base:${TAG}}")
+      build_args+=(--build-arg "RUNTIME_IMAGE=${RUNTIME_IMAGE:-${REGISTRY}/${runtime_name}:${TAG}}")
+      ;;
+  esac
+  build_args+=(--build-arg "HARNESS_VERSION=${HARNESS_VERSION}")
+  run_build -t "${REGISTRY}/${name//_/-}:${TAG}" -f "$dockerfile" \
+    "${build_args[@]}" "${EXTRA_BUILD_ARGS[@]}" .
+  BUILT[$name]=1
 }
 
 if [[ -n "$TARGET" ]]; then
-  if [[ "$TARGET" != "base" ]]; then
-    found=false
-    target_is_derived=false
-    for b in "${BENCHMARKS[@]}"; do
-      [[ "$b" == "$TARGET" ]] && found=true && break
-    done
-    for b in "${DERIVED_BENCHMARKS[@]}"; do
-      [[ "$b" == "$TARGET" ]] && found=true && target_is_derived=true && break
-    done
-    if ! $found; then
-      echo "ERROR: Unknown image '${TARGET}'. Available: base ${BENCHMARKS[*]} ${DERIVED_BENCHMARKS[*]}"
-      exit 1
-    fi
-    build_image base
-    if $target_is_derived; then
-      parent="${TARGET%%_*}"
-      build_image "$parent"
-    fi
-  fi
   build_image "$TARGET"
 else
-  build_image base
-  for b in "${BENCHMARKS[@]}"; do
-    build_image "$b"
-  done
-  for b in "${DERIVED_BENCHMARKS[@]}"; do
-    build_image "$b"
+  for name in "${BENCHMARKS[@]}" "${DERIVED_BENCHMARKS[@]}"; do
+    build_image "$name"
   done
 fi

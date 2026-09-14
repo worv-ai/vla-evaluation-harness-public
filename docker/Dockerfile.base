@@ -1,8 +1,6 @@
-# Common base image for all VLA evaluation harness benchmarks
-#
-# Provides: CUDA 12.1 runtime, EGL/Vulkan rendering, Miniforge, uv
-#
-FROM nvidia/cuda:12.1.1-runtime-ubuntu22.04
+# Shared runtime and build-only toolchain. See docker/README.md.
+ARG CUDA_IMAGE=nvidia/cuda:12.1.1-runtime-ubuntu22.04@sha256:8bbc6e304b193e84327fa30d93eea70ec0213b808239a46602a919a479a73b12
+FROM ${CUDA_IMAGE} AS runtime
 
 LABEL org.opencontainers.image.source=https://github.com/allenai/vla-evaluation-harness
 
@@ -12,18 +10,21 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYOPENGL_PLATFORM=egl \
     EGL_PLATFORM=device \
     MUJOCO_GL=egl \
-    NVIDIA_DRIVER_CAPABILITIES=all
+    NVIDIA_DRIVER_CAPABILITIES=all \
+    NVIDIA_VISIBLE_DEVICES=all \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
 
-# ── System dependencies (EGL, Vulkan, OpenGL, build tools) ───────────
+# Runtime libraries also support GPU rendering on the CPU compute base.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        build-essential cmake git wget curl ca-certificates unzip \
+        ca-certificates libgomp1 libstdc++6 \
         # EGL / OpenGL
-        libegl1 libegl1-mesa-dev libgl1 libgl1-mesa-glx libgles2 \
-        libglfw3 libosmesa6 libosmesa6-dev libglew-dev libglvnd-dev \
+        libegl1 libgl1 libgl1-mesa-glx libgles2 \
+        libglfw3 libosmesa6 libglew2.2 libglvnd0 \
         # Vulkan
         libvulkan1 mesa-vulkan-drivers \
         # X11 / misc
-        libglib2.0-0 libsm6 libxext6 libxrender-dev \
+        libglib2.0-0 libsm6 libxext6 libxrender1 \
         libxcb-xinerama0 libxkbcommon-x11-0 \
     && rm -rf /var/lib/apt/lists/*
 
@@ -40,18 +41,33 @@ RUN mkdir -p /usr/share/vulkan/icd.d /usr/share/glvnd/egl_vendor.d \
          || printf '{"file_format_version":"1.0.0","ICD":{"library_path":"libEGL_nvidia.so.0"}}\n' \
             > /usr/share/glvnd/egl_vendor.d/10_nvidia.json; }
 
+WORKDIR /workspace
+
+FROM runtime AS builder
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential cmake git wget curl unzip patch \
+        libegl1-mesa-dev libosmesa6-dev libglew-dev libglvnd-dev libxrender-dev \
+    && rm -rf /var/lib/apt/lists/*
+
 # ── Miniforge (lightweight conda, conda-forge defaults) ──────────────
 ARG MINIFORGE_VERSION=26.3.2-0
+ARG MINIFORGE_SHA256=1d9b75bdf29ba48d9f10bb155a685baab02d318d1d591d2495f97524579dccc1
 RUN wget -qO /tmp/miniforge.sh \
-        https://github.com/conda-forge/miniforge/releases/download/${MINIFORGE_VERSION}/Miniforge3-Linux-x86_64.sh \
+        https://github.com/conda-forge/miniforge/releases/download/${MINIFORGE_VERSION}/Miniforge3-${MINIFORGE_VERSION}-Linux-x86_64.sh \
+    && echo "${MINIFORGE_SHA256}  /tmp/miniforge.sh" | sha256sum -c - \
     && bash /tmp/miniforge.sh -b -p /opt/conda \
     && rm /tmp/miniforge.sh \
     && /opt/conda/bin/conda clean -afy
 ENV PATH=/opt/conda/bin:$PATH
 
 # ── uv (fast Python package installer) ───────────────────────────────
-COPY --from=ghcr.io/astral-sh/uv:0.11.25 /uv /usr/local/bin/uv
+COPY --from=ghcr.io/astral-sh/uv:0.11.25@sha256:1e3808aa9023d0980e7c15b1fa7c1ac16ff35925780cf5c459858b2d693f01a9 /uv /usr/local/bin/uv
 ARG UV_EXCLUDE_NEWER=2026-07-07
-ENV UV_EXCLUDE_NEWER=${UV_EXCLUDE_NEWER}
+ENV UV_EXCLUDE_NEWER=${UV_EXCLUDE_NEWER} \
+    UV_PYTHON_INSTALL_DIR=/opt/python \
+    UV_LINK_MODE=copy
 
 WORKDIR /workspace
+
+RUN mkdir -p /usr/local/share/vla-build
+COPY docker/export_runtime.py /usr/local/lib/vla/export_runtime.py

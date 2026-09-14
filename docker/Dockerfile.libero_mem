@@ -1,5 +1,7 @@
 ARG BASE_IMAGE=ghcr.io/allenai/vla-evaluation-harness/base:latest
-FROM ${BASE_IMAGE}
+ARG RUNTIME_IMAGE=ghcr.io/allenai/vla-evaluation-harness/base-cpu:latest
+FROM ${BASE_IMAGE} AS builder
+ENV UV_TORCH_BACKEND=cpu
 
 RUN conda create -n libero_mem python=3.8 pip -y && conda clean -afy
 SHELL ["conda", "run", "-n", "libero_mem", "/bin/bash", "-c"]
@@ -22,6 +24,7 @@ RUN mkdir -p /app/libero-mem \
     && git remote add origin https://github.com/libero-mem/libero-mem.git \
     && git fetch -q --depth 1 origin "${LIBERO_MEM_REF}" \
     && git checkout -q FETCH_HEAD \
+    && { git remote get-url origin; git rev-parse HEAD; } >> /usr/local/share/vla-build/sources.txt \
     && cd /app/libero-mem/thirdparty/robomimic && uv pip install --no-cache-dir -e . \
     && cd /app/libero-mem/thirdparty/robosuite && uv pip install --no-cache-dir -e . \
     && cd /app/libero-mem && uv pip install --no-cache-dir --config-setting editable_mode=compat -e . \
@@ -46,5 +49,16 @@ ENV SETUPTOOLS_SCM_PRETEND_VERSION=${HARNESS_VERSION}
 RUN uv pip install --no-cache-dir -e .
 COPY configs/ configs/
 
-ENTRYPOINT ["conda", "run", "--no-capture-output", "-n", "libero_mem", "vla-eval"]
-CMD ["run", "--config", "/workspace/configs/libero_mem.yaml"]
+# Export the final filesystem state; superseded wheels and build layers stay behind.
+RUN python /usr/local/lib/vla/export_runtime.py /opt/conda/envs/libero_mem /app /workspace /root
+
+FROM ${RUNTIME_IMAGE} AS runtime
+COPY --from=builder /runtime-root/ /
+RUN dpkg-query -W > /usr/local/share/vla-build/dpkg-runtime.txt
+ENV CONDA_PREFIX=/opt/conda/envs/libero_mem \
+    CONDA_DEFAULT_ENV=libero_mem \
+    PATH=/opt/conda/envs/libero_mem/bin:$PATH
+WORKDIR /workspace
+RUN vla-eval --help > /dev/null
+ENTRYPOINT ["vla-eval"]
+CMD ["run", "--config", "/workspace/configs/benchmarks/libero_mem/eval.yaml"]

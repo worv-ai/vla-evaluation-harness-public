@@ -2,12 +2,17 @@
 # Includes ManiSkill2_real2sim + SimplerEnv.
 
 ARG BASE_IMAGE=ghcr.io/allenai/vla-evaluation-harness/base:latest
-FROM ${BASE_IMAGE}
+ARG RUNTIME_IMAGE=ghcr.io/allenai/vla-evaluation-harness/base-cpu:latest
+FROM ${BASE_IMAGE} AS builder
 
-# ── Conda environment ──────────────────────────────────────────────────
-RUN conda create -n simpler python=3.10 pip -y && conda clean -afy
+# ── uv environment ──────────────────────────────────────────────────
+ARG PYTHON_VERSION=3.10.18
+RUN uv python install "${PYTHON_VERSION}" \
+    && uv venv --seed --python "${PYTHON_VERSION}" /opt/venv
+ENV VIRTUAL_ENV=/opt/venv \
+    PATH=/opt/venv/bin:$PATH
 
-SHELL ["conda", "run", "-n", "simpler", "/bin/bash", "-c"]
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 # ── ManiSkill2_real2sim + SimplerEnv source ───────────────────────────
 WORKDIR /app
@@ -18,6 +23,7 @@ RUN mkdir -p /app/ManiSkill2_real2sim \
     && git remote add origin https://github.com/simpler-env/ManiSkill2_real2sim.git \
     && git fetch -q --depth 1 origin "${MANISKILL2_REAL2SIM_REF}" \
     && git checkout -q FETCH_HEAD \
+    && { git remote get-url origin; git rev-parse HEAD; } >> /usr/local/share/vla-build/sources.txt \
     && rm -rf .git
 
 ARG SIMPLER_ENV_REF=4ab7178e83e84ee06894034ec6dbf9e7aad1e882
@@ -27,6 +33,7 @@ RUN mkdir -p /app/simpler_env_src \
     && git remote add origin https://github.com/simpler-env/SimplerEnv.git \
     && git fetch -q --depth 1 origin "${SIMPLER_ENV_REF}" \
     && git checkout -q FETCH_HEAD \
+    && { git remote get-url origin; git rev-parse HEAD; } >> /usr/local/share/vla-build/sources.txt \
     && rm -rf .git
 
 # ── Install simulation stack ──────────────────────────────────────────
@@ -57,5 +64,15 @@ ENV SETUPTOOLS_SCM_PRETEND_VERSION=${HARNESS_VERSION}
 RUN uv pip install --no-cache-dir -e .
 COPY configs/ configs/
 
-ENTRYPOINT ["conda", "run", "--no-capture-output", "-n", "simpler", "vla-eval"]
-CMD ["run", "--config", "/workspace/configs/simpler_all_tasks.yaml"]
+# Export the final filesystem state; superseded wheels and build layers stay behind.
+RUN python /usr/local/lib/vla/export_runtime.py /opt/python /opt/venv /app /workspace /root
+
+FROM ${RUNTIME_IMAGE} AS runtime
+COPY --from=builder /runtime-root/ /
+RUN dpkg-query -W > /usr/local/share/vla-build/dpkg-runtime.txt
+ENV VIRTUAL_ENV=/opt/venv \
+    PATH=/opt/venv/bin:$PATH
+WORKDIR /workspace
+RUN vla-eval --help > /dev/null
+ENTRYPOINT ["vla-eval"]
+CMD ["run", "--config", "/workspace/configs/benchmarks/simpler/widowx_vm.yaml"]

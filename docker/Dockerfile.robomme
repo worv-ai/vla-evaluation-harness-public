@@ -1,19 +1,22 @@
 # RoboMME evaluation environment (ManiSkill3 fork + SAPIEN, Vulkan rendering)
 
 ARG BASE_IMAGE=ghcr.io/allenai/vla-evaluation-harness/base:latest
-FROM ${BASE_IMAGE}
+ARG RUNTIME_IMAGE=ghcr.io/allenai/vla-evaluation-harness/base-cpu:latest
+FROM ${BASE_IMAGE} AS builder
 
-# ── Conda environment (Python 3.11 per RoboMME requirement) ──────────────
-RUN conda create -n robomme python=3.11 pip -y && conda clean -afy
+# ── uv environment (Python 3.11 per RoboMME requirement) ──────────────
+ARG PYTHON_VERSION=3.11.13
+RUN uv python install "${PYTHON_VERSION}" \
+    && uv venv --seed --python "${PYTHON_VERSION}" /opt/venv
+ENV VIRTUAL_ENV=/opt/venv \
+    PATH=/opt/venv/bin:$PATH
 
-SHELL ["conda", "run", "-n", "robomme", "/bin/bash", "-c"]
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 # ── PyTorch with CUDA (RoboMME envs use torch for scene randomization) ───
-# torch 2.9.1 is pinned in robomme pyproject.toml; verify cu121 wheel exists at build time
-RUN uv pip install --no-cache-dir "torch==2.9.1" "torchvision==0.24.1" \
-        --torch-backend cu121 \
-    || uv pip install --no-cache-dir "torch>=2.5,<3" "torchvision>=0.20" \
-        --torch-backend cu121
+# Match the existing release: upstream pins with official CUDA 12.8 wheels.
+ENV UV_TORCH_BACKEND=cu128
+RUN uv pip install --no-cache-dir "torch==2.9.1" "torchvision==0.24.1"
 
 # ── setuptools (RoboMME pins 80.9.0) ────────────────────────────────────
 RUN uv pip install --no-cache-dir "setuptools==80.9.0"
@@ -27,6 +30,7 @@ RUN mkdir -p /app/ManiSkill \
     && git remote add origin https://github.com/YinpeiDai/ManiSkill.git \
     && git fetch -q --depth 1 origin "${ROBOMME_MANISKILL_REF}" \
     && git checkout -q FETCH_HEAD \
+    && { git remote get-url origin; git rev-parse HEAD; } >> /usr/local/share/vla-build/sources.txt \
     && rm -rf .git
 RUN cd /app/ManiSkill && uv pip install --no-cache-dir -e .
 
@@ -38,6 +42,7 @@ RUN mkdir -p /app/robomme_benchmark \
     && git remote add origin https://github.com/RoboMME/robomme_benchmark.git \
     && git fetch -q --depth 1 origin "${ROBOMME_BENCHMARK_REF}" \
     && git checkout -q FETCH_HEAD \
+    && { git remote get-url origin; git rev-parse HEAD; } >> /usr/local/share/vla-build/sources.txt \
     && rm -rf .git
 RUN cd /app/robomme_benchmark && uv pip install --no-cache-dir -e .
 
@@ -52,5 +57,15 @@ ENV SETUPTOOLS_SCM_PRETEND_VERSION=${HARNESS_VERSION}
 RUN uv pip install --no-cache-dir -e .
 COPY configs/ configs/
 
-ENTRYPOINT ["conda", "run", "--no-capture-output", "-n", "robomme", "vla-eval"]
-CMD ["run", "--config", "/workspace/configs/robomme_eval.yaml"]
+# Export the final filesystem state; superseded wheels and build layers stay behind.
+RUN python /usr/local/lib/vla/export_runtime.py /opt/python /opt/venv /app /workspace /root
+
+FROM ${RUNTIME_IMAGE} AS runtime
+COPY --from=builder /runtime-root/ /
+RUN dpkg-query -W > /usr/local/share/vla-build/dpkg-runtime.txt
+ENV VIRTUAL_ENV=/opt/venv \
+    PATH=/opt/venv/bin:$PATH
+WORKDIR /workspace
+RUN vla-eval --help > /dev/null
+ENTRYPOINT ["vla-eval"]
+CMD ["run", "--config", "/workspace/configs/benchmarks/robomme/eval.yaml"]

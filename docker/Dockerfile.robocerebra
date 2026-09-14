@@ -1,5 +1,7 @@
 ARG BASE_IMAGE=ghcr.io/allenai/vla-evaluation-harness/base:latest
-FROM ${BASE_IMAGE}
+ARG RUNTIME_IMAGE=ghcr.io/allenai/vla-evaluation-harness/base-cpu:latest
+FROM ${BASE_IMAGE} AS builder
+ENV UV_TORCH_BACKEND=cpu
 
 # ── Conda environment ──────────────────────────────────────────────
 RUN conda create -n libero python=3.8 pip -y && conda clean -afy
@@ -24,14 +26,16 @@ RUN mkdir -p /tmp/RoboCerebra \
     && git remote add origin https://github.com/qiuboxiang/RoboCerebra.git \
     && git fetch -q --depth 1 origin "${ROBOCEREBRA_REF}" \
     && git checkout -q FETCH_HEAD \
+    && { git remote get-url origin; git rev-parse HEAD; } >> /usr/local/share/vla-build/sources.txt \
     && cd /tmp/RoboCerebra/LIBERO && uv pip install --no-cache-dir --config-setting editable_mode=compat -e . \
     && uv pip install --no-cache-dir "bddl==1.0.1" h5py \
     && rm -rf /tmp/RoboCerebra/.git ~/.cache/uv
 
 # ── Download RoboCerebra benchmark data ────────────────────────────
+ARG ROBOCEREBRA_ASSETS_REF=4e386b9aa266f05b199739d7b58950252244ea21
 RUN uv pip install --no-cache-dir huggingface_hub \
     && huggingface-cli download qiukingballball/RoboCerebraBench \
-        --repo-type dataset \
+        --repo-type dataset --revision "${ROBOCEREBRA_ASSETS_REF}" \
         --local-dir /workspace/RoboCerebra_Bench \
     && rm -rf ~/.cache/pip ~/.cache/uv
 
@@ -51,5 +55,16 @@ ENV SETUPTOOLS_SCM_PRETEND_VERSION=${HARNESS_VERSION}
 RUN uv pip install --no-cache-dir -e .
 COPY configs/ configs/
 
-ENTRYPOINT ["conda", "run", "--no-capture-output", "-n", "libero", "vla-eval"]
-CMD ["run", "--config", "/workspace/configs/robocerebra_eval.yaml"]
+# Export the final filesystem state; superseded wheels and build layers stay behind.
+RUN python /usr/local/lib/vla/export_runtime.py /opt/conda/envs/libero /app /workspace /root /tmp/RoboCerebra
+
+FROM ${RUNTIME_IMAGE} AS runtime
+COPY --from=builder /runtime-root/ /
+RUN dpkg-query -W > /usr/local/share/vla-build/dpkg-runtime.txt
+ENV CONDA_PREFIX=/opt/conda/envs/libero \
+    CONDA_DEFAULT_ENV=libero \
+    PATH=/opt/conda/envs/libero/bin:$PATH
+WORKDIR /workspace
+RUN vla-eval --help > /dev/null
+ENTRYPOINT ["vla-eval"]
+CMD ["run", "--config", "/workspace/configs/benchmarks/robocerebra/eval.yaml"]

@@ -1,18 +1,25 @@
 ARG BASE_IMAGE=ghcr.io/allenai/vla-evaluation-harness/base:latest
-FROM ${BASE_IMAGE}
+ARG RUNTIME_IMAGE=ghcr.io/allenai/vla-evaluation-harness/base-cpu:latest
+FROM ${BASE_IMAGE} AS builder
 
-# ── Conda environment ──────────────────────────────────────────────
-RUN conda create -n kinetix python=3.11 pip -y && conda clean -afy
-SHELL ["conda", "run", "-n", "kinetix", "/bin/bash", "-c"]
+# ── uv environment ──────────────────────────────────────────────
+ARG PYTHON_VERSION=3.11.13
+RUN uv python install "${PYTHON_VERSION}" \
+    && uv venv --seed --python "${PYTHON_VERSION}" /opt/venv
+ENV VIRTUAL_ENV=/opt/venv \
+    PATH=/opt/venv/bin:$PATH
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 # ── Kinetix ───────────────────────────────────────────────────────
-ARG KINETIX_REF=v3.0.0
+# FLAIROx/Kinetix v3.0.0
+ARG KINETIX_REF=67f89f45e32cfd7899bc63e252a6b044eacafb83
 RUN mkdir -p /opt/kinetix \
     && cd /opt/kinetix \
     && git init -q \
     && git remote add origin https://github.com/FLAIROx/Kinetix.git \
     && git fetch -q --depth 1 origin "${KINETIX_REF}" \
     && git checkout -q FETCH_HEAD \
+    && { git remote get-url origin; git rev-parse HEAD; } >> /usr/local/share/vla-build/sources.txt \
     && uv pip install --no-cache-dir -e . numpy Pillow
 
 # ── JAX with CUDA support (after kinetix to override its JAX pin) ─
@@ -26,6 +33,7 @@ RUN mkdir -p /app/rtc \
     && git remote add origin https://github.com/Physical-Intelligence/real-time-chunking-kinetix.git \
     && git fetch -q --depth 1 origin "${RTC_KINETIX_REF}" \
     && git checkout -q FETCH_HEAD \
+    && { git remote get-url origin; git rev-parse HEAD; } >> /usr/local/share/vla-build/sources.txt \
     && rm -rf /app/rtc/.git
 
 WORKDIR /workspace
@@ -36,5 +44,15 @@ ENV SETUPTOOLS_SCM_PRETEND_VERSION=${HARNESS_VERSION}
 RUN uv pip install --no-cache-dir -e .
 COPY configs/ configs/
 
-ENTRYPOINT ["conda", "run", "--no-capture-output", "-n", "kinetix", "vla-eval"]
-CMD ["run", "--config", "/workspace/configs/kinetix_eval.yaml"]
+# Export the final filesystem state; superseded wheels and build layers stay behind.
+RUN python /usr/local/lib/vla/export_runtime.py /opt/python /opt/venv /app /workspace /root /opt/kinetix
+
+FROM ${RUNTIME_IMAGE} AS runtime
+COPY --from=builder /runtime-root/ /
+RUN dpkg-query -W > /usr/local/share/vla-build/dpkg-runtime.txt
+ENV VIRTUAL_ENV=/opt/venv \
+    PATH=/opt/venv/bin:$PATH
+WORKDIR /workspace
+RUN vla-eval --help > /dev/null
+ENTRYPOINT ["vla-eval"]
+CMD ["run", "--config", "/workspace/configs/benchmarks/kinetix/eval.yaml"]

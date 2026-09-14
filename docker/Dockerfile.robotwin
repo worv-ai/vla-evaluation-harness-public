@@ -4,21 +4,28 @@
 # Includes SAPIEN 3 (GPU renderer), CuRobo (motion planner), mplib.
 
 ARG BASE_IMAGE=ghcr.io/allenai/vla-evaluation-harness/base:latest
-FROM ${BASE_IMAGE}
+ARG RUNTIME_IMAGE=ghcr.io/allenai/vla-evaluation-harness/base-runtime:latest
+FROM ${BASE_IMAGE} AS builder
+ARG BUILD_JOBS=4
+ENV MAX_JOBS=${BUILD_JOBS} CMAKE_BUILD_PARALLEL_LEVEL=${BUILD_JOBS}
 
 # ── CUDA build tools (nvcc required by CuRobo CUDA extensions) ──────
 RUN apt-get update && apt-get install -y --no-install-recommends \
         cuda-nvcc-12-1 cuda-cudart-dev-12-1 ninja-build \
     && rm -rf /var/lib/apt/lists/*
 
-# ── Conda environment (Python 3.10 required by SAPIEN 3) ────────────
-RUN conda create -n robotwin python=3.10 pip -y && conda clean -afy
+# ── uv environment (Python 3.10 required by SAPIEN 3) ────────────
+ARG PYTHON_VERSION=3.10.18
+RUN uv python install "${PYTHON_VERSION}" \
+    && uv venv --seed --python "${PYTHON_VERSION}" /opt/venv
+ENV VIRTUAL_ENV=/opt/venv \
+    PATH=/opt/venv/bin:$PATH
 
-SHELL ["conda", "run", "-n", "robotwin", "/bin/bash", "-c"]
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 # ── PyTorch with CUDA 12.1 (required by CuRobo / SAPIEN GPU) ────────
 RUN uv pip install --no-cache-dir \
-        "torch==2.4.1" "torchvision" \
+        "torch==2.4.1" "torchvision==0.19.1" \
         --torch-backend cu121
 
 # ── SAPIEN 3, mplib, and core simulation dependencies ────────────────
@@ -60,12 +67,14 @@ RUN mkdir -p /app/RoboTwin \
     && git remote add origin https://github.com/RoboTwin-Platform/RoboTwin.git \
     && git fetch -q --depth 1 origin "${ROBOTWIN_REF}" \
     && git checkout -q FETCH_HEAD \
+    && { git remote get-url origin; git rev-parse HEAD; } >> /usr/local/share/vla-build/sources.txt \
     && rm -rf /app/RoboTwin/.git
 
 # ── Install CuRobo (motion planner, built from source) ──────────────
 # No GPU visible during build → must specify arch explicitly.
 ENV TORCH_CUDA_ARCH_LIST="7.0;7.5;8.0;8.6;8.9;9.0+PTX"
-ARG CUROBO_REF=v0.7.8
+# NVlabs/curobo v0.7.8
+ARG CUROBO_REF=d64c4b005459db10c5dd867d8b30a87d5bda9bdb
 RUN uv pip install --no-cache-dir wheel \
     && cd /app/RoboTwin/envs \
     && mkdir -p curobo \
@@ -74,6 +83,7 @@ RUN uv pip install --no-cache-dir wheel \
     && git remote add origin https://github.com/NVlabs/curobo.git \
     && git fetch -q --depth 1 origin "${CUROBO_REF}" \
     && git checkout -q FETCH_HEAD \
+    && { git remote get-url origin; git rev-parse HEAD; } >> /usr/local/share/vla-build/sources.txt \
     && uv pip install --no-cache-dir --no-build-isolation . \
     && rm -rf .git
 
@@ -95,5 +105,20 @@ ENV SETUPTOOLS_SCM_PRETEND_VERSION=${HARNESS_VERSION}
 RUN uv pip install --no-cache-dir -e .
 COPY configs/ configs/
 
-ENTRYPOINT ["conda", "run", "--no-capture-output", "-n", "robotwin", "vla-eval"]
-CMD ["run", "--config", "/workspace/configs/robotwin_eval.yaml"]
+# Export the final filesystem state; superseded wheels and build layers stay behind.
+RUN python /usr/local/lib/vla/export_runtime.py /opt/python /opt/venv /app /workspace /root
+
+FROM ${RUNTIME_IMAGE} AS runtime
+# CuRobo may JIT-compile extensions; keep its CUDA toolchain at runtime.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential cuda-nvcc-12-1 cuda-cudart-dev-12-1 ninja-build \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=builder /runtime-root/ /
+RUN dpkg-query -W > /usr/local/share/vla-build/dpkg-runtime.txt
+ENV VIRTUAL_ENV=/opt/venv \
+    PATH=/opt/venv/bin:$PATH
+ENV TORCH_CUDA_ARCH_LIST="7.0;7.5;8.0;8.6;8.9;9.0+PTX"
+WORKDIR /workspace
+RUN vla-eval --help > /dev/null
+ENTRYPOINT ["vla-eval"]
+CMD ["run", "--config", "/workspace/configs/benchmarks/robotwin/eval.yaml"]

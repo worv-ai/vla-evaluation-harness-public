@@ -4,7 +4,7 @@
 ARG BASE_IMAGE=ghcr.io/allenai/vla-evaluation-harness/simpler:latest
 FROM ${BASE_IMAGE}
 
-SHELL ["conda", "run", "-n", "simpler", "/bin/bash", "-c"]
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 COPY docker/apply_eef_pos_patch.py /tmp/
-RUN python /tmp/apply_eef_pos_patch.py
+RUN python /tmp/apply_eef_pos_patch.py && rm /tmp/apply_eef_pos_patch.py

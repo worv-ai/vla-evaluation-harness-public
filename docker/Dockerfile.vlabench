@@ -1,13 +1,19 @@
 # VLABench evaluation environment (MuJoCo-based)
 
 ARG BASE_IMAGE=ghcr.io/allenai/vla-evaluation-harness/base:latest
-FROM ${BASE_IMAGE}
+ARG RUNTIME_IMAGE=ghcr.io/allenai/vla-evaluation-harness/base-cpu:latest
+FROM ${BASE_IMAGE} AS builder
+ENV UV_TORCH_BACKEND=cpu
 
 ENV VLABENCH_ROOT=/app/VLABench/VLABench
 
-RUN conda create -n vlabench python=3.10 pip -y && conda clean -afy
+ARG PYTHON_VERSION=3.10.18
+RUN uv python install "${PYTHON_VERSION}" \
+    && uv venv --seed --python "${PYTHON_VERSION}" /opt/venv
+ENV VIRTUAL_ENV=/opt/venv \
+    PATH=/opt/venv/bin:$PATH
 
-SHELL ["conda", "run", "-n", "vlabench", "/bin/bash", "-c"]
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 # Install MuJoCo, dm_control, and numpy first
 RUN uv pip install --no-cache-dir \
@@ -38,7 +44,8 @@ RUN mkdir -p /app/rrt-algorithms && \
     git init -q && \
     git remote add origin https://github.com/motion-planning/rrt-algorithms.git && \
     git fetch -q --depth 1 origin "${RRT_ALGORITHMS_REF}" && \
-    git checkout -q FETCH_HEAD && \
+    git checkout -q FETCH_HEAD \
+    && { git remote get-url origin; git rev-parse HEAD; } >> /usr/local/share/vla-build/sources.txt && \
     uv pip install --no-cache-dir -e . && \
     rm -rf /app/rrt-algorithms/.git
 
@@ -48,14 +55,14 @@ RUN mkdir -p /app/VLABench && \
     git init -q && \
     git remote add origin https://github.com/OpenMOSS/VLABench.git && \
     git fetch -q --depth 1 origin "${VLABENCH_REF}" && \
-    git checkout -q FETCH_HEAD && \
+    git checkout -q FETCH_HEAD \
+    && { git remote get-url origin; git rev-parse HEAD; } >> /usr/local/share/vla-build/sources.txt && \
     uv pip install --no-cache-dir -e . && \
     rm -rf /app/VLABench/.git
 
 # Download assets (obj + scene from Google Drive)
 RUN cd /app/VLABench && \
-    python scripts/download_assets.py || \
-    echo "WARNING: Asset download failed — may need manual download"
+    python scripts/download_assets.py
 
 WORKDIR /workspace
 COPY pyproject.toml README.md ./
@@ -65,4 +72,16 @@ ENV SETUPTOOLS_SCM_PRETEND_VERSION=${HARNESS_VERSION}
 RUN uv pip install --no-cache-dir -e .
 COPY configs/ configs/
 
-ENTRYPOINT ["conda", "run", "--no-capture-output", "-n", "vlabench", "vla-eval"]
+# Export the final filesystem state; superseded wheels and build layers stay behind.
+RUN python /usr/local/lib/vla/export_runtime.py /opt/python /opt/venv /app /workspace /root
+
+FROM ${RUNTIME_IMAGE} AS runtime
+COPY --from=builder /runtime-root/ /
+RUN dpkg-query -W > /usr/local/share/vla-build/dpkg-runtime.txt
+ENV VIRTUAL_ENV=/opt/venv \
+    PATH=/opt/venv/bin:$PATH
+ENV VLABENCH_ROOT=/app/VLABench/VLABench
+WORKDIR /workspace
+RUN vla-eval --help > /dev/null
+ENTRYPOINT ["vla-eval"]
+CMD ["run", "--config", "/workspace/configs/benchmarks/vlabench/eval.yaml"]

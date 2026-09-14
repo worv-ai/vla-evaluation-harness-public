@@ -1,12 +1,17 @@
 ARG BASE_IMAGE=ghcr.io/allenai/vla-evaluation-harness/base:latest
-FROM ${BASE_IMAGE}
+ARG RUNTIME_IMAGE=ghcr.io/allenai/vla-evaluation-harness/base-cpu:latest
+FROM ${BASE_IMAGE} AS builder
+ARG BUILD_JOBS=4
+ENV MAX_JOBS=${BUILD_JOBS} CMAKE_BUILD_PARALLEL_LEVEL=${BUILD_JOBS}
 
 # Adapted from robot-control-stack/docker/Dockerfile; sim eval only needs
 # RCS core + DuoBench, not the real-robot hardware extensions.
 
 # RCS compiles against the MuJoCo/urdfdom/pin stack below.
-ARG RCS_REF=v0.7.1
-ARG DUOBENCH_REF=v0.1.0
+# RobotControlStack/robot-control-stack v0.7.1
+ARG RCS_REF=e8a41823bc798a6a2454a4ea8855c6fe41908d62
+# RobotControlStack/duobench v0.1.0
+ARG DUOBENCH_REF=0b3cebd23b04d13fdf00318245648e859b184272
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
@@ -29,7 +34,7 @@ RUN conda create -n duobench python=3.11 pip -y && \
 SHELL ["conda", "run", "-n", "duobench", "/bin/bash", "-c"]
 
 # RCS dlopen()s conda libs; `conda run` does not set LD_LIBRARY_PATH like activation.
-ENV LD_LIBRARY_PATH=/opt/conda/envs/duobench/lib:${LD_LIBRARY_PATH}
+ENV LD_LIBRARY_PATH=/opt/conda/envs/duobench/lib:/usr/local/nvidia/lib:/usr/local/nvidia/lib64
 
 # ── Build / runtime deps ───────────────────────────────────────────
 # RCS installs with --no-build-isolation, so build deps must be present here.
@@ -54,6 +59,7 @@ RUN mkdir -p /opt/rcs && cd /opt/rcs \
     && git remote add origin https://github.com/RobotControlStack/robot-control-stack.git \
     && git fetch -q --depth 1 origin "${RCS_REF}" \
     && git checkout -q FETCH_HEAD \
+    && { git remote get-url origin; git rev-parse HEAD; } >> /usr/local/share/vla-build/sources.txt \
     && uv pip install --no-cache-dir --no-build-isolation --editable . \
     && rm -rf /opt/rcs/.git
 
@@ -63,6 +69,7 @@ RUN mkdir -p /opt/duobench && cd /opt/duobench \
     && git remote add origin https://github.com/RobotControlStack/duobench.git \
     && git fetch -q --depth 1 origin "${DUOBENCH_REF}" \
     && git checkout -q FETCH_HEAD \
+    && { git remote get-url origin; git rev-parse HEAD; } >> /usr/local/share/vla-build/sources.txt \
     && uv pip install --no-cache-dir --editable . \
     && rm -rf /opt/duobench/.git
 
@@ -81,5 +88,30 @@ ENV SETUPTOOLS_SCM_PRETEND_VERSION=${HARNESS_VERSION}
 RUN uv pip install --no-cache-dir -e .
 COPY configs/ configs/
 
-ENTRYPOINT ["conda", "run", "--no-capture-output", "-n", "duobench", "vla-eval"]
+# Export the final filesystem state; superseded wheels and build layers stay behind.
+RUN python /usr/local/lib/vla/export_runtime.py /opt/conda/envs/duobench /app /workspace /root /opt/rcs /opt/duobench
+
+FROM ${RUNTIME_IMAGE} AS runtime
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libpocoactiverecord80 libpococrypto80 libpocodata80 libpocodatamysql80 \
+        libpocodataodbc80 libpocodatapostgresql80 libpocodatasqlite80 libpocoencodings80 \
+        libpocofoundation80 libpocojson80 libpocojwt80 libpocomongodb80 \
+        libpoconet80 libpoconetssl80 libpocoredis80 libpocoutil80 \
+        libpocoxml80 libpocozip80 \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=builder /runtime-root/ /
+RUN dpkg-query -W > /usr/local/share/vla-build/dpkg-runtime.txt
+ENV CONDA_PREFIX=/opt/conda/envs/duobench \
+    CONDA_DEFAULT_ENV=duobench \
+    PATH=/opt/conda/envs/duobench/bin:$PATH
+ENV DEBIAN_FRONTEND=noninteractive \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+ENV LD_LIBRARY_PATH=/opt/conda/envs/duobench/lib:/usr/local/nvidia/lib:/usr/local/nvidia/lib64
+ENV MUJOCO_GL=egl \
+    PYOPENGL_PLATFORM=egl
+WORKDIR /workspace
+RUN vla-eval --help > /dev/null
+ENTRYPOINT ["vla-eval"]
 CMD ["run", "--config", "/workspace/configs/benchmarks/duobench/smoke_test.yaml"]

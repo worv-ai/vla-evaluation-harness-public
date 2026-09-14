@@ -5,11 +5,17 @@
 # against the version the pinned revision declares.
 
 ARG BASE_IMAGE=ghcr.io/allenai/vla-evaluation-harness/base:latest
-FROM ${BASE_IMAGE}
+ARG RUNTIME_IMAGE=ghcr.io/allenai/vla-evaluation-harness/base-cpu:latest
+FROM ${BASE_IMAGE} AS builder
+ENV UV_TORCH_BACKEND=cpu
 
-RUN conda create -n robocasa365 python=3.11 pip -y && conda clean -afy
+ARG PYTHON_VERSION=3.11.13
+RUN uv python install "${PYTHON_VERSION}" \
+    && uv venv --seed --python "${PYTHON_VERSION}" /opt/venv
+ENV VIRTUAL_ENV=/opt/venv \
+    PATH=/opt/venv/bin:$PATH
 
-SHELL ["conda", "run", "-n", "robocasa365", "/bin/bash", "-c"]
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 ARG ROBOSUITE_VERSION=1.5.2
 ARG ROBOSUITE_REF=5ce6643f3092639d08f7b0f90ed1c6a84f50552c
@@ -18,7 +24,8 @@ RUN mkdir -p /app/robosuite && \
     git init -q && \
     git remote add origin https://github.com/ARISE-Initiative/robosuite.git && \
     git fetch -q --depth 1 origin "${ROBOSUITE_REF}" && \
-    git checkout -q FETCH_HEAD && \
+    git checkout -q FETCH_HEAD \
+    && { git remote get-url origin; git rev-parse HEAD; } >> /usr/local/share/vla-build/sources.txt && \
     uv pip install --no-cache-dir -e . && \
     test "$(python -c 'from importlib.metadata import version; print(version("robosuite"))')" = "${ROBOSUITE_VERSION}" && \
     rm -rf /app/robosuite/.git
@@ -30,7 +37,8 @@ RUN mkdir -p /app/robocasa365 && \
     git init -q && \
     git remote add origin https://github.com/robocasa/robocasa.git && \
     git fetch -q --depth 1 origin "${ROBOCASA365_REF}" && \
-    git checkout -q FETCH_HEAD && \
+    git checkout -q FETCH_HEAD \
+    && { git remote get-url origin; git rev-parse HEAD; } >> /usr/local/share/vla-build/sources.txt && \
     uv pip install --no-cache-dir -e . && \
     test "$(python -c 'from importlib.metadata import version; print(version("robocasa"))')" = "${ROBOCASA365_VERSION}" && \
     rm -rf /app/robocasa365/.git
@@ -48,5 +56,15 @@ ENV SETUPTOOLS_SCM_PRETEND_VERSION=${HARNESS_VERSION}
 RUN uv pip install --no-cache-dir -e .
 COPY configs/ configs/
 
-ENTRYPOINT ["conda", "run", "--no-capture-output", "-n", "robocasa365", "vla-eval"]
+# Export the final filesystem state; superseded wheels and build layers stay behind.
+RUN python /usr/local/lib/vla/export_runtime.py /opt/python /opt/venv /app /workspace /root
+
+FROM ${RUNTIME_IMAGE} AS runtime
+COPY --from=builder /runtime-root/ /
+RUN dpkg-query -W > /usr/local/share/vla-build/dpkg-runtime.txt
+ENV VIRTUAL_ENV=/opt/venv \
+    PATH=/opt/venv/bin:$PATH
+WORKDIR /workspace
+RUN vla-eval --help > /dev/null
+ENTRYPOINT ["vla-eval"]
 CMD ["run", "--config", "/workspace/configs/benchmarks/robocasa365/eval.yaml"]
