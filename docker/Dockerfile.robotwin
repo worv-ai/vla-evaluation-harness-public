@@ -3,7 +3,7 @@
 #
 # Includes SAPIEN 3 (GPU renderer), CuRobo (motion planner), mplib.
 
-ARG BASE_IMAGE=ghcr.io/allenai/vla-evaluation-harness/base:latest
+ARG BASE_IMAGE=ghcr.io/allenai/vla-evaluation-harness/base-cuda:latest
 ARG RUNTIME_IMAGE=ghcr.io/allenai/vla-evaluation-harness/base-runtime:latest
 FROM ${BASE_IMAGE} AS builder
 ARG BUILD_JOBS=4
@@ -113,7 +113,12 @@ FROM ${RUNTIME_IMAGE} AS runtime
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential cuda-nvcc-12-1 cuda-cudart-dev-12-1 ninja-build \
     && rm -rf /var/lib/apt/lists/*
-COPY --from=builder /runtime-root/ /
+COPY --from=builder /runtime-root/opt/python /opt/python
+COPY --from=builder /runtime-root/opt/venv /opt/venv
+COPY --from=builder /runtime-root/app /app
+COPY --from=builder /runtime-root/workspace /workspace
+COPY --from=builder /runtime-root/root /root
+COPY --from=builder /runtime-root/usr/local/share/vla-build /usr/local/share/vla-build
 RUN dpkg-query -W > /usr/local/share/vla-build/dpkg-runtime.txt
 ENV VIRTUAL_ENV=/opt/venv \
     PATH=/opt/venv/bin:$PATH

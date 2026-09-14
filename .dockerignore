@@ -14,3 +14,12 @@
 !docker/xvla_google_robot_patch.py
 
 !docker/export_runtime.py
+
+!docker/install_native.sh
+!docker/pixi/pixi.toml
+!docker/pixi/pixi.lock
+
+!docker/prepare_cpu.py
+!docker/prune_cpu.py
+!docker/split_assets.py
+!docker/optimize_libero.py

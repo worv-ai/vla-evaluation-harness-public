@@ -51,3 +51,8 @@ leaderboard/.cache/
 
 # In-repository worktrees
 .worktrees/
+
+# Pixi environments and local configuration
+.pixi/
+
+.cache/docker-validation-assets/

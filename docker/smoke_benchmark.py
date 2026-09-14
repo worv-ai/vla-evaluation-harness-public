@@ -14,13 +14,13 @@ import yaml
 from vla_eval.recording import EpisodeRecorder, RecordingStore
 
 
-async def main(config, action):
+async def main(config, action, render=None):
     with open(config) as f:
         document = yaml.safe_load(f)
     cfg = document["benchmarks"][0]
     module, name = cfg["benchmark"].split(":")
     benchmark_type = getattr(importlib.import_module(module), name)
-    benchmark_type.configure_render(document.get("render", "gpu"))
+    benchmark_type.configure_render(render or document.get("render", "gpu"))
     bench = benchmark_type(**cfg.get("params", {}))
     scratch = tempfile.TemporaryDirectory(prefix="vla-smoke-")
     store = RecordingStore(Path(scratch.name) / "smoke.sqlite")
@@ -69,5 +69,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("config", help="Evaluation YAML; uses its first benchmark and task")
     parser.add_argument("--action", required=True, type=json.loads, help="JSON action vector for this simulator")
+    parser.add_argument("--render", choices=("cpu", "gpu"), help="Override the config render backend")
     args = parser.parse_args()
-    asyncio.run(main(args.config, args.action))
+    asyncio.run(main(args.config, args.action, args.render))

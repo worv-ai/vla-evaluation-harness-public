@@ -1,17 +1,11 @@
 # Shared runtime and build-only toolchain. See docker/README.md.
-ARG CUDA_IMAGE=nvidia/cuda:12.1.1-runtime-ubuntu22.04@sha256:8bbc6e304b193e84327fa30d93eea70ec0213b808239a46602a919a479a73b12
-FROM ${CUDA_IMAGE} AS runtime
+ARG OS_IMAGE=ubuntu:22.04@sha256:829f6df217bcbae2b371026e81711d1a787c61b2967ad09d015063663ebafbf7
+FROM ${OS_IMAGE} AS runtime-common
 
 LABEL org.opencontainers.image.source=https://github.com/allenai/vla-evaluation-harness
 
 ENV DEBIAN_FRONTEND=noninteractive \
     LANG=C.UTF-8 \
-    # Rendering
-    PYOPENGL_PLATFORM=egl \
-    EGL_PLATFORM=device \
-    MUJOCO_GL=egl \
-    NVIDIA_DRIVER_CAPABILITIES=all \
-    NVIDIA_VISIBLE_DEVICES=all \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
@@ -27,6 +21,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libglib2.0-0 libsm6 libxext6 libxrender1 \
         libxcb-xinerama0 libxkbcommon-x11-0 \
     && rm -rf /var/lib/apt/lists/*
+
+COPY docker/image_entrypoint.sh /usr/local/bin/image-entrypoint
+
+FROM runtime-common AS runtime-cpu
+ENV MUJOCO_GL=osmesa PYOPENGL_PLATFORM=osmesa \
+    LIBGL_ALWAYS_SOFTWARE=1 NVIDIA_VISIBLE_DEVICES=void \
+    CUDA_VISIBLE_DEVICES="" JAX_PLATFORMS=cpu \
+    VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+
+FROM runtime-common AS runtime
+ENV MUJOCO_GL=egl PYOPENGL_PLATFORM=egl EGL_PLATFORM=device \
+    NVIDIA_DRIVER_CAPABILITIES=all NVIDIA_VISIBLE_DEVICES=all
 
 # ── Vulkan ICD for NVIDIA GPU ────────────────────────────────────────
 # Skip writes when the ICD file is already present — on hosts whose Docker
@@ -49,16 +55,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libegl1-mesa-dev libosmesa6-dev libglew-dev libglvnd-dev libxrender-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# ── Miniforge (lightweight conda, conda-forge defaults) ──────────────
-ARG MINIFORGE_VERSION=26.3.2-0
-ARG MINIFORGE_SHA256=1d9b75bdf29ba48d9f10bb155a685baab02d318d1d591d2495f97524579dccc1
-RUN wget -qO /tmp/miniforge.sh \
-        https://github.com/conda-forge/miniforge/releases/download/${MINIFORGE_VERSION}/Miniforge3-${MINIFORGE_VERSION}-Linux-x86_64.sh \
-    && echo "${MINIFORGE_SHA256}  /tmp/miniforge.sh" | sha256sum -c - \
-    && bash /tmp/miniforge.sh -b -p /opt/conda \
-    && rm /tmp/miniforge.sh \
-    && /opt/conda/bin/conda clean -afy
-ENV PATH=/opt/conda/bin:$PATH
+# Pixi installs locked native environments without a Conda base environment.
+COPY --from=ghcr.io/prefix-dev/pixi:0.80.0@sha256:4cb073300e2c5eaee287bb3bcbadd3ddb7bce4ce36b27c41a19aad74c297c2f3 /usr/local/bin/pixi /usr/local/bin/pixi
+ENV PIXI_NO_CONFIG=true PIXI_CACHE_DIR=/tmp/pixi-cache
+RUN pixi --version
+COPY docker/pixi/pixi.toml docker/pixi/pixi.lock /opt/pixi/
+COPY docker/install_native.sh /usr/local/bin/install-native-env
 
 # ── uv (fast Python package installer) ───────────────────────────────
 COPY --from=ghcr.io/astral-sh/uv:0.11.25@sha256:1e3808aa9023d0980e7c15b1fa7c1ac16ff35925780cf5c459858b2d693f01a9 /uv /usr/local/bin/uv

@@ -1,5 +1,5 @@
 ARG BASE_IMAGE=ghcr.io/allenai/vla-evaluation-harness/base:latest
-ARG RUNTIME_IMAGE=ghcr.io/allenai/vla-evaluation-harness/base-cpu:latest
+ARG RUNTIME_IMAGE=ghcr.io/allenai/vla-evaluation-harness/base-render:latest
 FROM ${BASE_IMAGE} AS builder
 ARG BUILD_JOBS=4
 ENV MAX_JOBS=${BUILD_JOBS} CMAKE_BUILD_PARALLEL_LEVEL=${BUILD_JOBS}
@@ -27,14 +27,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # ── Conda env with Python 3.11 (rcs + duobench requirement) ────────
 # urdfdom pinned to 4.x: rcs's compiled C++ extension links against
 # liburdfdom_sensor.so.4.0, and newer sonames break that ABI.
-RUN conda create -n duobench python=3.11 pip -y && \
-    conda install -n duobench -c conda-forge -y \
-        "urdfdom=4.0" urdfdom_headers glfw "tinyxml2=10" && \
-    conda clean -afy
-SHELL ["conda", "run", "-n", "duobench", "/bin/bash", "-c"]
+RUN install-native-env duobench
+ENV CONDA_PREFIX=/opt/pixi/.pixi/envs/duobench \
+    PATH=/opt/pixi/.pixi/envs/duobench/bin:$PATH
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 # RCS dlopen()s conda libs; `conda run` does not set LD_LIBRARY_PATH like activation.
-ENV LD_LIBRARY_PATH=/opt/conda/envs/duobench/lib:/usr/local/nvidia/lib:/usr/local/nvidia/lib64
+ENV LD_LIBRARY_PATH=/opt/pixi/.pixi/envs/duobench/lib:/usr/local/nvidia/lib:/usr/local/nvidia/lib64
 
 # ── Build / runtime deps ───────────────────────────────────────────
 # RCS installs with --no-build-isolation, so build deps must be present here.
@@ -89,9 +88,11 @@ RUN uv pip install --no-cache-dir -e .
 COPY configs/ configs/
 
 # Export the final filesystem state; superseded wheels and build layers stay behind.
-RUN python /usr/local/lib/vla/export_runtime.py /opt/conda/envs/duobench /app /workspace /root /opt/rcs /opt/duobench
+RUN python /usr/local/lib/vla/export_runtime.py /opt/pixi/.pixi/envs/duobench /app /workspace /root /opt/rcs /opt/duobench
 
 FROM ${RUNTIME_IMAGE} AS runtime
+ARG IMAGE_PROFILE=gpu
+ENV VLA_IMAGE_PROFILE=${IMAGE_PROFILE}
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libpocoactiverecord80 libpococrypto80 libpocodata80 libpocodatamysql80 \
         libpocodataodbc80 libpocodatapostgresql80 libpocodatasqlite80 libpocoencodings80 \
@@ -99,19 +100,23 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libpoconet80 libpoconetssl80 libpocoredis80 libpocoutil80 \
         libpocoxml80 libpocozip80 \
     && rm -rf /var/lib/apt/lists/*
-COPY --from=builder /runtime-root/ /
+COPY --from=builder /runtime-root/opt/pixi/.pixi/envs/duobench /opt/pixi/.pixi/envs/duobench
+COPY --from=builder /runtime-root/app /app
+COPY --from=builder /runtime-root/workspace /workspace
+COPY --from=builder /runtime-root/root /root
+COPY --from=builder /runtime-root/opt/rcs /opt/rcs
+COPY --from=builder /runtime-root/opt/duobench /opt/duobench
+COPY --from=builder /runtime-root/usr/local/share/vla-build /usr/local/share/vla-build
 RUN dpkg-query -W > /usr/local/share/vla-build/dpkg-runtime.txt
-ENV CONDA_PREFIX=/opt/conda/envs/duobench \
+ENV CONDA_PREFIX=/opt/pixi/.pixi/envs/duobench \
     CONDA_DEFAULT_ENV=duobench \
-    PATH=/opt/conda/envs/duobench/bin:$PATH
+    PATH=/opt/pixi/.pixi/envs/duobench/bin:$PATH
 ENV DEBIAN_FRONTEND=noninteractive \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
-ENV LD_LIBRARY_PATH=/opt/conda/envs/duobench/lib:/usr/local/nvidia/lib:/usr/local/nvidia/lib64
-ENV MUJOCO_GL=egl \
-    PYOPENGL_PLATFORM=egl
+ENV LD_LIBRARY_PATH=/opt/pixi/.pixi/envs/duobench/lib:/usr/local/nvidia/lib:/usr/local/nvidia/lib64
 WORKDIR /workspace
 RUN vla-eval --help > /dev/null
-ENTRYPOINT ["vla-eval"]
+ENTRYPOINT ["/usr/local/bin/image-entrypoint", "vla-eval"]
 CMD ["run", "--config", "/workspace/configs/benchmarks/duobench/smoke_test.yaml"]

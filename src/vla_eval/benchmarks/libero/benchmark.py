@@ -136,23 +136,25 @@ class LIBEROBenchmark(StepBenchmark):
         """Lazily initialize LIBERO (heavy imports)."""
         if self._task_suite is not None:
             return
-        # LIBERO init states use torch.save with numpy arrays.
-        # PyTorch ≥2.6 defaults weights_only=True which blocks numpy globals.
-        # Patch torch.load to default weights_only=False for LIBERO compatibility.
-        import functools
-
-        import torch
-
-        _original_torch_load = torch.load
-
-        @functools.wraps(_original_torch_load)
-        def _patched_load(*args, **kwargs):
-            kwargs.setdefault("weights_only", False)
-            return _original_torch_load(*args, **kwargs)
-
-        torch.load = cast(Any, _patched_load)
-
         from libero.libero import benchmark
+
+        # Minimal Docker runtimes store losslessly converted NumPy initial states.
+        if not getattr(benchmark, "NUMPY_INIT_STATES", False):
+            # LIBERO init states use torch.save with numpy arrays.
+            # PyTorch ≥2.6 defaults weights_only=True which blocks numpy globals.
+            # Patch torch.load to default weights_only=False for LIBERO compatibility.
+            import functools
+
+            import torch
+
+            _original_torch_load = torch.load
+
+            @functools.wraps(_original_torch_load)
+            def _patched_load(*args, **kwargs):
+                kwargs.setdefault("weights_only", False)
+                return _original_torch_load(*args, **kwargs)
+
+            torch.load = cast(Any, _patched_load)
 
         benchmark_dict = benchmark.get_benchmark_dict()
         self._task_suite = benchmark_dict[self.suite]()

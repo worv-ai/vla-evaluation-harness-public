@@ -3,7 +3,7 @@
 # https://github.com/mees/calvin
 
 ARG BASE_IMAGE=ghcr.io/allenai/vla-evaluation-harness/base:latest
-ARG RUNTIME_IMAGE=ghcr.io/allenai/vla-evaluation-harness/base-cpu:latest
+ARG RUNTIME_IMAGE=ghcr.io/allenai/vla-evaluation-harness/base-render:latest
 FROM ${BASE_IMAGE} AS builder
 ARG BUILD_JOBS=4
 ENV MAX_JOBS=${BUILD_JOBS} CMAKE_BUILD_PARALLEL_LEVEL=${BUILD_JOBS}
@@ -14,8 +14,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libfftw3-dev libopenblas-dev \
     && rm -rf /var/lib/apt/lists/*
 
-RUN conda create -y -n calvin python=3.8 pip && conda clean -afy
-SHELL ["conda", "run", "-n", "calvin", "/bin/bash", "-c"]
+RUN install-native-env calvin
+ENV CONDA_PREFIX=/opt/pixi/.pixi/envs/calvin \
+    PATH=/opt/pixi/.pixi/envs/calvin/bin:$PATH
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 ARG CALVIN_REF=fa03f01f19c65920e18cf37398a9ce859274af76
 RUN mkdir -p /app/calvin \
@@ -28,7 +30,6 @@ RUN mkdir -p /app/calvin \
     && git submodule update --init --recursive --depth 1
 
 # CALVIN editable installs need legacy setuptools/cmake and no build isolation.
-RUN conda install -n calvin cmake=3.18 -y && conda clean -afy
 RUN uv pip install --no-cache-dir "setuptools==57.5.0" wheel \
     && cd /app/calvin/calvin_env   && pip install --no-cache-dir --no-build-isolation -e . \
     && cd /app/calvin/calvin_models && pip install --no-cache-dir --no-build-isolation -e .
@@ -64,19 +65,26 @@ COPY configs/ configs/
 RUN cd /app/calvin/calvin_env/egl_check && bash build.sh && test -x EGL_options.o
 
 # Export the final filesystem state; superseded wheels and build layers stay behind.
-RUN python /usr/local/lib/vla/export_runtime.py /opt/conda/envs/calvin /app /workspace /root /data
+RUN python /usr/local/lib/vla/export_runtime.py /opt/pixi/.pixi/envs/calvin /app /workspace /root /data
 
 FROM ${RUNTIME_IMAGE} AS runtime
+ARG IMAGE_PROFILE=gpu
+ENV VLA_IMAGE_PROFILE=${IMAGE_PROFILE}
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libfftw3-double3 libfftw3-single3 libfftw3-long3 libopenblas0-pthread \
         git \
     && rm -rf /var/lib/apt/lists/*
-COPY --from=builder /runtime-root/ /
+COPY --from=builder /runtime-root/opt/pixi/.pixi/envs/calvin /opt/pixi/.pixi/envs/calvin
+COPY --from=builder /runtime-root/app /app
+COPY --from=builder /runtime-root/workspace /workspace
+COPY --from=builder /runtime-root/root /root
+COPY --from=builder /runtime-root/data /data
+COPY --from=builder /runtime-root/usr/local/share/vla-build /usr/local/share/vla-build
 RUN dpkg-query -W > /usr/local/share/vla-build/dpkg-runtime.txt
-ENV CONDA_PREFIX=/opt/conda/envs/calvin \
+ENV CONDA_PREFIX=/opt/pixi/.pixi/envs/calvin \
     CONDA_DEFAULT_ENV=calvin \
-    PATH=/opt/conda/envs/calvin/bin:$PATH
+    PATH=/opt/pixi/.pixi/envs/calvin/bin:$PATH
 WORKDIR /workspace
 RUN vla-eval --help > /dev/null
-ENTRYPOINT ["vla-eval"]
+ENTRYPOINT ["/usr/local/bin/image-entrypoint", "vla-eval"]
 CMD ["run", "--config", "/workspace/configs/benchmarks/calvin/eval.yaml"]

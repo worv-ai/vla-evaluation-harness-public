@@ -19,6 +19,7 @@ def export_runtime(paths, destination):
             raise ValueError("Runtime paths must be absolute, non-root paths")
         if not source.exists():
             if str(source) in OPTIONAL_PATHS:
+                (destination / source.relative_to("/")).mkdir(parents=True, exist_ok=True)
                 continue
             raise FileNotFoundError(source)
         target = destination / source.relative_to("/")
@@ -31,6 +32,7 @@ def export_runtime(paths, destination):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("paths", nargs="+")
+    parser.add_argument("--inventory-only", action="store_true", help="Record packages without moving runtime paths")
     args = parser.parse_args()
     manifest = Path("/usr/local/share/vla-build")
     manifest.mkdir(parents=True, exist_ok=True)
@@ -38,15 +40,20 @@ def main():
     frozen = subprocess.check_output(["uv", "pip", "freeze", "--python", sys.executable], text=True)
     (manifest / "requirements.freeze.txt").write_text(frozen)
     if Path(sys.prefix, "conda-meta").is_dir():
-        explicit = subprocess.check_output(
-            ["/opt/conda/bin/conda", "list", "--explicit", "--prefix", sys.prefix], text=True
-        )
+        records = [json.loads(p.read_text()) for p in sorted(Path(sys.prefix, "conda-meta").glob("*.json"))]
+        explicit = "# platform: linux-64\n@EXPLICIT\n"
+        for record in records:
+            url = record["url"]
+            if record.get("md5"):
+                url += "#" + record["md5"]
+            explicit += url + "\n"
         (manifest / "conda-explicit.txt").write_text(explicit)
     (manifest / "runtime-paths.json").write_text(json.dumps(args.paths, indent=2) + "\n")
     # Only installer caches are disposable. Simulator/HF caches can back asset symlinks.
     for value in ("/root/.cache/pip", "/root/.cache/uv"):
         shutil.rmtree(value, ignore_errors=True)
-    export_runtime([*args.paths, str(manifest)], "/runtime-root")
+    if not args.inventory_only:
+        export_runtime([*args.paths, str(manifest)], "/runtime-root")
 
 
 if __name__ == "__main__":

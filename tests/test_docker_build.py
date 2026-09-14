@@ -33,20 +33,20 @@ def image_names(commands):
 
 def test_cpu_benchmark_uses_small_runtime_and_requested_tag():
     commands = plan("libero", "--tag", "slim")
-    assert image_names(commands) == ["base:slim", "base-cpu:slim", "libero:slim"]
-    assert any(arg.startswith("CUDA_IMAGE=ubuntu:22.04@sha256:") for arg in commands[1])
-    assert "RUNTIME_IMAGE=ghcr.io/allenai/vla-evaluation-harness/base-cpu:slim" in commands[2]
+    assert image_names(commands) == ["base:slim", "base-render:slim", "libero:slim-gpu"]
+    assert "runtime" in commands[1]
+    assert "RUNTIME_IMAGE=ghcr.io/allenai/vla-evaluation-harness/base-render:slim" in commands[2]
 
 
 def test_derived_build_orders_dependencies():
     commands = plan("simpler_xvla", "--tag", "slim")
-    assert image_names(commands) == ["base:slim", "base-cpu:slim", "simpler:slim", "simpler-xvla:slim"]
+    assert image_names(commands) == ["base:slim", "base-render:slim", "simpler:slim-gpu", "simpler-xvla:slim-gpu"]
     assert "BUILD_IMAGE=ghcr.io/allenai/vla-evaluation-harness/base:slim" in commands[-1]
 
 
 def test_digest_overrides_do_not_rebuild_bases():
     commands = plan("libero", "--base-image", "builder@sha256:abc", "--runtime-image", "runtime@sha256:def")
-    assert image_names(commands) == ["libero:latest"]
+    assert image_names(commands) == ["libero:latest-gpu"]
     assert "BASE_IMAGE=builder@sha256:abc" in commands[0]
     assert "RUNTIME_IMAGE=runtime@sha256:def" in commands[0]
 
@@ -54,7 +54,7 @@ def test_digest_overrides_do_not_rebuild_bases():
 def test_robodojo_retains_its_external_parent_and_license_gate():
     assert plan("robodojo") == []
     commands = plan("robodojo", "--accept-license", "robodojo")
-    assert image_names(commands) == ["robodojo:latest"]
+    assert image_names(commands) == ["robodojo:latest-gpu"]
     assert "BASE_IMAGE=robodojo:cuda12.8" in commands[0]
     assert "ACCEPT_NVIDIA_EULA=YES" in commands[0]
 
@@ -62,7 +62,7 @@ def test_robodojo_retains_its_external_parent_and_license_gate():
 def test_build_all_covers_every_recipe_once_and_skips_gated_images():
     names = image_names(plan())
     expected = {p.name.removeprefix("Dockerfile.").replace("_", "-") for p in (ROOT / "docker").glob("Dockerfile.*")}
-    expected |= {"base-runtime", "base-cpu"}
+    expected |= {"base-runtime", "base-render", "base-cuda"}
     expected -= {"rlbench", "behavior1k", "robodojo"}
     assert {name.split(":")[0] for name in names} == expected
     assert len(names) == len(set(names))
@@ -133,3 +133,131 @@ def test_default_configs_exist_in_build_context():
                     path = command[command.index("--config") + 1]
                     relative = "configs/" + path.split("/configs/", 1)[1]
                     assert (ROOT / relative).is_file(), (recipe.name, path)
+
+
+def test_cpu_profile_uses_separate_runtime_and_tag():
+    commands = plan("libero", "--profile", "all", "--tag", "split")
+    assert image_names(commands) == [
+        "base:split",
+        "base-render:split",
+        "libero:split-gpu",
+        "base-cpu:split",
+        "libero:split-cpu",
+    ]
+    assert "runtime-cpu" in commands[-2]
+    assert "IMAGE_PROFILE=cpu" in commands[-1]
+    assert "RUNTIME_IMAGE=ghcr.io/allenai/vla-evaluation-harness/base-cpu:split" in commands[-1]
+
+
+def test_gpu_only_benchmark_rejects_cpu_before_build():
+    result = subprocess.run(
+        ["bash", str(BUILD), "robotwin", "--profile", "cpu", "--dry-run"], capture_output=True, text=True
+    )
+    assert result.returncode != 0
+    assert "requires a GPU" in result.stderr
+    assert "docker build " not in result.stdout
+
+
+def test_cpu_all_builds_only_supported_images():
+    commands = plan("--profile", "cpu")
+    names = image_names(commands)
+    assert "kinetix:latest-cpu" in names
+    assert "kinetix:latest-gpu" in names
+    assert not any("robotwin" in name or "simpler" in name for name in names)
+
+
+def test_cpu_entrypoint_forces_render_and_preserves_arguments(tmp_path):
+    executable = tmp_path / "capture"
+    executable.write_text("#!/bin/sh\nprintf '%s\\n' \"$@\"\n")
+    executable.chmod(0o755)
+    result = subprocess.run(
+        ["sh", str(ROOT / "docker/image_entrypoint.sh"), str(executable), "run", "--config", "a b.yaml"],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "VLA_IMAGE_PROFILE": "cpu"},
+    )
+    assert result.returncode == 0
+    assert result.stdout.splitlines() == ["run", "--config", "a b.yaml", "--render", "cpu"]
+
+
+def test_push_routes_cpu_gpu_tags_and_gpu_compatibility_alias(tmp_path):
+    fake = tmp_path / "docker"
+    fake.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$DOCKER_CALLS"\n')
+    fake.chmod(0o755)
+    calls = tmp_path / "calls"
+    subprocess.run(
+        ["bash", str(ROOT / "docker/push.sh"), "libero", "--tag", "split", "--profile", "all", "--no-latest"],
+        env={**os.environ, "PATH": str(tmp_path) + ":" + os.environ["PATH"], "DOCKER_CALLS": str(calls)},
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    pushes = [line.split()[-1] for line in calls.read_text().splitlines() if line.startswith("push ")]
+    assert [ref.rsplit(":", 1)[-1] for ref in pushes] == ["split-gpu", "split", "split-cpu"]
+
+
+def test_cpu_wheels_keep_public_versions_and_remove_accelerator_packages(monkeypatch):
+    from types import SimpleNamespace
+
+    spec = importlib.util.spec_from_file_location("prepare_cpu", ROOT / "docker/prepare_cpu.py")
+    prepare = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(prepare)
+    versions = {
+        "torch": "2.9.1+cu128",
+        "torchvision": "0.24.1+cu128",
+        "jax": "0.7.2",
+        "jax-cuda12-plugin": "0.7.2",
+        "nvidia-cublas-cu12": "12.8.4.1",
+        "triton": "3.5.1",
+    }
+    monkeypatch.setattr(
+        prepare.metadata,
+        "distributions",
+        lambda: [SimpleNamespace(metadata={"Name": name}, version=version) for name, version in versions.items()],
+    )
+    calls = []
+    monkeypatch.setattr(prepare.subprocess, "run", lambda args, **kwargs: calls.append(args))
+    prepare.main()
+    assert "torch==2.9.1+cpu" in calls[0]
+    assert "torchvision==0.24.1+cpu" in calls[0]
+    assert "--no-deps" in calls[0]
+    assert calls[0][calls[0].index("--torch-backend") + 1] == "cpu"
+    assert set(calls[1][5:]) == {"jax-cuda12-plugin", "nvidia-cublas-cu12", "triton"}
+
+
+def test_rlbench_keeps_tini_outside_the_profile_wrapper():
+    import json
+
+    recipe = (ROOT / "docker/Dockerfile.rlbench").read_text()
+    entrypoint = json.loads(next(line[11:] for line in recipe.splitlines() if line.startswith("ENTRYPOINT ")))
+    assert entrypoint == ["tini", "-g", "--", "/usr/local/bin/image-entrypoint", "/rlbench_entrypoint.sh"]
+
+
+def test_cpu_can_derive_from_an_immutable_gpu_artifact():
+    commands = plan("libero", "--profile", "cpu", "--gpu-image", "libero@sha256:abc")
+    assert image_names(commands) == ["base-cpu:latest", "libero:latest-cpu"]
+    assert "GPU_IMAGE=libero@sha256:abc" in commands[-1]
+
+
+def test_cpu_recipe_preserves_rlbench_native_runtime_and_editable_sources():
+    result = subprocess.run(
+        ["bash", str(ROOT / "docker/generate_cpu_dockerfile.sh"), str(ROOT / "docker/Dockerfile.rlbench")],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert "FROM ${GPU_IMAGE} AS gpu" in result.stdout
+    assert "FROM gpu AS builder" in result.stdout
+    assert "export_runtime.py --inventory-only" in result.stdout
+    assert "FROM ${RUNTIME_IMAGE} AS runtime" in result.stdout
+    assert "xvfb libfontconfig1 tini libdbus-1-3" in result.stdout
+    assert "COPY --from=gpu /tmp/PyRep /tmp/PyRep" in result.stdout
+    assert "COPY --from=gpu /opt/coppeliasim /opt/coppeliasim" in result.stdout
+    assert "ARG IMAGE_PROFILE=cpu" in result.stdout
+
+
+def test_custom_cpu_runtime_is_not_used_to_build_its_gpu_source():
+    commands = plan("libero", "--profile", "cpu", "--runtime-image", "cpu-runtime@sha256:abc")
+    assert image_names(commands) == ["base:latest", "base-render:latest", "libero:latest-gpu", "libero:latest-cpu"]
+    assert "RUNTIME_IMAGE=cpu-runtime@sha256:abc" in commands[-1]
+    assert "RUNTIME_IMAGE=ghcr.io/allenai/vla-evaluation-harness/base-render:latest" in commands[-2]

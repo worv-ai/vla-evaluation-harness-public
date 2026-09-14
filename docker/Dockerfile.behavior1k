@@ -9,7 +9,7 @@
 #
 # Hardware requirements: NVIDIA GPU (RTX 2070+), 8 GB+ VRAM, Vulkan ICD.
 
-ARG BASE_IMAGE=ghcr.io/allenai/vla-evaluation-harness/base:latest
+ARG BASE_IMAGE=ghcr.io/allenai/vla-evaluation-harness/base-cuda:latest
 ARG RUNTIME_IMAGE=ghcr.io/allenai/vla-evaluation-harness/base-runtime:latest
 FROM ${BASE_IMAGE} AS builder
 
@@ -37,9 +37,11 @@ ENV OMNIGIBSON_HEADLESS=1 \
     ACCEPT_EULA=Y \
     PRIVACY_CONSENT=Y
 
-# ── Conda environment (Python 3.10 — required by Isaac Sim 4.5.0) ──
-RUN conda create -n behavior python=3.10 pip -y && conda clean -afy
-SHELL ["conda", "run", "-n", "behavior", "/bin/bash", "-c"]
+# ── Locked native environment (Python 3.10 — required by Isaac Sim 4.5.0) ──
+RUN install-native-env behavior
+ENV CONDA_PREFIX=/opt/pixi/.pixi/envs/behavior \
+    PATH=/opt/pixi/.pixi/envs/behavior/bin:$PATH
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 # ── OmniGibson setup prerequisites ──────────────────────────────────
 RUN uv pip install --no-cache-dir "numpy<2" "setuptools<=79"
@@ -90,7 +92,7 @@ RUN uv pip install --no-cache-dir \
 # Isaac Sim's pip_prebundle/websockets shadows our model-server websockets.
 # The site-packages path is deterministic, so a plain `find` does the job
 # without booting isaacsim (which can't import in a non-GPU build context).
-RUN find /opt/conda/envs/behavior/lib/python3.10/site-packages/isaacsim/extscache \
+RUN find /opt/pixi/.pixi/envs/behavior/lib/python3.10/site-packages/isaacsim/extscache \
         -type d -name websockets -path "*/pip_prebundle/*" \
         -exec rm -rf {} + 2>/dev/null || true
 
@@ -123,14 +125,18 @@ RUN uv pip install --no-cache-dir -e .
 COPY configs/ configs/
 
 # Export the final filesystem state; superseded wheels and build layers stay behind.
-RUN python /usr/local/lib/vla/export_runtime.py /opt/conda/envs/behavior /app /workspace /root
+RUN python /usr/local/lib/vla/export_runtime.py /opt/pixi/.pixi/envs/behavior /app /workspace /root
 
 FROM ${RUNTIME_IMAGE} AS runtime
-COPY --from=builder /runtime-root/ /
+COPY --from=builder /runtime-root/opt/pixi/.pixi/envs/behavior /opt/pixi/.pixi/envs/behavior
+COPY --from=builder /runtime-root/app /app
+COPY --from=builder /runtime-root/workspace /workspace
+COPY --from=builder /runtime-root/root /root
+COPY --from=builder /runtime-root/usr/local/share/vla-build /usr/local/share/vla-build
 RUN dpkg-query -W > /usr/local/share/vla-build/dpkg-runtime.txt
-ENV CONDA_PREFIX=/opt/conda/envs/behavior \
+ENV CONDA_PREFIX=/opt/pixi/.pixi/envs/behavior \
     CONDA_DEFAULT_ENV=behavior \
-    PATH=/opt/conda/envs/behavior/bin:$PATH
+    PATH=/opt/pixi/.pixi/envs/behavior/bin:$PATH
 ENV OMNIGIBSON_HEADLESS=1 \
     OMNI_KIT_ACCEPT_EULA=YES \
     ACCEPT_EULA=Y \

@@ -1,0 +1,16 @@
+[
+  {
+    "benchmark": "libero",
+    "deleted_development_bytes": 25930682,
+    "deleted_torch_bytes": 667930008,
+    "converted_states": 130
+  },
+  {
+    "benchmark": "vlabench",
+    "deleted_development_bytes": 885788281
+  },
+  {
+    "benchmark": "rlbench",
+    "deleted_development_bytes": 19777539
+  }
+]

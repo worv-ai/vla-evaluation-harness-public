@@ -1,7 +1,7 @@
 # RoboMME evaluation environment (ManiSkill3 fork + SAPIEN, Vulkan rendering)
 
 ARG BASE_IMAGE=ghcr.io/allenai/vla-evaluation-harness/base:latest
-ARG RUNTIME_IMAGE=ghcr.io/allenai/vla-evaluation-harness/base-cpu:latest
+ARG RUNTIME_IMAGE=ghcr.io/allenai/vla-evaluation-harness/base-render:latest
 FROM ${BASE_IMAGE} AS builder
 
 # ── uv environment (Python 3.11 per RoboMME requirement) ──────────────
@@ -61,11 +61,18 @@ COPY configs/ configs/
 RUN python /usr/local/lib/vla/export_runtime.py /opt/python /opt/venv /app /workspace /root
 
 FROM ${RUNTIME_IMAGE} AS runtime
-COPY --from=builder /runtime-root/ /
+ARG IMAGE_PROFILE=gpu
+ENV VLA_IMAGE_PROFILE=${IMAGE_PROFILE}
+COPY --from=builder /runtime-root/opt/python /opt/python
+COPY --from=builder /runtime-root/opt/venv /opt/venv
+COPY --from=builder /runtime-root/app /app
+COPY --from=builder /runtime-root/workspace /workspace
+COPY --from=builder /runtime-root/root /root
+COPY --from=builder /runtime-root/usr/local/share/vla-build /usr/local/share/vla-build
 RUN dpkg-query -W > /usr/local/share/vla-build/dpkg-runtime.txt
 ENV VIRTUAL_ENV=/opt/venv \
     PATH=/opt/venv/bin:$PATH
 WORKDIR /workspace
 RUN vla-eval --help > /dev/null
-ENTRYPOINT ["vla-eval"]
+ENTRYPOINT ["/usr/local/bin/image-entrypoint", "vla-eval"]
 CMD ["run", "--config", "/workspace/configs/benchmarks/robomme/eval.yaml"]
