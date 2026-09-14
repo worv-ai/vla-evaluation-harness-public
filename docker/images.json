@@ -1,0 +1,1031 @@
+{
+  "version": 1,
+  "bases": [
+    "base",
+    "base-cuda",
+    "base-runtime",
+    "base-render",
+    "base-cpu"
+  ],
+  "benchmarks": {
+    "simpler": {
+      "cpu": false,
+      "builder": "base",
+      "gpu_runtime": "base-render",
+      "redistributable": true,
+      "runtime_paths": [
+        "/opt/python",
+        "/opt/venv",
+        "/app",
+        "/workspace",
+        "/root"
+      ],
+      "runtime_instructions": [
+        "ARG IMAGE_PROFILE=gpu",
+        "ENV VLA_IMAGE_PROFILE=${IMAGE_PROFILE}",
+        "RUN dpkg-query -W > /usr/local/share/vla-build/dpkg-runtime.txt",
+        "ENV VIRTUAL_ENV=/opt/venv \\",
+        "    PATH=/opt/venv/bin:$PATH",
+        "WORKDIR /workspace",
+        "RUN vla-eval --help > /dev/null",
+        "ENTRYPOINT [\"vla-eval\"]",
+        "CMD [\"run\", \"--config\", \"/workspace/configs/benchmarks/simpler/widowx_vm.yaml\"]"
+      ],
+      "torch_backend": "cpu",
+      "jax": false,
+      "assets": [],
+      "prune": {
+        "libero_numpy": false,
+        "cpu_development": false
+      },
+      "sources": [
+        {
+          "path": "/app/ManiSkill2_real2sim",
+          "url": "https://github.com/simpler-env/ManiSkill2_real2sim.git",
+          "revision_arg": "MANISKILL2_REAL2SIM_REF",
+          "revision": "ef7a4d4fdf4b69f2c2154db5b15b9ac8dfe10682",
+          "submodules": false
+        },
+        {
+          "path": "/app/simpler_env_src",
+          "url": "https://github.com/simpler-env/SimplerEnv.git",
+          "revision_arg": "SIMPLER_ENV_REF",
+          "revision": "4ab7178e83e84ee06894034ec6dbf9e7aad1e882",
+          "submodules": false
+        }
+      ],
+      "layouts": [
+        "full",
+        "split"
+      ]
+    },
+    "libero": {
+      "cpu": true,
+      "builder": "base",
+      "gpu_runtime": "base-render",
+      "redistributable": true,
+      "runtime_paths": [
+        "/opt/pixi/.pixi/envs/py38",
+        "/app",
+        "/workspace",
+        "/root"
+      ],
+      "runtime_instructions": [
+        "ARG IMAGE_PROFILE=gpu",
+        "ENV VLA_IMAGE_PROFILE=${IMAGE_PROFILE}",
+        "RUN dpkg-query -W > /usr/local/share/vla-build/dpkg-runtime.txt",
+        "ENV CONDA_PREFIX=/opt/pixi/.pixi/envs/py38 \\",
+        "    CONDA_DEFAULT_ENV=libero \\",
+        "    PATH=/opt/pixi/.pixi/envs/py38/bin:$PATH",
+        "WORKDIR /workspace",
+        "RUN vla-eval --help > /dev/null",
+        "ENTRYPOINT [\"/usr/local/bin/image-entrypoint\", \"vla-eval\"]",
+        "CMD [\"run\", \"--config\", \"/workspace/configs/benchmarks/libero/spatial.yaml\"]"
+      ],
+      "torch_backend": "cpu",
+      "jax": false,
+      "assets": [
+        "/app/libero/libero/libero/assets",
+        "/app/libero/notebooks/custom_assets",
+        "/opt/pixi/.pixi/envs/py38/lib/python3.8/site-packages/robosuite/models/assets"
+      ],
+      "prune": {
+        "libero_numpy": true,
+        "cpu_development": true
+      },
+      "sources": [
+        {
+          "path": "/app/libero",
+          "url": "https://github.com/Lifelong-Robot-Learning/LIBERO.git",
+          "revision_arg": "LIBERO_REF",
+          "revision": "8f1084e3132a39270c3a13ebe37270a43ece2a01",
+          "submodules": false
+        }
+      ],
+      "layouts": [
+        "full",
+        "split"
+      ]
+    },
+    "libero_pro": {
+      "cpu": true,
+      "builder": "base",
+      "gpu_runtime": "base-render",
+      "redistributable": true,
+      "runtime_paths": [
+        "/opt/pixi/.pixi/envs/py38",
+        "/app",
+        "/workspace",
+        "/root"
+      ],
+      "runtime_instructions": [
+        "ARG IMAGE_PROFILE=gpu",
+        "ENV VLA_IMAGE_PROFILE=${IMAGE_PROFILE}",
+        "RUN dpkg-query -W > /usr/local/share/vla-build/dpkg-runtime.txt",
+        "ENV CONDA_PREFIX=/opt/pixi/.pixi/envs/py38 \\",
+        "    CONDA_DEFAULT_ENV=libero \\",
+        "    PATH=/opt/pixi/.pixi/envs/py38/bin:$PATH",
+        "WORKDIR /workspace",
+        "RUN vla-eval --help > /dev/null",
+        "ENTRYPOINT [\"/usr/local/bin/image-entrypoint\", \"vla-eval\"]",
+        "CMD [\"run\", \"--config\", \"/workspace/configs/benchmarks/libero_pro/eval.yaml\"]"
+      ],
+      "torch_backend": "cpu",
+      "jax": false,
+      "assets": [
+        "/app/libero-pro/libero/libero/assets",
+        "/app/libero-pro/notebooks/custom_assets",
+        "/opt/pixi/.pixi/envs/py38/lib/python3.8/site-packages/robosuite/models/assets"
+      ],
+      "prune": {
+        "libero_numpy": true,
+        "cpu_development": true
+      },
+      "sources": [
+        {
+          "path": "/app/libero-pro",
+          "url": "https://github.com/Zxy-MLlab/LIBERO-PRO.git",
+          "revision_arg": "LIBERO_PRO_REF",
+          "revision": "eafdb809426b13153aa1e4c42d6601844217dfec",
+          "submodules": false
+        }
+      ],
+      "layouts": [
+        "full",
+        "split"
+      ]
+    },
+    "libero_plus": {
+      "cpu": true,
+      "builder": "base",
+      "gpu_runtime": "base-render",
+      "redistributable": true,
+      "runtime_paths": [
+        "/opt/pixi/.pixi/envs/py38",
+        "/app",
+        "/workspace",
+        "/root"
+      ],
+      "runtime_instructions": [
+        "ARG IMAGE_PROFILE=gpu",
+        "ENV VLA_IMAGE_PROFILE=${IMAGE_PROFILE}",
+        "RUN apt-get update && apt-get install -y --no-install-recommends \\",
+        "        libmagickwand-6.q16-6 libfontconfig1 libexpat1 \\",
+        "    && rm -rf /var/lib/apt/lists/*",
+        "RUN dpkg-query -W > /usr/local/share/vla-build/dpkg-runtime.txt",
+        "ENV CONDA_PREFIX=/opt/pixi/.pixi/envs/py38 \\",
+        "    CONDA_DEFAULT_ENV=libero \\",
+        "    PATH=/opt/pixi/.pixi/envs/py38/bin:$PATH",
+        "WORKDIR /workspace",
+        "RUN vla-eval --help > /dev/null",
+        "ENTRYPOINT [\"/usr/local/bin/image-entrypoint\", \"vla-eval\"]",
+        "CMD [\"run\", \"--config\", \"/workspace/configs/benchmarks/libero_plus/spatial.yaml\"]"
+      ],
+      "torch_backend": "cpu",
+      "jax": false,
+      "assets": [
+        "/app/LIBERO-plus/libero/libero/assets",
+        "/app/LIBERO-plus/notebooks/custom_assets",
+        "/opt/pixi/.pixi/envs/py38/lib/python3.8/site-packages/robosuite/models/assets"
+      ],
+      "prune": {
+        "libero_numpy": true,
+        "cpu_development": true
+      },
+      "sources": [
+        {
+          "path": "/app/LIBERO-plus",
+          "url": "https://github.com/sylvestf/LIBERO-plus.git",
+          "revision_arg": "LIBERO_PLUS_REF",
+          "revision": "4976dc30028e805ff8094b55501d532c48fec182",
+          "submodules": false
+        }
+      ],
+      "layouts": [
+        "full",
+        "split"
+      ]
+    },
+    "libero_mem": {
+      "cpu": true,
+      "builder": "base",
+      "gpu_runtime": "base-render",
+      "redistributable": true,
+      "runtime_paths": [
+        "/opt/pixi/.pixi/envs/py38",
+        "/app",
+        "/workspace",
+        "/root"
+      ],
+      "runtime_instructions": [
+        "ARG IMAGE_PROFILE=gpu",
+        "ENV VLA_IMAGE_PROFILE=${IMAGE_PROFILE}",
+        "RUN dpkg-query -W > /usr/local/share/vla-build/dpkg-runtime.txt",
+        "ENV CONDA_PREFIX=/opt/pixi/.pixi/envs/py38 \\",
+        "    CONDA_DEFAULT_ENV=libero_mem \\",
+        "    PATH=/opt/pixi/.pixi/envs/py38/bin:$PATH",
+        "WORKDIR /workspace",
+        "RUN vla-eval --help > /dev/null",
+        "ENTRYPOINT [\"/usr/local/bin/image-entrypoint\", \"vla-eval\"]",
+        "CMD [\"run\", \"--config\", \"/workspace/configs/benchmarks/libero_mem/eval.yaml\"]"
+      ],
+      "torch_backend": "cpu",
+      "jax": false,
+      "assets": [
+        "/app/libero-mem/libero/libero/assets",
+        "/app/libero-mem/notebooks/custom_assets",
+        "/opt/pixi/.pixi/envs/py38/lib/python3.8/site-packages/robosuite/models/assets",
+        "/app/libero-mem/thirdparty/robosuite/robosuite/models/assets"
+      ],
+      "prune": {
+        "libero_numpy": true,
+        "cpu_development": true
+      },
+      "sources": [
+        {
+          "path": "/app/libero-mem",
+          "url": "https://github.com/libero-mem/libero-mem.git",
+          "revision_arg": "LIBERO_MEM_REF",
+          "revision": "0eee0defa4024e51511b6e15a79f30e9620209de",
+          "submodules": false
+        }
+      ],
+      "layouts": [
+        "full",
+        "split"
+      ]
+    },
+    "robocerebra": {
+      "cpu": true,
+      "builder": "base",
+      "gpu_runtime": "base-render",
+      "redistributable": true,
+      "runtime_paths": [
+        "/opt/pixi/.pixi/envs/py38",
+        "/app",
+        "/workspace",
+        "/root",
+        "/tmp/RoboCerebra"
+      ],
+      "runtime_instructions": [
+        "ARG IMAGE_PROFILE=gpu",
+        "ENV VLA_IMAGE_PROFILE=${IMAGE_PROFILE}",
+        "RUN dpkg-query -W > /usr/local/share/vla-build/dpkg-runtime.txt",
+        "ENV CONDA_PREFIX=/opt/pixi/.pixi/envs/py38 \\",
+        "    CONDA_DEFAULT_ENV=libero \\",
+        "    PATH=/opt/pixi/.pixi/envs/py38/bin:$PATH",
+        "WORKDIR /workspace",
+        "RUN vla-eval --help > /dev/null",
+        "ENTRYPOINT [\"/usr/local/bin/image-entrypoint\", \"vla-eval\"]",
+        "CMD [\"run\", \"--config\", \"/workspace/configs/benchmarks/robocerebra/eval.yaml\"]"
+      ],
+      "torch_backend": "cpu",
+      "jax": false,
+      "assets": [
+        "/opt/pixi/.pixi/envs/py38/lib/python3.8/site-packages/robosuite/models/assets"
+      ],
+      "prune": {
+        "libero_numpy": false,
+        "cpu_development": true
+      },
+      "sources": [
+        {
+          "path": "/tmp/RoboCerebra",
+          "url": "https://github.com/qiuboxiang/RoboCerebra.git",
+          "revision_arg": "ROBOCEREBRA_REF",
+          "revision": "2573426c13dfcd5e7d7831c15587b058aaa1c0c0",
+          "submodules": false
+        }
+      ],
+      "layouts": [
+        "full",
+        "split"
+      ]
+    },
+    "maniskill2": {
+      "cpu": false,
+      "builder": "base",
+      "gpu_runtime": "base-render",
+      "redistributable": true,
+      "runtime_paths": [
+        "/opt/python",
+        "/opt/venv",
+        "/app",
+        "/workspace",
+        "/root"
+      ],
+      "runtime_instructions": [
+        "ARG IMAGE_PROFILE=gpu",
+        "ENV VLA_IMAGE_PROFILE=${IMAGE_PROFILE}",
+        "RUN dpkg-query -W > /usr/local/share/vla-build/dpkg-runtime.txt",
+        "ENV VIRTUAL_ENV=/opt/venv \\",
+        "    PATH=/opt/venv/bin:$PATH",
+        "WORKDIR /workspace",
+        "RUN vla-eval --help > /dev/null",
+        "ENTRYPOINT [\"vla-eval\"]",
+        "CMD [\"run\", \"--config\", \"/workspace/configs/benchmarks/maniskill2/eval.yaml\"]"
+      ],
+      "torch_backend": "cu121",
+      "jax": false,
+      "assets": [
+        "/workspace/data"
+      ],
+      "prune": {
+        "libero_numpy": false,
+        "cpu_development": false
+      },
+      "sources": [],
+      "layouts": [
+        "full",
+        "split"
+      ]
+    },
+    "calvin": {
+      "cpu": true,
+      "builder": "base",
+      "gpu_runtime": "base-render",
+      "redistributable": true,
+      "runtime_paths": [
+        "/opt/pixi/.pixi/envs/calvin",
+        "/app",
+        "/workspace",
+        "/root",
+        "/data"
+      ],
+      "runtime_instructions": [
+        "ARG IMAGE_PROFILE=gpu",
+        "ENV VLA_IMAGE_PROFILE=${IMAGE_PROFILE}",
+        "RUN apt-get update && apt-get install -y --no-install-recommends \\",
+        "        libfftw3-double3 libfftw3-single3 libfftw3-long3 libopenblas0-pthread \\",
+        "        git \\",
+        "    && rm -rf /var/lib/apt/lists/*",
+        "RUN dpkg-query -W > /usr/local/share/vla-build/dpkg-runtime.txt",
+        "ENV CONDA_PREFIX=/opt/pixi/.pixi/envs/calvin \\",
+        "    CONDA_DEFAULT_ENV=calvin \\",
+        "    PATH=/opt/pixi/.pixi/envs/calvin/bin:$PATH",
+        "WORKDIR /workspace",
+        "RUN vla-eval --help > /dev/null",
+        "ENTRYPOINT [\"/usr/local/bin/image-entrypoint\", \"vla-eval\"]",
+        "CMD [\"run\", \"--config\", \"/workspace/configs/benchmarks/calvin/eval.yaml\"]"
+      ],
+      "torch_backend": "cpu",
+      "jax": false,
+      "assets": [
+        "/app/calvin/calvin_env/data",
+        "/app/calvin/calvin_env/tacto/meshes",
+        "/data"
+      ],
+      "prune": {
+        "libero_numpy": false,
+        "cpu_development": true
+      },
+      "sources": [
+        {
+          "path": "/app/calvin",
+          "url": "https://github.com/mees/calvin.git",
+          "revision_arg": "CALVIN_REF",
+          "revision": "fa03f01f19c65920e18cf37398a9ce859274af76",
+          "submodules": true
+        }
+      ],
+      "layouts": [
+        "full",
+        "split"
+      ]
+    },
+    "mikasa_robo": {
+      "cpu": false,
+      "builder": "base",
+      "gpu_runtime": "base-render",
+      "redistributable": true,
+      "runtime_paths": [
+        "/opt/python",
+        "/opt/venv",
+        "/app",
+        "/workspace",
+        "/root",
+        "/opt/MIKASA-Robo"
+      ],
+      "runtime_instructions": [
+        "ARG IMAGE_PROFILE=gpu",
+        "ENV VLA_IMAGE_PROFILE=${IMAGE_PROFILE}",
+        "RUN dpkg-query -W > /usr/local/share/vla-build/dpkg-runtime.txt",
+        "ENV VIRTUAL_ENV=/opt/venv \\",
+        "    PATH=/opt/venv/bin:$PATH",
+        "WORKDIR /workspace",
+        "RUN vla-eval --help > /dev/null",
+        "ENTRYPOINT [\"vla-eval\"]",
+        "CMD [\"run\", \"--config\", \"/workspace/configs/benchmarks/mikasa/eval.yaml\"]"
+      ],
+      "torch_backend": "cu121",
+      "jax": false,
+      "assets": [],
+      "prune": {
+        "libero_numpy": false,
+        "cpu_development": false
+      },
+      "sources": [
+        {
+          "path": "/opt/MIKASA-Robo",
+          "url": "https://github.com/CognitiveAISystems/MIKASA-Robo.git",
+          "revision_arg": "MIKASA_ROBO_REF",
+          "revision": "16634db18bef08128ed79346469c86fc12169aed",
+          "submodules": false
+        }
+      ],
+      "layouts": [
+        "full",
+        "split"
+      ]
+    },
+    "vlabench": {
+      "cpu": true,
+      "builder": "base",
+      "gpu_runtime": "base-render",
+      "redistributable": true,
+      "runtime_paths": [
+        "/opt/python",
+        "/opt/venv",
+        "/app",
+        "/workspace",
+        "/root"
+      ],
+      "runtime_instructions": [
+        "ARG IMAGE_PROFILE=gpu",
+        "ENV VLA_IMAGE_PROFILE=${IMAGE_PROFILE}",
+        "RUN dpkg-query -W > /usr/local/share/vla-build/dpkg-runtime.txt",
+        "ENV VIRTUAL_ENV=/opt/venv \\",
+        "    PATH=/opt/venv/bin:$PATH",
+        "ENV VLABENCH_ROOT=/app/VLABench/VLABench",
+        "WORKDIR /workspace",
+        "RUN vla-eval --help > /dev/null",
+        "ENTRYPOINT [\"/usr/local/bin/image-entrypoint\", \"vla-eval\"]",
+        "CMD [\"run\", \"--config\", \"/workspace/configs/benchmarks/vlabench/eval.yaml\"]"
+      ],
+      "torch_backend": "cpu",
+      "jax": false,
+      "assets": [
+        "/app/VLABench/VLABench/assets"
+      ],
+      "prune": {
+        "libero_numpy": false,
+        "cpu_development": true
+      },
+      "sources": [
+        {
+          "path": "/app/rrt-algorithms",
+          "url": "https://github.com/motion-planning/rrt-algorithms.git",
+          "revision_arg": "RRT_ALGORITHMS_REF",
+          "revision": "e51d95ee489a225220d6ae2a764c4111f6ba7d85",
+          "submodules": false
+        },
+        {
+          "path": "/app/VLABench",
+          "url": "https://github.com/OpenMOSS/VLABench.git",
+          "revision_arg": "VLABENCH_REF",
+          "revision": "cf588fe60c0c7282174fe979f5913170cfe69017",
+          "submodules": false
+        }
+      ],
+      "layouts": [
+        "full",
+        "split"
+      ]
+    },
+    "rlbench": {
+      "cpu": true,
+      "builder": "base",
+      "gpu_runtime": "base-render",
+      "redistributable": false,
+      "runtime_paths": [
+        "/opt/pixi/.pixi/envs/py38",
+        "/app",
+        "/workspace",
+        "/root",
+        "/opt/coppeliasim",
+        "/tmp/PyRep",
+        "/tmp/RLBench",
+        "/rlbench_entrypoint.sh"
+      ],
+      "runtime_instructions": [
+        "ARG IMAGE_PROFILE=gpu",
+        "ENV VLA_IMAGE_PROFILE=${IMAGE_PROFILE}",
+        "RUN apt-get update && apt-get install -y --no-install-recommends \\",
+        "        xvfb libfontconfig1 tini libdbus-1-3 \\",
+        "    && rm -rf /var/lib/apt/lists/*",
+        "RUN dpkg-query -W > /usr/local/share/vla-build/dpkg-runtime.txt",
+        "ENV CONDA_PREFIX=/opt/pixi/.pixi/envs/py38 \\",
+        "    CONDA_DEFAULT_ENV=rlbench \\",
+        "    PATH=/opt/pixi/.pixi/envs/py38/bin:$PATH",
+        "ENV COPPELIASIM_ROOT=/opt/coppeliasim",
+        "ENV LD_LIBRARY_PATH=${COPPELIASIM_ROOT}:/usr/local/nvidia/lib:/usr/local/nvidia/lib64 \\",
+        "    QT_QPA_PLATFORM_PLUGIN_PATH=${COPPELIASIM_ROOT}/platforms \\",
+        "    QT_PLUGIN_PATH=${COPPELIASIM_ROOT} \\",
+        "    QT_QPA_PLATFORM=xcb",
+        "WORKDIR /workspace",
+        "RUN vla-eval --help > /dev/null",
+        "ENTRYPOINT [\"tini\", \"-g\", \"--\", \"/usr/local/bin/image-entrypoint\", \"/rlbench_entrypoint.sh\"]",
+        "CMD [\"run\", \"--config\", \"/workspace/configs/benchmarks/rlbench/eval.yaml\"]"
+      ],
+      "torch_backend": "cpu",
+      "jax": false,
+      "assets": [
+        "/tmp/RLBench/rlbench/assets"
+      ],
+      "prune": {
+        "libero_numpy": false,
+        "cpu_development": true
+      },
+      "sources": [
+        {
+          "path": "/tmp/PyRep",
+          "url": "https://github.com/stepjam/PyRep.git",
+          "revision_arg": "PYREP_REF",
+          "revision": "8f420be8064b1970aae18a9cfbc978dfb15747ef",
+          "submodules": false
+        },
+        {
+          "path": "/tmp/RLBench",
+          "url": "https://github.com/stepjam/RLBench.git",
+          "revision_arg": "RLBENCH_REF",
+          "revision": "02720bba4c73fe02eb75df946b8791b806028a9d",
+          "submodules": false
+        }
+      ],
+      "layouts": [
+        "full",
+        "split"
+      ],
+      "license": {
+        "argument": "ACCEPT_RLBENCH_LICENCE",
+        "url": "https://github.com/stepjam/RLBench/blob/master/LICENSE"
+      }
+    },
+    "robotwin": {
+      "cpu": false,
+      "builder": "base-cuda",
+      "gpu_runtime": "base-runtime",
+      "redistributable": true,
+      "runtime_paths": [
+        "/opt/python",
+        "/opt/venv",
+        "/app",
+        "/workspace",
+        "/root"
+      ],
+      "runtime_instructions": [
+        "ARG IMAGE_PROFILE=gpu",
+        "ENV VLA_IMAGE_PROFILE=${IMAGE_PROFILE}",
+        "# CuRobo may JIT-compile extensions; keep its CUDA toolchain at runtime.",
+        "RUN apt-get update && apt-get install -y --no-install-recommends \\",
+        "        build-essential cuda-nvcc-12-1 cuda-cudart-dev-12-1 ninja-build \\",
+        "    && rm -rf /var/lib/apt/lists/*",
+        "RUN dpkg-query -W > /usr/local/share/vla-build/dpkg-runtime.txt",
+        "ENV VIRTUAL_ENV=/opt/venv \\",
+        "    PATH=/opt/venv/bin:$PATH",
+        "ENV TORCH_CUDA_ARCH_LIST=\"7.0;7.5;8.0;8.6;8.9;9.0+PTX\"",
+        "WORKDIR /workspace",
+        "RUN vla-eval --help > /dev/null",
+        "ENTRYPOINT [\"vla-eval\"]",
+        "CMD [\"run\", \"--config\", \"/workspace/configs/benchmarks/robotwin/eval.yaml\"]"
+      ],
+      "torch_backend": "cu121",
+      "jax": false,
+      "assets": [
+        "/app/RoboTwin/assets"
+      ],
+      "prune": {
+        "libero_numpy": false,
+        "cpu_development": false
+      },
+      "sources": [
+        {
+          "path": "/app/RoboTwin",
+          "url": "https://github.com/RoboTwin-Platform/RoboTwin.git",
+          "revision_arg": "ROBOTWIN_REF",
+          "revision": "c3ddfa8b97d5519efa828b075999bd0006778e5e",
+          "submodules": false
+        }
+      ],
+      "layouts": [
+        "full",
+        "split"
+      ]
+    },
+    "robocasa": {
+      "cpu": true,
+      "builder": "base",
+      "gpu_runtime": "base-render",
+      "redistributable": true,
+      "runtime_paths": [
+        "/opt/python",
+        "/opt/venv",
+        "/app",
+        "/workspace",
+        "/root"
+      ],
+      "runtime_instructions": [
+        "ARG IMAGE_PROFILE=gpu",
+        "ENV VLA_IMAGE_PROFILE=${IMAGE_PROFILE}",
+        "RUN dpkg-query -W > /usr/local/share/vla-build/dpkg-runtime.txt",
+        "ENV VIRTUAL_ENV=/opt/venv \\",
+        "    PATH=/opt/venv/bin:$PATH",
+        "WORKDIR /workspace",
+        "RUN vla-eval --help > /dev/null",
+        "ENTRYPOINT [\"/usr/local/bin/image-entrypoint\", \"vla-eval\"]",
+        "CMD [\"run\", \"--config\", \"/workspace/configs/benchmarks/robocasa/eval.yaml\"]"
+      ],
+      "torch_backend": "cpu",
+      "jax": false,
+      "assets": [
+        "/app/robocasa/robocasa/models/assets",
+        "/app/robosuite/robosuite/models/assets"
+      ],
+      "prune": {
+        "libero_numpy": false,
+        "cpu_development": true
+      },
+      "sources": [
+        {
+          "path": "/app/robosuite",
+          "url": "https://github.com/ARISE-Initiative/robosuite.git",
+          "revision_arg": "ROBOCASA_ROBOSUITE_REF",
+          "revision": "1a8701b90c07c6595ace4af9935d7c5ebe1baed3",
+          "submodules": false
+        },
+        {
+          "path": "/app/robocasa",
+          "url": "https://github.com/robocasa/robocasa.git",
+          "revision_arg": "ROBOCASA_REF",
+          "revision": "756598a5be52e052339bb2d957426e39015c2afb",
+          "submodules": false
+        }
+      ],
+      "layouts": [
+        "full",
+        "split"
+      ]
+    },
+    "robocasa365": {
+      "cpu": true,
+      "builder": "base",
+      "gpu_runtime": "base-render",
+      "redistributable": true,
+      "runtime_paths": [
+        "/opt/python",
+        "/opt/venv",
+        "/app",
+        "/workspace",
+        "/root"
+      ],
+      "runtime_instructions": [
+        "ARG IMAGE_PROFILE=gpu",
+        "ENV VLA_IMAGE_PROFILE=${IMAGE_PROFILE}",
+        "RUN dpkg-query -W > /usr/local/share/vla-build/dpkg-runtime.txt",
+        "ENV VIRTUAL_ENV=/opt/venv \\",
+        "    PATH=/opt/venv/bin:$PATH",
+        "WORKDIR /workspace",
+        "RUN vla-eval --help > /dev/null",
+        "ENTRYPOINT [\"/usr/local/bin/image-entrypoint\", \"vla-eval\"]",
+        "CMD [\"run\", \"--config\", \"/workspace/configs/benchmarks/robocasa365/eval.yaml\"]"
+      ],
+      "torch_backend": "cpu",
+      "jax": false,
+      "assets": [
+        "/app/robocasa365/robocasa/models/assets",
+        "/app/robosuite/robosuite/models/assets"
+      ],
+      "prune": {
+        "libero_numpy": false,
+        "cpu_development": true
+      },
+      "sources": [
+        {
+          "path": "/app/robosuite",
+          "url": "https://github.com/ARISE-Initiative/robosuite.git",
+          "revision_arg": "ROBOSUITE_REF",
+          "revision": "5ce6643f3092639d08f7b0f90ed1c6a84f50552c",
+          "submodules": false
+        },
+        {
+          "path": "/app/robocasa365",
+          "url": "https://github.com/robocasa/robocasa.git",
+          "revision_arg": "ROBOCASA365_REF",
+          "revision": "b4684e6ee37d377cc392e98302a6b916d588b415",
+          "submodules": false
+        }
+      ],
+      "layouts": [
+        "full",
+        "split"
+      ]
+    },
+    "kinetix": {
+      "cpu": true,
+      "builder": "base",
+      "gpu_runtime": "base-render",
+      "redistributable": true,
+      "runtime_paths": [
+        "/opt/python",
+        "/opt/venv",
+        "/app",
+        "/workspace",
+        "/root",
+        "/opt/kinetix"
+      ],
+      "runtime_instructions": [
+        "ARG IMAGE_PROFILE=gpu",
+        "ENV VLA_IMAGE_PROFILE=${IMAGE_PROFILE}",
+        "RUN dpkg-query -W > /usr/local/share/vla-build/dpkg-runtime.txt",
+        "ENV VIRTUAL_ENV=/opt/venv \\",
+        "    PATH=/opt/venv/bin:$PATH",
+        "WORKDIR /workspace",
+        "RUN vla-eval --help > /dev/null",
+        "ENTRYPOINT [\"/usr/local/bin/image-entrypoint\", \"vla-eval\"]",
+        "CMD [\"run\", \"--config\", \"/workspace/configs/benchmarks/kinetix/eval.yaml\"]"
+      ],
+      "torch_backend": "cpu",
+      "jax": true,
+      "assets": [],
+      "prune": {
+        "libero_numpy": false,
+        "cpu_development": true
+      },
+      "sources": [
+        {
+          "path": "/opt/kinetix",
+          "url": "https://github.com/FLAIROx/Kinetix.git",
+          "revision_arg": "KINETIX_REF",
+          "revision": "67f89f45e32cfd7899bc63e252a6b044eacafb83",
+          "submodules": false
+        },
+        {
+          "path": "/app/rtc",
+          "url": "https://github.com/Physical-Intelligence/real-time-chunking-kinetix.git",
+          "revision_arg": "RTC_KINETIX_REF",
+          "revision": "9296f31d62d5bfeb5779dcb2f9bcf71ca37f448b",
+          "submodules": false
+        }
+      ],
+      "layouts": [
+        "full",
+        "split"
+      ]
+    },
+    "robomme": {
+      "cpu": true,
+      "builder": "base",
+      "gpu_runtime": "base-render",
+      "redistributable": true,
+      "runtime_paths": [
+        "/opt/python",
+        "/opt/venv",
+        "/app",
+        "/workspace",
+        "/root"
+      ],
+      "runtime_instructions": [
+        "ARG IMAGE_PROFILE=gpu",
+        "ENV VLA_IMAGE_PROFILE=${IMAGE_PROFILE}",
+        "RUN dpkg-query -W > /usr/local/share/vla-build/dpkg-runtime.txt",
+        "ENV VIRTUAL_ENV=/opt/venv \\",
+        "    PATH=/opt/venv/bin:$PATH",
+        "WORKDIR /workspace",
+        "RUN vla-eval --help > /dev/null",
+        "ENTRYPOINT [\"/usr/local/bin/image-entrypoint\", \"vla-eval\"]",
+        "CMD [\"run\", \"--config\", \"/workspace/configs/benchmarks/robomme/eval.yaml\"]"
+      ],
+      "torch_backend": "cu128",
+      "jax": false,
+      "assets": [
+        "/app/ManiSkill/mani_skill/assets",
+        "/app/robomme_benchmark/assets"
+      ],
+      "prune": {
+        "libero_numpy": false,
+        "cpu_development": true
+      },
+      "sources": [
+        {
+          "path": "/app/ManiSkill",
+          "url": "https://github.com/YinpeiDai/ManiSkill.git",
+          "revision_arg": "ROBOMME_MANISKILL_REF",
+          "revision": "07be6fbc66350ddca200abfb0a11b692f078f7fd",
+          "submodules": false
+        },
+        {
+          "path": "/app/robomme_benchmark",
+          "url": "https://github.com/RoboMME/robomme_benchmark.git",
+          "revision_arg": "ROBOMME_BENCHMARK_REF",
+          "revision": "f2b540e64034cf9afd0b51cf8ec491de09c74f58",
+          "submodules": false
+        }
+      ],
+      "layouts": [
+        "full",
+        "split"
+      ]
+    },
+    "molmospaces": {
+      "cpu": true,
+      "builder": "base",
+      "gpu_runtime": "base-render",
+      "redistributable": true,
+      "runtime_paths": [
+        "/opt/python",
+        "/opt/venv",
+        "/app",
+        "/workspace",
+        "/root",
+        "/assets",
+        "/cache/molmo-spaces-resources"
+      ],
+      "runtime_instructions": [
+        "ARG IMAGE_PROFILE=gpu",
+        "ENV VLA_IMAGE_PROFILE=${IMAGE_PROFILE}",
+        "RUN dpkg-query -W > /usr/local/share/vla-build/dpkg-runtime.txt",
+        "ENV VIRTUAL_ENV=/opt/venv \\",
+        "    PATH=/opt/venv/bin:$PATH",
+        "ENV MLSPACES_ASSETS_DIR=/assets \\",
+        "    MLSPACES_CACHE_DIR=/cache/molmo-spaces-resources \\",
+        "    MUJOCO_GL=egl \\",
+        "    JAX_PLATFORMS=cpu",
+        "WORKDIR /workspace",
+        "RUN vla-eval --help > /dev/null",
+        "ENTRYPOINT [\"/usr/local/bin/image-entrypoint\", \"vla-eval\"]",
+        "CMD [\"run\", \"--config\", \"/workspace/configs/benchmarks/molmospaces/pick_and_place.yaml\"]"
+      ],
+      "torch_backend": "cu121",
+      "jax": false,
+      "assets": [
+        "/assets",
+        "/cache/molmo-spaces-resources"
+      ],
+      "prune": {
+        "libero_numpy": false,
+        "cpu_development": true
+      },
+      "sources": [],
+      "layouts": [
+        "full",
+        "split"
+      ]
+    },
+    "behavior1k": {
+      "cpu": false,
+      "builder": "base-cuda",
+      "gpu_runtime": "base-runtime",
+      "redistributable": false,
+      "runtime_paths": [
+        "/opt/pixi/.pixi/envs/behavior",
+        "/app",
+        "/workspace",
+        "/root"
+      ],
+      "runtime_instructions": [
+        "ARG IMAGE_PROFILE=gpu",
+        "ENV VLA_IMAGE_PROFILE=${IMAGE_PROFILE}",
+        "RUN dpkg-query -W > /usr/local/share/vla-build/dpkg-runtime.txt",
+        "ENV CONDA_PREFIX=/opt/pixi/.pixi/envs/behavior \\",
+        "    CONDA_DEFAULT_ENV=behavior \\",
+        "    PATH=/opt/pixi/.pixi/envs/behavior/bin:$PATH",
+        "ENV OMNIGIBSON_HEADLESS=1 \\",
+        "    OMNI_KIT_ACCEPT_EULA=YES \\",
+        "    ACCEPT_EULA=Y \\",
+        "    PRIVACY_CONSENT=Y",
+        "WORKDIR /workspace",
+        "RUN vla-eval --help > /dev/null",
+        "ENTRYPOINT [\"vla-eval\"]",
+        "CMD [\"run\", \"--config\", \"/workspace/configs/benchmarks/behavior1k/eval.yaml\"]"
+      ],
+      "torch_backend": "cu124",
+      "jax": false,
+      "assets": [],
+      "prune": {
+        "libero_numpy": false,
+        "cpu_development": false
+      },
+      "sources": [
+        {
+          "path": "/app/BEHAVIOR-1K",
+          "url": "https://github.com/StanfordVL/BEHAVIOR-1K.git",
+          "revision_arg": "BEHAVIOR1K_REF",
+          "revision": "88454bd04f75dc57c00ab1f1a00bcde1ff505950",
+          "submodules": false
+        }
+      ],
+      "layouts": [
+        "full",
+        "split"
+      ],
+      "license": {
+        "argument": "ACCEPT_NVIDIA_EULA",
+        "url": "https://docs.omniverse.nvidia.com/eula/"
+      }
+    },
+    "duobench": {
+      "cpu": true,
+      "builder": "base",
+      "gpu_runtime": "base-render",
+      "redistributable": true,
+      "runtime_paths": [
+        "/opt/pixi/.pixi/envs/duobench",
+        "/app",
+        "/workspace",
+        "/root",
+        "/opt/rcs",
+        "/opt/duobench"
+      ],
+      "runtime_instructions": [
+        "ARG IMAGE_PROFILE=gpu",
+        "ENV VLA_IMAGE_PROFILE=${IMAGE_PROFILE}",
+        "RUN apt-get update && apt-get install -y --no-install-recommends \\",
+        "        libpocoactiverecord80 libpococrypto80 libpocodata80 libpocodatamysql80 \\",
+        "        libpocodataodbc80 libpocodatapostgresql80 libpocodatasqlite80 libpocoencodings80 \\",
+        "        libpocofoundation80 libpocojson80 libpocojwt80 libpocomongodb80 \\",
+        "        libpoconet80 libpoconetssl80 libpocoredis80 libpocoutil80 \\",
+        "        libpocoxml80 libpocozip80 \\",
+        "    && rm -rf /var/lib/apt/lists/*",
+        "RUN dpkg-query -W > /usr/local/share/vla-build/dpkg-runtime.txt",
+        "ENV CONDA_PREFIX=/opt/pixi/.pixi/envs/duobench \\",
+        "    CONDA_DEFAULT_ENV=duobench \\",
+        "    PATH=/opt/pixi/.pixi/envs/duobench/bin:$PATH",
+        "ENV DEBIAN_FRONTEND=noninteractive \\",
+        "    PIP_DISABLE_PIP_VERSION_CHECK=1 \\",
+        "    PYTHONDONTWRITEBYTECODE=1 \\",
+        "    PYTHONUNBUFFERED=1",
+        "ENV LD_LIBRARY_PATH=/opt/pixi/.pixi/envs/duobench/lib:/usr/local/nvidia/lib:/usr/local/nvidia/lib64",
+        "WORKDIR /workspace",
+        "RUN vla-eval --help > /dev/null",
+        "ENTRYPOINT [\"/usr/local/bin/image-entrypoint\", \"vla-eval\"]",
+        "CMD [\"run\", \"--config\", \"/workspace/configs/benchmarks/duobench/smoke_test.yaml\"]"
+      ],
+      "torch_backend": "cpu",
+      "jax": false,
+      "assets": [
+        "/opt/rcs/assets",
+        "/opt/duobench/assets"
+      ],
+      "prune": {
+        "libero_numpy": false,
+        "cpu_development": true
+      },
+      "sources": [
+        {
+          "path": "/opt/rcs",
+          "url": "https://github.com/RobotControlStack/robot-control-stack.git",
+          "revision_arg": "RCS_REF",
+          "revision": "e8a41823bc798a6a2454a4ea8855c6fe41908d62",
+          "submodules": false
+        },
+        {
+          "path": "/opt/duobench",
+          "url": "https://github.com/RobotControlStack/duobench.git",
+          "revision_arg": "DUOBENCH_REF",
+          "revision": "0b3cebd23b04d13fdf00318245648e859b184272",
+          "submodules": false
+        }
+      ],
+      "layouts": [
+        "full",
+        "split"
+      ]
+    },
+    "robodojo": {
+      "cpu": false,
+      "builder": "base-cuda",
+      "gpu_runtime": "base-runtime",
+      "redistributable": false,
+      "external_base": "robodojo:cuda12.8",
+      "layouts": [
+        "full"
+      ],
+      "license": {
+        "argument": "ACCEPT_NVIDIA_EULA",
+        "url": "https://docs.omniverse.nvidia.com/eula/"
+      }
+    },
+    "simpler_groot": {
+      "cpu": false,
+      "builder": "base-cuda",
+      "gpu_runtime": "base-runtime",
+      "redistributable": true,
+      "parent": "simpler",
+      "layouts": [
+        "full",
+        "split"
+      ]
+    },
+    "simpler_xvla": {
+      "cpu": false,
+      "builder": "base-cuda",
+      "gpu_runtime": "base-runtime",
+      "redistributable": true,
+      "parent": "simpler",
+      "layouts": [
+        "full",
+        "split"
+      ]
+    }
+  }
+}

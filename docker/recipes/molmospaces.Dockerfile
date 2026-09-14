@@ -1,0 +1,44 @@
+# MolmoSpaces-Bench evaluation environment.
+# Preserve the upstream common assets, resource cache and symlinks. Individual
+# benchmark scenes/objects can still be downloaded lazily on first use.
+
+ARG BASE_IMAGE=ghcr.io/allenai/vla-evaluation-harness/base:latest
+ARG RUNTIME_IMAGE=ghcr.io/allenai/vla-evaluation-harness/base-render:latest
+FROM ${BASE_IMAGE} AS builder
+
+# ── uv environment (molmo-spaces requires Python 3.11) ─────────────
+ARG PYTHON_VERSION=3.11.13
+RUN uv python install "${PYTHON_VERSION}" \
+    && uv venv --seed --python "${PYTHON_VERSION}" /opt/venv
+ENV VIRTUAL_ENV=/opt/venv \
+    PATH=/opt/venv/bin:$PATH
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+# ── PyTorch with CUDA 12.1 (bfloat16 inference for policy server smoke tests) ─
+ARG TORCH_BACKEND=cu121
+ENV UV_TORCH_BACKEND=${TORCH_BACKEND}
+
+RUN uv pip install --no-cache-dir "torch==2.3.1" \
+        --torch-backend "${TORCH_BACKEND}"
+
+# ── molmo-spaces (git-only) + MuJoCo bindings ──────────────────────────
+# v0.2.0: keep DATA_TYPE_TO_SOURCE_TO_VERSION stable across rebuilds.
+RUN uv pip install --no-cache-dir \
+        "molmo-spaces[mujoco] @ git+https://github.com/allenai/molmospaces.git@fb49aef0750973bff8660e213612d06005f8a37f"
+
+# ── Pre-install benchmark assets (~15 GB) into the image layer ────────
+# Import extracts the common assets; task-specific resources remain lazy.
+ENV MLSPACES_ASSETS_DIR=/assets \
+    MLSPACES_CACHE_DIR=/cache/molmo-spaces-resources \
+    MUJOCO_GL=egl \
+    JAX_PLATFORMS=cpu
+RUN mkdir -p /assets /cache/molmo-spaces-resources \
+    && python -c "import molmo_spaces; from molmo_spaces.evaluation.benchmark_schema import load_all_episodes; print('molmo_spaces assets installed')"
+
+WORKDIR /workspace
+COPY pyproject.toml README.md ./
+COPY src/ src/
+ARG HARNESS_VERSION=0.0.0
+ENV SETUPTOOLS_SCM_PRETEND_VERSION=${HARNESS_VERSION}
+RUN uv pip install --no-cache-dir -e .
+COPY configs/ configs/

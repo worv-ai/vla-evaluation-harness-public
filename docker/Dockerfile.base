@@ -9,7 +9,12 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
-# Runtime libraries also support GPU rendering on the CPU compute base.
+COPY --from=ghcr.io/prefix-dev/pixi:0.80.0@sha256:4cb073300e2c5eaee287bb3bcbadd3ddb7bce4ce36b27c41a19aad74c297c2f3 /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+ARG UBUNTU_SNAPSHOT=20260914T000000Z
+COPY docker/snapshot_apt.sh /usr/local/bin/snapshot-apt
+RUN snapshot-apt "$UBUNTU_SNAPSHOT"
+
+# Rendering libraries shared by the supported simulators.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates libgomp1 libstdc++6 \
         # EGL / OpenGL
@@ -72,4 +77,4 @@ ENV UV_EXCLUDE_NEWER=${UV_EXCLUDE_NEWER} \
 WORKDIR /workspace
 
 RUN mkdir -p /usr/local/share/vla-build
-COPY docker/export_runtime.py /usr/local/lib/vla/export_runtime.py
+COPY docker/export_runtime.py docker/optimize_libero.py docker/prepare_cpu.py docker/prune_cpu.py docker/assemble.py docker/split_assets.py docker/install_locked.py docker/verify_assets.py /usr/local/lib/vla/

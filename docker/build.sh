@@ -1,20 +1,19 @@
 #!/usr/bin/env bash
 # Build Docker images locally with BuildKit.
 # Usage:
-#   docker/build.sh [benchmark] [--tag VERSION] [--profile gpu|cpu|all] [--dry-run]
+#   docker/build.sh [benchmark] [--tag VERSION] [--profile gpu|cpu|all] [--layout full|split|all] [--dry-run]
 #   docker/build.sh behavior1k --accept-license behavior1k
 #   docker/build.sh robodojo --base-image robodojo:cuda12.8 --accept-license robodojo
 #   docker/build.sh libero --base-image BUILDER@sha256:... --runtime-image RUNTIME@sha256:...
 #   docker/build.sh libero --build-arg LIBERO_REF=COMMIT
-#   docker/build.sh libero --profile cpu --gpu-image GPU_IMAGE@sha256:...
 # Base targets: base/base-cuda (builders), base-render/base-runtime (GPU), base-cpu (CPU).
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 source docker/images.sh
 PROFILE=gpu
+LAYOUT=full
 TAG=latest
-GPU_IMAGE=""
 BASE_IMAGE=""
 RUNTIME_IMAGE=""
 TARGET=""
@@ -22,11 +21,7 @@ DRY_RUN=false
 ACCEPTED_LICENSES=()
 EXTRA_BUILD_ARGS=()
 REGISTRY=ghcr.io/allenai/vla-evaluation-harness
-declare -A EULA_GATED=(
-  [rlbench]="ACCEPT_RLBENCH_LICENCE https://github.com/stepjam/RLBench/blob/master/LICENSE"
-  [behavior1k]="ACCEPT_NVIDIA_EULA https://docs.omniverse.nvidia.com/eula/"
-  [robodojo]="ACCEPT_NVIDIA_EULA https://docs.omniverse.nvidia.com/eula/"
-)
+
 
 contains() {
   local needle="$1" item
@@ -39,11 +34,11 @@ contains() {
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --profile|--tag|--gpu-image|--base-image|--runtime-image|--accept-license|--build-arg)
+    --layout|--profile|--tag|--base-image|--runtime-image|--accept-license|--build-arg)
       [[ $# -ge 2 && -n "$2" && "$2" != --* ]] || { echo "Missing value for $1" >&2; exit 1; }
       case "$1" in
-        --gpu-image) GPU_IMAGE="$2" ;;
         --profile) PROFILE="$2" ;;
+        --layout) LAYOUT="$2" ;;
         --tag) TAG="$2" ;;
         --base-image) BASE_IMAGE="$2" ;;
         --runtime-image) RUNTIME_IMAGE="$2" ;;
@@ -62,13 +57,10 @@ if [[ -n "$TARGET" ]] && ! contains "$TARGET" "${BASE_IMAGES[@]}" "${BENCHMARKS[
   echo "Unknown image: $TARGET" >&2
   exit 1
 fi
+contains "$LAYOUT" full split all || { echo "Unknown layout: $LAYOUT" >&2; exit 1; }
 contains "$PROFILE" gpu cpu all || { echo "Unknown profile: $PROFILE" >&2; exit 1; }
 if [[ "$PROFILE" == cpu && -n "$TARGET" ]] && ! contains "$TARGET" "${CPU_BENCHMARKS[@]}" "${BASE_IMAGES[@]}"; then
   echo "$TARGET requires a GPU; no CPU image is supported" >&2
-  exit 1
-fi
-if [[ -n "$GPU_IMAGE" && ( "$PROFILE" != cpu || -z "$TARGET" ) ]]; then
-  echo "--gpu-image requires one benchmark and --profile cpu" >&2
   exit 1
 fi
 for license in "${ACCEPTED_LICENSES[@]}"; do
@@ -95,8 +87,6 @@ run_build() {
   fi
 }
 
-CPU_RECIPES=()
-trap 'rm -f "${CPU_RECIPES[@]}"' EXIT
 declare -A BUILT=()
 build_image() {
   local name="$1" profile="${2:-gpu}" runtime_name=base-runtime builder_name=base-cuda
@@ -113,24 +103,6 @@ build_image() {
     fi
     build_args+=(--build-arg "${arg_name}=YES")
   fi
-  if [[ "$profile" == cpu ]]; then
-    local cpu_runtime="${RUNTIME_IMAGE:-${REGISTRY}/base-cpu:${TAG}}"
-    if [[ -z "$GPU_IMAGE" ]]; then
-      # A custom CPU runtime must not become the GPU dependency's runtime.
-      local RUNTIME_IMAGE=""
-      build_image "$name" gpu
-    fi
-    [[ "$cpu_runtime" != "${REGISTRY}/base-cpu:${TAG}" ]] || build_image base-cpu
-    dockerfile=$(mktemp /tmp/vla-cpu-XXXXXX.Dockerfile)
-    CPU_RECIPES+=("$dockerfile")
-    if $DRY_RUN; then
-      printf '%q ' bash docker/generate_cpu_dockerfile.sh "docker/Dockerfile.${name}"
-      printf '> %q\n' "$dockerfile"
-    fi
-    bash docker/generate_cpu_dockerfile.sh "docker/Dockerfile.${name}" > "$dockerfile"
-    build_args+=(--build-arg "GPU_IMAGE=${GPU_IMAGE:-${REGISTRY}/${name//_/-}:${TAG}-gpu}")
-    build_args+=(--build-arg "RUNTIME_IMAGE=${cpu_runtime}")
-  else
   case "$name" in
     base|base-cuda|base-runtime|base-render|base-cpu)
       dockerfile=docker/Dockerfile.base
@@ -154,21 +126,33 @@ build_image() {
       build_args+=(--build-arg "BUILD_IMAGE=${BASE_IMAGE:-${REGISTRY}/base:${TAG}}")
       ;;
     *)
-      if contains "$name" "${NO_SYSTEM_CUDA_BENCHMARKS[@]}"; then
-        runtime_name=base-render
-        builder_name=base
+      runtime_name="${GPU_RUNTIMES[$name]}"
+      builder_name="${BUILDERS[$name]}"
+      if [[ "$profile" == cpu ]]; then
+        runtime_name=base-cpu
+        build_args+=(--build-arg TORCH_BACKEND=cpu --build-arg JAX_EXTRAS=)
       fi
-      [[ "$profile" != cpu ]] || runtime_name=base-cpu
       [[ -n "$BASE_IMAGE" ]] || build_image "$builder_name"
       [[ -n "$RUNTIME_IMAGE" ]] || build_image "$runtime_name"
       build_args+=(--build-arg "BASE_IMAGE=${BASE_IMAGE:-${REGISTRY}/${builder_name}:${TAG}}")
       build_args+=(--build-arg "RUNTIME_IMAGE=${RUNTIME_IMAGE:-${REGISTRY}/${runtime_name}:${TAG}}")
       ;;
   esac
-  fi
   build_args+=(--build-arg "HARNESS_VERSION=${HARNESS_VERSION}" --build-arg "IMAGE_PROFILE=${profile}")
   if [[ "$profile" == gpu ]] && ! contains "$name" "${BASE_IMAGES[@]}"; then
     tag_args+=(-t "${REGISTRY}/${name//_/-}:${TAG}")
+  fi
+  if contains "$name" "${SPLIT_BENCHMARKS[@]}"; then
+    if [[ "$LAYOUT" != full ]]; then
+      run_build --target runtime -t "${REGISTRY}/${name//_/-}:${image_tag}-runtime" -f "$dockerfile" \
+        "${build_args[@]}" "${EXTRA_BUILD_ARGS[@]}" .
+      run_build --target assets -t "${REGISTRY}/${name//_/-}:${image_tag}-assets" -f "$dockerfile" \
+        "${build_args[@]}" "${EXTRA_BUILD_ARGS[@]}" .
+    fi
+    if [[ "$LAYOUT" == split ]]; then BUILT[$key]=1; return; fi
+  elif [[ "$name" != base* && "$LAYOUT" == split ]]; then
+    echo "$name currently requires a full image layout" >&2
+    return 1
   fi
   run_build -t "${REGISTRY}/${name//_/-}:${image_tag}" "${tag_args[@]}" -f "$dockerfile" \
     "${build_args[@]}" "${EXTRA_BUILD_ARGS[@]}" .

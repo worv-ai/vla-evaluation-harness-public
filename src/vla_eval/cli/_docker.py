@@ -263,6 +263,16 @@ def run_via_docker(
 
     ensure_image_local(docker, docker_cfg.image, auto_yes, build=docker_cfg.build, force_build=force_build)
 
+    asset_mounts = []
+    if docker_cfg.assets:
+        from vla_eval.assets import prepare_mounts
+
+        asset_mounts = prepare_mounts(
+            docker_cfg.image,
+            docker_cfg.assets,
+            ensure_local=lambda image: ensure_image_local(docker, image, auto_yes),
+        )
+
     results_dir, docker_config_path = prepare_container_config(config)
     container_name = f"vla-eval-{os.getpid()}"
 
@@ -309,6 +319,9 @@ def run_via_docker(
             sys.exit(1)
         cmd.extend(mount)
         logger.info("Dev mode: mounting %s -> /workspace/src", mount[1].split(":", 1)[0])
+
+    for mount in asset_mounts:
+        cmd.extend(["-v", mount])
 
     # Extra volumes / env vars from config
     for vol in docker_cfg.volumes:

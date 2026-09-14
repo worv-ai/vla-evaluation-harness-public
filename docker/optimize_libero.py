@@ -41,7 +41,7 @@ def remove_wheel(name):
         dist = metadata.distribution(name)
     except metadata.PackageNotFoundError:
         return 0
-    paths = [Path(os.path.abspath(dist.locate_file(f))) for f in dist.files or []]
+    paths = [Path(os.path.abspath(str(dist.locate_file(f)))) for f in dist.files or []]
     prefix = Path(sys.prefix).resolve()
     for path in paths:
         path.relative_to(prefix)

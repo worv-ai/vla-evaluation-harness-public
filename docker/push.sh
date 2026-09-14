@@ -12,6 +12,7 @@ set -euo pipefail
 
 source "$(dirname "${BASH_SOURCE[0]}")/images.sh"
 PROFILE=gpu
+LAYOUT=full
 TAG="latest"
 TARGET=""
 SOURCE_REGISTRY="ghcr.io/allenai/vla-evaluation-harness"  # where build.sh tags images locally
@@ -21,6 +22,7 @@ UPDATE_LATEST=true
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --layout)    LAYOUT="$2"; shift 2 ;;
     --profile)   PROFILE="$2"; shift 2 ;;
     --tag)       TAG="$2"; shift 2 ;;
     --registry)  REGISTRY="$2"; shift 2 ;;
@@ -55,6 +57,7 @@ push_image() {
   local name="$1" profile="${2:-gpu}" suffix="-${2:-gpu}"
   [[ "$name" != base* ]] || suffix=""
   local image_name="${name//_/-}"
+  suffix="${suffix}${3:-}"
   local source="${SOURCE_REGISTRY}/${image_name}:${TAG}${suffix}"
   local versioned="${REGISTRY}/${image_name}:${TAG}${suffix}"
 
@@ -100,6 +103,7 @@ contains() {
   for item in "$@"; do [[ "$item" != "$needle" ]] || return 0; done
   return 1
 }
+contains "$LAYOUT" full split all || { echo "Unknown layout: $LAYOUT" >&2; exit 1; }
 contains "$PROFILE" gpu cpu all || { echo "Unknown profile: $PROFILE" >&2; exit 1; }
 if [[ -n "$TARGET" ]]; then
   contains "$TARGET" "${IMAGES[@]}" || { echo "Unknown image: $TARGET" >&2; exit 1; }
@@ -108,11 +112,19 @@ if [[ -n "$TARGET" ]]; then
     exit 1
   fi
 fi
+push_layouts() {
+  local name="$1" profile="$2"
+  if [[ "$LAYOUT" != full ]] && contains "$name" "${SPLIT_BENCHMARKS[@]}"; then
+    push_image "$name" "$profile" -runtime
+    push_image "$name" "$profile" -assets
+  fi
+  [[ "$LAYOUT" == split ]] || push_image "$name" "$profile"
+}
 push_profiles() {
   local name="$1"
   if contains "$name" "${BASE_IMAGES[@]}"; then push_image "$name"; return; fi
-  [[ "$PROFILE" == cpu ]] || push_image "$name" gpu
-  if [[ "$PROFILE" != gpu ]] && contains "$name" "${CPU_BENCHMARKS[@]}"; then push_image "$name" cpu; fi
+  [[ "$PROFILE" == cpu ]] || push_layouts "$name" gpu
+  if [[ "$PROFILE" != gpu ]] && contains "$name" "${CPU_BENCHMARKS[@]}"; then push_layouts "$name" cpu; fi
 }
 if [[ -n "$TARGET" ]]; then
   push_profiles "$TARGET"

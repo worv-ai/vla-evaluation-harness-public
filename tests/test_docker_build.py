@@ -11,6 +11,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 BUILD = ROOT / "docker/build.sh"
 spec = importlib.util.spec_from_file_location("export_runtime", ROOT / "docker/export_runtime.py")
+assert spec is not None and spec.loader is not None
 exporter = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(exporter)
 
@@ -162,7 +163,7 @@ def test_cpu_all_builds_only_supported_images():
     commands = plan("--profile", "cpu")
     names = image_names(commands)
     assert "kinetix:latest-cpu" in names
-    assert "kinetix:latest-gpu" in names
+    assert "kinetix:latest-gpu" not in names
     assert not any("robotwin" in name or "simpler" in name for name in names)
 
 
@@ -200,6 +201,7 @@ def test_cpu_wheels_keep_public_versions_and_remove_accelerator_packages(monkeyp
     from types import SimpleNamespace
 
     spec = importlib.util.spec_from_file_location("prepare_cpu", ROOT / "docker/prepare_cpu.py")
+    assert spec is not None and spec.loader is not None
     prepare = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(prepare)
     versions = {
@@ -233,31 +235,31 @@ def test_rlbench_keeps_tini_outside_the_profile_wrapper():
     assert entrypoint == ["tini", "-g", "--", "/usr/local/bin/image-entrypoint", "/rlbench_entrypoint.sh"]
 
 
-def test_cpu_can_derive_from_an_immutable_gpu_artifact():
-    commands = plan("libero", "--profile", "cpu", "--gpu-image", "libero@sha256:abc")
-    assert image_names(commands) == ["base-cpu:latest", "libero:latest-cpu"]
-    assert "GPU_IMAGE=libero@sha256:abc" in commands[-1]
+def test_cpu_build_has_no_gpu_artifact_dependency():
+    commands = plan("libero", "--profile", "cpu")
+    assert image_names(commands) == ["base:latest", "base-cpu:latest", "libero:latest-cpu"]
+    assert "TORCH_BACKEND=cpu" in commands[-1]
+    assert not any("GPU_IMAGE=" in arg for command in commands for arg in command)
 
 
 def test_cpu_recipe_preserves_rlbench_native_runtime_and_editable_sources():
-    result = subprocess.run(
-        ["bash", str(ROOT / "docker/generate_cpu_dockerfile.sh"), str(ROOT / "docker/Dockerfile.rlbench")],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    assert "FROM ${GPU_IMAGE} AS gpu" in result.stdout
-    assert "FROM gpu AS builder" in result.stdout
-    assert "export_runtime.py --inventory-only" in result.stdout
-    assert "FROM ${RUNTIME_IMAGE} AS runtime" in result.stdout
-    assert "xvfb libfontconfig1 tini libdbus-1-3" in result.stdout
-    assert "COPY --from=gpu /tmp/PyRep /tmp/PyRep" in result.stdout
-    assert "COPY --from=gpu /opt/coppeliasim /opt/coppeliasim" in result.stdout
-    assert "ARG IMAGE_PROFILE=cpu" in result.stdout
+    recipe = (ROOT / "docker/Dockerfile.rlbench").read_text()
+    assert "FROM ${BASE_IMAGE} AS sources" in recipe
+    assert "FROM ${RUNTIME_IMAGE} AS runtime" in recipe
+    assert "xvfb libfontconfig1 tini libdbus-1-3" in recipe
+    assert "COPY --from=assembled /runtime-root/tmp/PyRep /tmp/PyRep" in recipe
+    assert "COPY --from=assembled /runtime-root/opt/coppeliasim /opt/coppeliasim" in recipe
 
 
-def test_custom_cpu_runtime_is_not_used_to_build_its_gpu_source():
+def test_custom_cpu_runtime_never_builds_gpu_source():
     commands = plan("libero", "--profile", "cpu", "--runtime-image", "cpu-runtime@sha256:abc")
-    assert image_names(commands) == ["base:latest", "base-render:latest", "libero:latest-gpu", "libero:latest-cpu"]
+    assert image_names(commands) == ["base:latest", "libero:latest-cpu"]
     assert "RUNTIME_IMAGE=cpu-runtime@sha256:abc" in commands[-1]
-    assert "RUNTIME_IMAGE=ghcr.io/allenai/vla-evaluation-harness/base-render:latest" in commands[-2]
+
+
+def test_split_build_exports_runtime_and_assets_directly():
+    commands = plan("libero", "--profile", "cpu", "--layout", "split")
+    assert image_names(commands)[-2:] == ["libero:latest-cpu-runtime", "libero:latest-cpu-assets"]
+    assert "runtime" in commands[-2]
+    assert "assets" in commands[-1]
+    assert not any("libero:latest-gpu" in arg for command in commands for arg in command)

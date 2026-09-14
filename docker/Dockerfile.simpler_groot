@@ -2,9 +2,14 @@
 # Adds EE proprioception from NVIDIA's squarefk/SimplerEnv fork.
 
 ARG BASE_IMAGE=ghcr.io/allenai/vla-evaluation-harness/simpler:latest
-FROM ${BASE_IMAGE}
+FROM ${BASE_IMAGE} AS runtime
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 COPY docker/apply_eef_pos_patch.py /tmp/
 RUN python /tmp/apply_eef_pos_patch.py && rm /tmp/apply_eef_pos_patch.py
+
+FROM scratch AS assets
+COPY --from=runtime /usr/local/share/vla-build/assets.json /usr/local/share/vla-build/assets.json
+
+FROM runtime AS full
