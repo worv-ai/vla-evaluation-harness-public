@@ -6,6 +6,7 @@ import json
 import shutil
 import os
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -146,7 +147,8 @@ def test_ensure_image_dir_requires_confirmation_non_interactive(tmp_path: Path, 
         ch.ensure_image_dir("reg/img:tag", auto_yes=False, gpu=False, tools={t: t for t in ch.TOOLS})
 
 
-def test_run_via_charliecloud_env_and_cleanup(tmp_path: Path, monkeypatch) -> None:
+@pytest.mark.parametrize("with_assets", [False, True])
+def test_run_via_charliecloud_env_and_cleanup(tmp_path: Path, monkeypatch, with_assets) -> None:
     img_root = tmp_path / "home"
     monkeypatch.setattr(ch.dirs, "home", lambda: img_root)
     img = ch.image_dir_for("reg/img:tag")
@@ -161,12 +163,33 @@ def test_run_via_charliecloud_env_and_cleanup(tmp_path: Path, monkeypatch) -> No
         return 0
 
     monkeypatch.setattr("vla_eval.cli._docker.exec_child", fake_exec)
-    config = {
+    config: dict[str, Any] = {
         "output_dir": str(tmp_path / "out"),
         "render": "cpu",
         "docker": {"image": "reg/img:tag", "gpus": "none", "env": ["FOO=bar"], "volumes": ["/a:/b:ro"]},
         "benchmarks": [{"benchmark": "x:Y"}],
     }
+    if with_assets:
+        from vla_eval.assets import MANIFEST
+        import hashlib
+
+        asset_dir = ch.image_dir_for("reg/data:tag")
+        (asset_dir / "ch").mkdir(parents=True)
+        (asset_dir / "ch/metadata.json").write_text("{}")
+        (asset_dir / "assets").mkdir()
+        (asset_dir / "assets/mesh").write_bytes(b"mesh")
+        manifest = {
+            "version": 1,
+            "paths": ["/assets"],
+            "files": [{"path": "/assets/mesh", "bytes": 4, "sha256": hashlib.sha256(b"mesh").hexdigest()}],
+        }
+        for root in (img, asset_dir):
+            (root / MANIFEST).parent.mkdir(parents=True)
+            (root / MANIFEST).write_text(json.dumps(manifest))
+        config["docker"] = {
+            **config["docker"],
+            "assets": {"image": "reg/data:tag", "directory": str(tmp_path / "unused")},
+        }
     rc = ch.run_via_charliecloud(config, accept_license=["lic"], eval_id="e", no_save=True)
     assert rc == 0
     cmd = seen["cmd"]
@@ -175,6 +198,8 @@ def test_run_via_charliecloud_env_and_cleanup(tmp_path: Path, monkeypatch) -> No
     assert "--set-env=CUDA_VISIBLE_DEVICES=" in cmd
     assert f"--set-env=VLA_EVAL_HOST_OUTPUT_DIR={(tmp_path / 'out').resolve()}" in cmd
     assert "/a:/b" in cmd and "--no-save" in cmd
+    if with_assets:
+        assert str(ch.image_dir_for("reg/data:tag") / "assets") + ":/assets" in cmd
     cfg_bind = next(b for b in cmd if b.endswith(f":{CONTAINER_CONFIG}"))
     assert not os.path.exists(cfg_bind.split(":")[0])  # temp config removed after the run
 

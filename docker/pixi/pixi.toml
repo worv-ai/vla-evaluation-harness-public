@@ -1,0 +1,37 @@
+[workspace]
+name = "vla-native-environments"
+channels = ["conda-forge"]
+platforms = ["linux-64"]
+requires-pixi = "==0.80.0"
+
+# Native interpreter/ABI locks. Simulator PyPI installs remain in their recipes.
+[feature.py38.dependencies]
+python = { version = "==3.8.20", build = "h4a871b0_2_cpython" }
+pip = "==24.3.1"
+libffi = "==3.7.0"
+
+[feature.calvin.dependencies]
+python = { version = "==3.8.19", build = "hd12c33a_0_cpython" }
+pip = "==24.3.1"
+cmake = "==3.18.4"
+libffi = "==3.7.0"
+
+[feature.behavior.dependencies]
+python = { version = "==3.10.21", build = "h267e890_0_cpython" }
+pip = "==26.2.1"
+libffi = "==3.7.0"
+
+[feature.duobench.dependencies]
+python = { version = "==3.11.16", build = "h5f976f7_2_cpython" }
+pip = "==26.2.1"
+urdfdom = "==4.0.1"
+urdfdom_headers = "*"
+glfw = "*"
+tinyxml2 = "==10.0.0"
+libffi = "==3.7.0"
+
+[environments]
+py38 = { features = ["py38"], no-default-feature = true }
+calvin = { features = ["calvin"], no-default-feature = true }
+behavior = { features = ["behavior"], no-default-feature = true }
+duobench = { features = ["duobench"], no-default-feature = true }

@@ -1,0 +1,355 @@
+[
+  {
+    "reference": "ghcr.io/allenai/vla-evaluation-harness/vlabench:pixi-validation",
+    "id": "sha256:4132c7f21d3f5fd2d86586bfe3fd957ddfc56381fba3b364d0919c9705c125a2",
+    "bytes": 14630002345,
+    "local_artifact": "retired after validation"
+  },
+  {
+    "reference": "ghcr.io/allenai/vla-evaluation-harness/vlabench:pixi-validation-cpu",
+    "id": "sha256:2ee0119b7fb5e2a78300ab35bcdc91a954fcee35a2f06f18f690a5ff480a4eaa",
+    "bytes": 14630007945,
+    "local_artifact": "retired after validation"
+  },
+  {
+    "reference": "ghcr.io/allenai/vla-evaluation-harness/vlabench:pixi-validation-gpu",
+    "id": "sha256:4132c7f21d3f5fd2d86586bfe3fd957ddfc56381fba3b364d0919c9705c125a2",
+    "bytes": 14630002345,
+    "local_artifact": "retired after validation"
+  },
+  {
+    "reference": "ghcr.io/allenai/vla-evaluation-harness/base-cpu:pixi-validation",
+    "id": "sha256:e253583f2f0df7773c0eb85efba7f6874c124fa509d2d72f44e6af8b96844be2",
+    "bytes": 378497386
+  },
+  {
+    "reference": "ghcr.io/allenai/vla-evaluation-harness/base-cuda:pixi-validation",
+    "id": "sha256:b0dd243b4f07de4e588f24bcd1a5d0b98780875439b045ec87502ea2b6af920c",
+    "bytes": 3022454573
+  },
+  {
+    "reference": "ghcr.io/allenai/vla-evaluation-harness/base-render:pixi-validation",
+    "id": "sha256:fa74b74e3f38844443ef0003698be321f4c704c1b7eb3cf039b46d796c8d9a4c",
+    "bytes": 378497562
+  },
+  {
+    "reference": "ghcr.io/allenai/vla-evaluation-harness/base-runtime:pixi-validation",
+    "id": "sha256:05b145bc90dc630f96517cd42a20e9a8fa9a53e91cb92426cddfb4ba0b21f177",
+    "bytes": 2544546423
+  },
+  {
+    "reference": "ghcr.io/allenai/vla-evaluation-harness/base:pixi-validation",
+    "id": "sha256:8b33b8fae3e7e1e695eeb2e91c7e7005433d70b225c4ff7163177dae574f68f9",
+    "bytes": 856922609
+  },
+  {
+    "reference": "ghcr.io/allenai/vla-evaluation-harness/behavior1k:pixi-validation",
+    "id": "sha256:eae37e071918c3371144e72b2ee24ab89076cacd20165c7385ca31937d4c8b2b",
+    "bytes": 21886149551
+  },
+  {
+    "reference": "ghcr.io/allenai/vla-evaluation-harness/behavior1k:pixi-validation-gpu",
+    "id": "sha256:eae37e071918c3371144e72b2ee24ab89076cacd20165c7385ca31937d4c8b2b",
+    "bytes": 21886149551
+  },
+  {
+    "reference": "ghcr.io/allenai/vla-evaluation-harness/calvin:pixi-validation",
+    "id": "sha256:8ef65843a525f362c64cd1063bc9d2c4701f800cb81022e6e41f68cdf9610cfb",
+    "bytes": 4539396802
+  },
+  {
+    "reference": "ghcr.io/allenai/vla-evaluation-harness/calvin:pixi-validation-cpu",
+    "id": "sha256:cf7b79289ec61dd45ccf06f5bccf9e70b38cae7c9f0e113594fbe46917cb572e",
+    "bytes": 3073789759
+  },
+  {
+    "reference": "ghcr.io/allenai/vla-evaluation-harness/calvin:pixi-validation-gpu",
+    "id": "sha256:8ef65843a525f362c64cd1063bc9d2c4701f800cb81022e6e41f68cdf9610cfb",
+    "bytes": 4539396802
+  },
+  {
+    "reference": "ghcr.io/allenai/vla-evaluation-harness/duobench:pixi-validation",
+    "id": "sha256:a112aa683808bfc83d74bb7c11c753b1e8ab583614e493ab0c2e1d12f3639d96",
+    "bytes": 2479851671
+  },
+  {
+    "reference": "ghcr.io/allenai/vla-evaluation-harness/duobench:pixi-validation-cpu",
+    "id": "sha256:f4d8d05b0540f008e64ffd82b02ef64abae63d18e872212666e26154f75c8f02",
+    "bytes": 2479858149
+  },
+  {
+    "reference": "ghcr.io/allenai/vla-evaluation-harness/duobench:pixi-validation-gpu",
+    "id": "sha256:a112aa683808bfc83d74bb7c11c753b1e8ab583614e493ab0c2e1d12f3639d96",
+    "bytes": 2479851671
+  },
+  {
+    "reference": "ghcr.io/allenai/vla-evaluation-harness/kinetix:pixi-validation",
+    "id": "sha256:cebccdeaa39d760039371e5d965516e2a98de86ae76c277e3a3c451a226f7674",
+    "bytes": 6796332075
+  },
+  {
+    "reference": "ghcr.io/allenai/vla-evaluation-harness/kinetix:pixi-validation-cpu",
+    "id": "sha256:2c3d33e2ed8c319f7edb292ffe31bd6901aaf94e56ebce6a8d523971eb9943e5",
+    "bytes": 1601521952
+  },
+  {
+    "reference": "ghcr.io/allenai/vla-evaluation-harness/kinetix:pixi-validation-gpu",
+    "id": "sha256:cebccdeaa39d760039371e5d965516e2a98de86ae76c277e3a3c451a226f7674",
+    "bytes": 6796332075
+  },
+  {
+    "reference": "ghcr.io/allenai/vla-evaluation-harness/libero-mem:pixi-validation",
+    "id": "sha256:e9a28f985014b7cc88be6d7c2fdbfaac4d4e6d3f2eb456107222b4296dabd143",
+    "bytes": 3277389676
+  },
+  {
+    "reference": "ghcr.io/allenai/vla-evaluation-harness/libero-mem:pixi-validation-cpu",
+    "id": "sha256:d07d2eeb416df3ce0c1819487f4bee1b042c42d567147bcc2cbe7edc57cee395",
+    "bytes": 3277395278
+  },
+  {
+    "reference": "ghcr.io/allenai/vla-evaluation-harness/libero-mem:pixi-validation-gpu",
+    "id": "sha256:e9a28f985014b7cc88be6d7c2fdbfaac4d4e6d3f2eb456107222b4296dabd143",
+    "bytes": 3277389676
+  },
+  {
+    "reference": "ghcr.io/allenai/vla-evaluation-harness/libero-plus:pixi-validation",
+    "id": "sha256:9660bf1e2e9605d45ed3498af9982729662c2ad4197bcb42a29aeafdb042b31b",
+    "bytes": 11782125808
+  },
+  {
+    "reference": "ghcr.io/allenai/vla-evaluation-harness/libero-plus:pixi-validation-cpu",
+    "id": "sha256:921026330d23cb2a90f9c217ef1bf0458ad4de9c6917b0de009eddd402ea0725",
+    "bytes": 11782132446
+  },
+  {
+    "reference": "ghcr.io/allenai/vla-evaluation-harness/libero-plus:pixi-validation-gpu",
+    "id": "sha256:9660bf1e2e9605d45ed3498af9982729662c2ad4197bcb42a29aeafdb042b31b",
+    "bytes": 11782125808
+  },
+  {
+    "reference": "ghcr.io/allenai/vla-evaluation-harness/libero-pro:pixi-validation",
+    "id": "sha256:04bdedde2de81c1791f8d4621a3af265bb35de15b12e49acf0bdd0ace34c9fc8",
+    "bytes": 3310701611
+  },
+  {
+    "reference": "ghcr.io/allenai/vla-evaluation-harness/libero-pro:pixi-validation-cpu",
+    "id": "sha256:87e89541257b6feda3c1685d59514080643cee7755ed4660f728b32349ee5921",
+    "bytes": 3310707213
+  },
+  {
+    "reference": "ghcr.io/allenai/vla-evaluation-harness/libero-pro:pixi-validation-gpu",
+    "id": "sha256:04bdedde2de81c1791f8d4621a3af265bb35de15b12e49acf0bdd0ace34c9fc8",
+    "bytes": 3310701611
+  },
+  {
+    "reference": "ghcr.io/allenai/vla-evaluation-harness/libero:minimal-validation-cpu",
+    "id": "sha256:e3868d20fad7a538da7b23a04dea8c95d0d4045f5b2a95dd6cabc430a34844dd",
+    "bytes": 2380608779
+  },
+  {
+    "reference": "ghcr.io/allenai/vla-evaluation-harness/libero:minimal-validation-cpu-assets",
+    "id": "sha256:db5bb2d1705cdd26b2c62cd169810b93037d29a4a39af6571d8cecbd81f56370",
+    "bytes": 1038776968
+  },
+  {
+    "reference": "ghcr.io/allenai/vla-evaluation-harness/libero:minimal-validation-cpu-runtime",
+    "id": "sha256:c1de3d4f39009928f79cadf0f278b357a924f165aa41058487001ae05f75a210",
+    "bytes": 1341685542
+  },
+  {
+    "reference": "ghcr.io/allenai/vla-evaluation-harness/libero:pixi-validation",
+    "id": "sha256:7def8271ebfb2936fdbbc1bfba8eea4ac9df53e7368063bb746a6875f65ad116",
+    "bytes": 3075188417
+  },
+  {
+    "reference": "ghcr.io/allenai/vla-evaluation-harness/libero:pixi-validation-cpu",
+    "id": "sha256:27a3c422bcbd8a05e92268f3b02ec0c0676b2b4ddc77d9bccb1ef94e63e48b5d",
+    "bytes": 3075194015
+  },
+  {
+    "reference": "ghcr.io/allenai/vla-evaluation-harness/libero:pixi-validation-gpu",
+    "id": "sha256:7def8271ebfb2936fdbbc1bfba8eea4ac9df53e7368063bb746a6875f65ad116",
+    "bytes": 3075188417
+  },
+  {
+    "reference": "ghcr.io/allenai/vla-evaluation-harness/maniskill2:pixi-validation",
+    "id": "sha256:323633ef2f3b4ecf69967f3cdf0665c4122bd13f01f03996a0a19bb34b7a323a",
+    "bytes": 6683618432
+  },
+  {
+    "reference": "ghcr.io/allenai/vla-evaluation-harness/maniskill2:pixi-validation-gpu",
+    "id": "sha256:323633ef2f3b4ecf69967f3cdf0665c4122bd13f01f03996a0a19bb34b7a323a",
+    "bytes": 6683618432
+  },
+  {
+    "reference": "ghcr.io/allenai/vla-evaluation-harness/mikasa-robo:pixi-validation",
+    "id": "sha256:07e56824e50cb55d2ae22dee7cc1f45412552ce0ad0da2b116b7319a60649ba7",
+    "bytes": 7363521300
+  },
+  {
+    "reference": "ghcr.io/allenai/vla-evaluation-harness/mikasa-robo:pixi-validation-gpu",
+    "id": "sha256:07e56824e50cb55d2ae22dee7cc1f45412552ce0ad0da2b116b7319a60649ba7",
+    "bytes": 7363521300
+  },
+  {
+    "reference": "ghcr.io/allenai/vla-evaluation-harness/molmospaces:pixi-validation",
+    "id": "sha256:b76a6f9f9bbdbf7bb04d7616d3fd7697642a8fc791bfa49e744e772bcd71c413",
+    "bytes": 21235131261
+  },
+  {
+    "reference": "ghcr.io/allenai/vla-evaluation-harness/molmospaces:pixi-validation-cpu",
+    "id": "sha256:364de695c7a38a5289bc2a0e67725a901df3aa7940444bf5c9397aa7b98d2cdc",
+    "bytes": 16636961634
+  },
+  {
+    "reference": "ghcr.io/allenai/vla-evaluation-harness/molmospaces:pixi-validation-gpu",
+    "id": "sha256:b76a6f9f9bbdbf7bb04d7616d3fd7697642a8fc791bfa49e744e772bcd71c413",
+    "bytes": 21235131261
+  },
+  {
+    "reference": "ghcr.io/allenai/vla-evaluation-harness/rlbench:minimal-validation-cpu-assets",
+    "id": "sha256:bf6b1dda175867ae002541a687d16f8d1b76288b8e9b66ed5a2e4eeec6f194a4",
+    "bytes": 85084650
+  },
+  {
+    "reference": "ghcr.io/allenai/vla-evaluation-harness/rlbench:minimal-validation-cpu-runtime",
+    "id": "sha256:a44ace93959fdbf2769896a932bd1f80e74268fdc5f6d18f066c04193594a459",
+    "bytes": 1772484793
+  },
+  {
+    "reference": "ghcr.io/allenai/vla-evaluation-harness/rlbench:pixi-validation",
+    "id": "sha256:77af5e3ac1e04370af05b9cf8039545108539a6ae6abcc188155b7b946b75439",
+    "bytes": 1877501092
+  },
+  {
+    "reference": "ghcr.io/allenai/vla-evaluation-harness/rlbench:pixi-validation-cpu",
+    "id": "sha256:19509fdb32a05225a124cfaf428f766a20a3a6f70303a9def1ed184b7fbfde93",
+    "bytes": 1877507409
+  },
+  {
+    "reference": "ghcr.io/allenai/vla-evaluation-harness/rlbench:pixi-validation-gpu",
+    "id": "sha256:77af5e3ac1e04370af05b9cf8039545108539a6ae6abcc188155b7b946b75439",
+    "bytes": 1877501092
+  },
+  {
+    "reference": "ghcr.io/allenai/vla-evaluation-harness/robocasa365:pixi-validation",
+    "id": "sha256:11e85f14ddb69c0ca3f0b8b541b7452d3bbdf29fa749b003a143c7e3744fd619",
+    "bytes": 27504277188
+  },
+  {
+    "reference": "ghcr.io/allenai/vla-evaluation-harness/robocasa365:pixi-validation-cpu",
+    "id": "sha256:f0bd812b71ede32b412b8c002aa5f3df2e005be72949e00337aa6fc1ee6798ed",
+    "bytes": 27504282791
+  },
+  {
+    "reference": "ghcr.io/allenai/vla-evaluation-harness/robocasa365:pixi-validation-gpu",
+    "id": "sha256:11e85f14ddb69c0ca3f0b8b541b7452d3bbdf29fa749b003a143c7e3744fd619",
+    "bytes": 27504277188
+  },
+  {
+    "reference": "ghcr.io/allenai/vla-evaluation-harness/robocasa:pixi-validation",
+    "id": "sha256:1f0082c216ffc03c442229b5e9228771fbb59ec682fefbd93f1e39dea574e44d",
+    "bytes": 11191184184
+  },
+  {
+    "reference": "ghcr.io/allenai/vla-evaluation-harness/robocasa:pixi-validation-cpu",
+    "id": "sha256:c49e4851c5f3224c7445aaaa499517d969f269fef08da19601a0b1520a22def0",
+    "bytes": 11191189784
+  },
+  {
+    "reference": "ghcr.io/allenai/vla-evaluation-harness/robocasa:pixi-validation-gpu",
+    "id": "sha256:1f0082c216ffc03c442229b5e9228771fbb59ec682fefbd93f1e39dea574e44d",
+    "bytes": 11191184184
+  },
+  {
+    "reference": "ghcr.io/allenai/vla-evaluation-harness/robocerebra:pixi-validation",
+    "id": "sha256:e53a872db4a079bd924ffca83c56746edfd4e3492caed7910e6764d669566f7e",
+    "bytes": 3447286905
+  },
+  {
+    "reference": "ghcr.io/allenai/vla-evaluation-harness/robocerebra:pixi-validation-cpu",
+    "id": "sha256:995d73cafc56bce6f61b6287009147f4fd8b4caa122acdefe9ae62cd60836e30",
+    "bytes": 3447292508
+  },
+  {
+    "reference": "ghcr.io/allenai/vla-evaluation-harness/robocerebra:pixi-validation-gpu",
+    "id": "sha256:e53a872db4a079bd924ffca83c56746edfd4e3492caed7910e6764d669566f7e",
+    "bytes": 3447286905
+  },
+  {
+    "reference": "ghcr.io/allenai/vla-evaluation-harness/robodojo:pixi-validation",
+    "id": "sha256:51cbd8f1facf273927c3cf3f9172834f5982f9a8ba44c3b3e60da04ef4ba08c6",
+    "bytes": 36308689183
+  },
+  {
+    "reference": "ghcr.io/allenai/vla-evaluation-harness/robodojo:pixi-validation-gpu",
+    "id": "sha256:51cbd8f1facf273927c3cf3f9172834f5982f9a8ba44c3b3e60da04ef4ba08c6",
+    "bytes": 36308689183
+  },
+  {
+    "reference": "ghcr.io/allenai/vla-evaluation-harness/robomme:pixi-validation",
+    "id": "sha256:49619e7296c5b0198fa898329c8853cbda20e65d125ff066d42f2d01df5b02e9",
+    "bytes": 8859406093
+  },
+  {
+    "reference": "ghcr.io/allenai/vla-evaluation-harness/robomme:pixi-validation-cpu",
+    "id": "sha256:679c10219f929890b43c7c2f1acb78b1ad6da9883b2e2359595ab239b531bb24",
+    "bytes": 2609435075
+  },
+  {
+    "reference": "ghcr.io/allenai/vla-evaluation-harness/robomme:pixi-validation-gpu",
+    "id": "sha256:49619e7296c5b0198fa898329c8853cbda20e65d125ff066d42f2d01df5b02e9",
+    "bytes": 8859406093
+  },
+  {
+    "reference": "ghcr.io/allenai/vla-evaluation-harness/robotwin:pixi-validation",
+    "id": "sha256:15da5ebce1d7f346f7d139375edf76bfc59ab2e649cf319636474dfd72f2cc44",
+    "bytes": 28274664313
+  },
+  {
+    "reference": "ghcr.io/allenai/vla-evaluation-harness/robotwin:pixi-validation-gpu",
+    "id": "sha256:15da5ebce1d7f346f7d139375edf76bfc59ab2e649cf319636474dfd72f2cc44",
+    "bytes": 28274664313
+  },
+  {
+    "reference": "ghcr.io/allenai/vla-evaluation-harness/simpler-groot:pixi-validation",
+    "id": "sha256:2451a18ac8d47e52be53e4a7d83d20fb0ef518759a37d8aa19bd48a7e6f1a09d",
+    "bytes": 1653097903
+  },
+  {
+    "reference": "ghcr.io/allenai/vla-evaluation-harness/simpler-groot:pixi-validation-gpu",
+    "id": "sha256:2451a18ac8d47e52be53e4a7d83d20fb0ef518759a37d8aa19bd48a7e6f1a09d",
+    "bytes": 1653097903
+  },
+  {
+    "reference": "ghcr.io/allenai/vla-evaluation-harness/simpler-xvla:pixi-validation",
+    "id": "sha256:5e7146876f66acd959a4c79a70dbb14911d545c4060908ae8db98de6c2e41114",
+    "bytes": 1653297839
+  },
+  {
+    "reference": "ghcr.io/allenai/vla-evaluation-harness/simpler-xvla:pixi-validation-gpu",
+    "id": "sha256:5e7146876f66acd959a4c79a70dbb14911d545c4060908ae8db98de6c2e41114",
+    "bytes": 1653297839
+  },
+  {
+    "reference": "ghcr.io/allenai/vla-evaluation-harness/simpler:pixi-validation",
+    "id": "sha256:ec8bf681e0cd8ccae747b48c7f792ca0478916ff8b5373b8e224a3a47aa185ed",
+    "bytes": 1653046676
+  },
+  {
+    "reference": "ghcr.io/allenai/vla-evaluation-harness/simpler:pixi-validation-gpu",
+    "id": "sha256:ec8bf681e0cd8ccae747b48c7f792ca0478916ff8b5373b8e224a3a47aa185ed",
+    "bytes": 1653046676
+  },
+  {
+    "reference": "ghcr.io/allenai/vla-evaluation-harness/vlabench:minimal-validation-cpu-assets",
+    "id": "sha256:6b3de1a5c9cee886bea84bc10dc0a88acb75cf6a123b311e86c3ca277c0b0014",
+    "bytes": 12073552804
+  },
+  {
+    "reference": "ghcr.io/allenai/vla-evaluation-harness/vlabench:minimal-validation-cpu-runtime",
+    "id": "sha256:2d64884de5e9476782537bd551fa3b6ac587871875c8918a1315cad26bb6ca5a",
+    "bytes": 1687764170
+  }
+]

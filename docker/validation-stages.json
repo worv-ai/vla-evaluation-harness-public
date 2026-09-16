@@ -1,0 +1,161 @@
+{
+  "date": "2026-09-14",
+  "platform": "linux/amd64",
+  "images": {
+    "libero-cpu": {
+      "reference": "ghcr.io/allenai/vla-evaluation-harness/libero:stages-validation-cpu",
+      "id": "sha256:057923d3f93e73c1413e26425918cbb088493b4515b81ab728a5a19131c875d4",
+      "bytes": 2382574606,
+      "layers": 17
+    },
+    "libero-cpu-runtime": {
+      "reference": "ghcr.io/allenai/vla-evaluation-harness/libero:stages-validation-cpu-runtime",
+      "id": "sha256:1633705b665250264fa94e3c31df07dc94d376acf8177525812db8a2056bf06f",
+      "bytes": 1344141626,
+      "layers": 14
+    },
+    "libero-cpu-assets": {
+      "reference": "ghcr.io/allenai/vla-evaluation-harness/libero:stages-validation-cpu-assets",
+      "id": "sha256:7776e3b00f33f5175dc07fb5caf897b008f8faef1bf833ce9a2ae4affd98178b",
+      "bytes": 1038776872,
+      "layers": 4
+    },
+    "libero-gpu": {
+      "reference": "ghcr.io/allenai/vla-evaluation-harness/libero:stages-validation-gpu",
+      "id": "sha256:514e7010ed577e9dcb1b9f4113ee1ed7e0364f2990f47884d5b96dd73128c4b9",
+      "bytes": 3077159986,
+      "layers": 19
+    },
+    "libero-gpu-runtime": {
+      "reference": "ghcr.io/allenai/vla-evaluation-harness/libero:stages-validation-gpu-runtime",
+      "id": "sha256:8cfaa27fa4d8feeae8da6e33d09b141ff68c38c4788861b7b2406a2e297762e2",
+      "bytes": 2038726882,
+      "layers": 16
+    },
+    "libero-gpu-assets": {
+      "reference": "ghcr.io/allenai/vla-evaluation-harness/libero:stages-validation-gpu-assets",
+      "id": "sha256:7776e3b00f33f5175dc07fb5caf897b008f8faef1bf833ce9a2ae4affd98178b",
+      "bytes": 1038776872,
+      "layers": 4
+    },
+    "kinetix-cpu": {
+      "reference": "ghcr.io/allenai/vla-evaluation-harness/kinetix:stages-validation-cpu",
+      "id": "sha256:b1327238d14c53ff8af4e250f7ba659e5165ce75d1fb9713704c925d7053df9f",
+      "bytes": 1571774887,
+      "layers": 16
+    },
+    "kinetix-cpu-runtime": {
+      "reference": "ghcr.io/allenai/vla-evaluation-harness/kinetix:stages-validation-cpu-runtime",
+      "id": "sha256:b1327238d14c53ff8af4e250f7ba659e5165ce75d1fb9713704c925d7053df9f",
+      "bytes": 1571774887,
+      "layers": 16
+    },
+    "kinetix-cpu-assets": {
+      "reference": "ghcr.io/allenai/vla-evaluation-harness/kinetix:stages-validation-cpu-assets",
+      "id": "sha256:ff62c881f3f25a3d9586c5b1d45b2213f6b707ec337b0dc062dfde8e6d265b14",
+      "bytes": 49,
+      "layers": 1
+    },
+    "kinetix-gpu-runtime": {
+      "reference": "ghcr.io/allenai/vla-evaluation-harness/kinetix:stages-validation-gpu-runtime",
+      "id": "sha256:e545023c227905f7c063e0308b025be369e8d96243cbef8dde32e69fc84b2498",
+      "bytes": 6798003319,
+      "layers": 18
+    }
+  },
+  "smokes": {
+    "libero-full": {
+      "benchmark": "LIBEROBenchmark",
+      "frames": {
+        "/images/agentview": {
+          "shape": [
+            256,
+            256,
+            3
+          ],
+          "std": 50.64482405534126,
+          "sha256": "1a778c9912d0a981deaf8031bf0c85034364c72b852647c03c6f1c003c5f13c8"
+        }
+      },
+      "done": false
+    },
+    "libero-runtime": {
+      "benchmark": "LIBEROBenchmark",
+      "frames": {
+        "/images/agentview": {
+          "shape": [
+            256,
+            256,
+            3
+          ],
+          "std": 50.64482405534126,
+          "sha256": "1a778c9912d0a981deaf8031bf0c85034364c72b852647c03c6f1c003c5f13c8"
+        }
+      },
+      "done": false
+    },
+    "libero-gpu": {
+      "benchmark": "LIBEROBenchmark",
+      "frames": {
+        "/images/agentview": {
+          "shape": [
+            256,
+            256,
+            3
+          ],
+          "std": 50.641877746619095,
+          "sha256": "1a4e4c8225ad7400c0551692a21698db87d6a156298226191d206b5ff82020d3"
+        }
+      },
+      "done": false
+    },
+    "kinetix-cpu": {
+      "benchmark": "KinetixBenchmark",
+      "frames": {
+        "/images/viewport": {
+          "shape": [
+            125,
+            125,
+            3
+          ],
+          "std": 57.79915761203291,
+          "sha256": "62006e47564231ccc8300e1444978a7cd8e7417fedee2ff35841c132f28467d1"
+        }
+      },
+      "done": false
+    },
+    "kinetix-gpu": {
+      "benchmark": "KinetixBenchmark",
+      "frames": {
+        "/images/viewport": {
+          "shape": [
+            125,
+            125,
+            3
+          ],
+          "std": 57.79915761203291,
+          "sha256": "62006e47564231ccc8300e1444978a7cd8e7417fedee2ff35841c132f28467d1"
+        }
+      },
+      "done": false
+    }
+  },
+  "checks": {
+    "pytest": "596 passed, 2 skipped",
+    "ruff": "passed",
+    "ty": "passed",
+    "generated_recipes": "passed",
+    "hashed_profiles": 33
+  },
+  "limitations": [
+    "Other benchmark recipes were rendered and statically checked, not rebuilt in this validation pass.",
+    "Intermediate upstream build dependencies and proprietary installers are not fully hermetic.",
+    "GPU JAX build was interrupted by disk exhaustion, then completed after precise cleanup of our disposable caches."
+  ],
+  "gpu_devices": {
+    "jax": "0.10.2",
+    "devices": [
+      "cuda:0"
+    ]
+  }
+}

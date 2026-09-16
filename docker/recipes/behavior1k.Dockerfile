@@ -1,0 +1,114 @@
+# BEHAVIOR-1K — OmniGibson on NVIDIA Isaac Sim (https://behavior.stanford.edu)
+#
+# BEHAVIOR Challenge 2025 stack (Isaac Sim 4.5.0, BEHAVIOR-1K v3.7.2, B50 tasks);
+# NOT the 2026 evaluator stack (v3.9.1, 100 tasks); see issue #113.
+#
+# Heavy image: pulls Isaac Sim wheels (~12 GB) and the BEHAVIOR-1K
+# source tree.  The dataset itself (~10 GB) is NOT baked in; mount it
+# at runtime under /app/BEHAVIOR-1K/datasets.
+#
+# Hardware requirements: NVIDIA GPU (RTX 2070+), 8 GB+ VRAM, Vulkan ICD.
+
+ARG BASE_IMAGE=ghcr.io/allenai/vla-evaluation-harness/base-cuda:latest
+ARG RUNTIME_IMAGE=ghcr.io/allenai/vla-evaluation-harness/base-runtime:latest
+FROM ${BASE_IMAGE} AS builder
+
+# Build-time license confirmation.  The user must explicitly opt in
+# the same way Stanford's setup.sh requires --accept-nvidia-eula.
+ARG ACCEPT_NVIDIA_EULA=
+RUN if [ "$ACCEPT_NVIDIA_EULA" != "YES" ]; then \
+        echo ""; \
+        echo "============================================================"; \
+        echo "Building BEHAVIOR-1K requires accepting two licenses:"; \
+        echo "  1. NVIDIA Isaac Sim EULA"; \
+        echo "     https://docs.omniverse.nvidia.com/eula/"; \
+        echo "  2. BEHAVIOR Dataset Terms of Service (at runtime, when"; \
+        echo "     you download/mount the encrypted scene+object bundle)"; \
+        echo ""; \
+        echo "Read the EULAs above, then re-run with:"; \
+        echo "  docker build --build-arg ACCEPT_NVIDIA_EULA=YES ..."; \
+        echo "  (or: docker/build.sh behavior1k --accept-nvidia-eula)"; \
+        echo "============================================================"; \
+        exit 1; \
+    fi
+
+ENV OMNIGIBSON_HEADLESS=1 \
+    OMNI_KIT_ACCEPT_EULA=YES \
+    ACCEPT_EULA=Y \
+    PRIVACY_CONSENT=Y
+
+# ── Locked native environment (Python 3.10 — required by Isaac Sim 4.5.0) ──
+RUN install-native-env behavior
+ENV CONDA_PREFIX=/opt/pixi/.pixi/envs/behavior \
+    PATH=/opt/pixi/.pixi/envs/behavior/bin:$PATH
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+# ── OmniGibson setup prerequisites ──────────────────────────────────
+ARG TORCH_BACKEND=cu124
+ENV UV_TORCH_BACKEND=${TORCH_BACKEND}
+
+RUN uv pip install --no-cache-dir "numpy<2" "setuptools<=79"
+
+# ── PyTorch 2.6.0 + CUDA 12.4 ───────────────────────────────────────
+RUN uv pip install --no-cache-dir \
+        "torch==2.6.0" "torchvision==0.21.0" "torchaudio==2.6.0" \
+        --torch-backend "${TORCH_BACKEND}"
+
+# ── Isaac Sim 4.5.0 from the NVIDIA pip index ───────────────────────
+# Full package list mirrors BEHAVIOR-1K setup.sh `install_isaac_packages`.
+# Installing only the metapackage (isaacsim) leaves
+# `isaacsim.simulation_app` unimportable at runtime.
+# unsafe-best-match: uv's default first-index strategy pins each name to
+# pypi.nvidia.com, which lacks omniverse-kit==106.5.0.162521 (pypi.org only).
+# Everything here is exact-pinned, so cross-index resolution is safe.
+RUN uv pip install --no-cache-dir \
+        --index-strategy unsafe-best-match \
+        "omniverse-kit==106.5.0.162521" \
+        "isaacsim-kernel==4.5.0.0" \
+        "isaacsim-app==4.5.0.0" \
+        "isaacsim-core==4.5.0.0" \
+        "isaacsim-gui==4.5.0.0" \
+        "isaacsim-utils==4.5.0.0" \
+        "isaacsim-storage==4.5.0.0" \
+        "isaacsim-asset==4.5.0.0" \
+        "isaacsim-sensor==4.5.0.0" \
+        "isaacsim-robot-motion==4.5.0.0" \
+        "isaacsim-robot==4.5.0.0" \
+        "isaacsim-benchmark==4.5.0.0" \
+        "isaacsim-code-editor==4.5.0.0" \
+        "isaacsim-ros1==4.5.0.0" \
+        "isaacsim-cortex==4.5.0.0" \
+        "isaacsim-example==4.5.0.0" \
+        "isaacsim-replicator==4.5.0.0" \
+        "isaacsim-rl==4.5.0.0" \
+        "isaacsim-robot-setup==4.5.0.0" \
+        "isaacsim-ros2==4.5.0.0" \
+        "isaacsim-template==4.5.0.0" \
+        "isaacsim-test==4.5.0.0" \
+        "isaacsim==4.5.0.0" \
+        "isaacsim-extscache-physics==4.5.0.0" \
+        "isaacsim-extscache-kit==4.5.0.0" \
+        "isaacsim-extscache-kit-sdk==4.5.0.0" \
+        --extra-index-url https://pypi.nvidia.com
+
+# Fix the bundled-websockets conflict patched by setup.sh:
+# Isaac Sim's pip_prebundle/websockets shadows our model-server websockets.
+# The site-packages path is deterministic, so a plain `find` does the job
+# without booting isaacsim (which can't import in a non-GPU build context).
+RUN find /opt/pixi/.pixi/envs/behavior/lib/python3.10/site-packages/isaacsim/extscache \
+        -type d -name websockets -path "*/pip_prebundle/*" \
+        -exec rm -rf {} + 2>/dev/null || true
+
+# ── Clone BEHAVIOR-1K (OmniGibson + bddl3 + joylo/gello) ───────────
+# StanfordVL/BEHAVIOR-1K v3.7.2
+COPY --from=sources /app/BEHAVIOR-1K /app/BEHAVIOR-1K
+RUN mkdir -p /app/BEHAVIOR-1K && cd /app/BEHAVIOR-1K && cd /app/BEHAVIOR-1K && uv pip install --no-cache-dir -e ./bddl3
+RUN cd /app/BEHAVIOR-1K && uv pip install --no-cache-dir -e "./OmniGibson[eval]"
+RUN cd /app/BEHAVIOR-1K && uv pip install --no-cache-dir -e ./joylo
+# Match setup.sh: cffi must be force-reinstalled to 1.17.1 (Isaac Sim
+# bundles a build that conflicts with the conda libffi otherwise).
+RUN uv pip install --no-cache-dir --reinstall cffi==1.17.1
+# OmniGibson deps can pull numpy 2.x, but Isaac Sim still calls np.float_.
+# Force-downgrade at the end with --no-deps so other resolved versions stay put.
+RUN uv pip install --no-cache-dir --no-deps "numpy<2"
+RUN rm -rf /app/BEHAVIOR-1K/.git

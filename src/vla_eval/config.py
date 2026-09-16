@@ -101,6 +101,7 @@ class DockerConfig:
 
     Attributes:
         image: Docker image name.  ``None`` means run without Docker.
+        assets: Optional ``{image, directory}`` verified data bundle; extracted once per image ID.
         volumes: Extra ``-v`` bind-mount strings.
         env: Extra ``-e`` environment variable strings.
         cpus: CPU range for benchmark containers (e.g. ``"0-31"``).
@@ -118,6 +119,7 @@ class DockerConfig:
 
     image: str | None = None
     volumes: list[str] = field(default_factory=list)
+    assets: dict[str, str] | None = None
     env: list[str] = field(default_factory=list)
     cpus: str | None = None
     gpus: str | None = None
@@ -129,10 +131,17 @@ class DockerConfig:
     def from_dict(cls, data: dict[str, Any] | None) -> DockerConfig:
         if not data:
             return cls()
+        asset_config = data.get("assets")
+        if asset_config is not None:
+            if not isinstance(asset_config, dict) or set(asset_config) != {"image", "directory"}:
+                raise ValueError("docker.assets requires exactly image and directory")
+            if any(not isinstance(value, str) or not value.strip() for value in asset_config.values()):
+                raise ValueError("docker.assets image and directory must be nonempty strings")
         build = BuildConfig.from_value(data.get("build"))
         return cls(
             image=data.get("image") or (build.default_image if build else None),
             volumes=data.get("volumes", []),
+            assets=data.get("assets"),
             env=data.get("env", []),
             cpus=data.get("cpus"),
             gpus=data.get("gpus"),
