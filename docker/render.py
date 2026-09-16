@@ -45,6 +45,16 @@ def render(name, spec):
         "RUN mkdir -p /app /root",
         f'RUN python /usr/local/lib/vla/install_locked.py {name} "$IMAGE_PROFILE"',
     ]
+    # Code/config edits must not invalidate simulator installation or hash checks.
+    output += [
+        "WORKDIR /workspace",
+        "COPY pyproject.toml README.md ./",
+        "COPY src/ src/",
+        "ARG HARNESS_VERSION=0.0.0",
+        "ENV SETUPTOOLS_SCM_PRETEND_VERSION=${HARNESS_VERSION}",
+        "RUN uv pip install --no-cache-dir --no-deps -e .",
+        "COPY configs/ configs/",
+    ]
     if spec["cpu"]:
         commands = []
         if spec["prune"]["libero_numpy"]:

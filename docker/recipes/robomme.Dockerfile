@@ -38,11 +38,3 @@ RUN cd /app/robomme_benchmark && uv pip install --no-cache-dir -e .
 
 # ── Additional runtime deps (h5py imported by DemonstrationWrapper) ─────
 RUN uv pip install --no-cache-dir "opencv-python>=4.11.0.86" h5py imageio
-
-WORKDIR /workspace
-COPY pyproject.toml README.md ./
-COPY src/ src/
-ARG HARNESS_VERSION=0.0.0
-ENV SETUPTOOLS_SCM_PRETEND_VERSION=${HARNESS_VERSION}
-RUN uv pip install --no-cache-dir -e .
-COPY configs/ configs/

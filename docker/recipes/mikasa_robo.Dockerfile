@@ -32,15 +32,3 @@ RUN uv pip install --no-cache-dir "setuptools<70" wheel \
     && cd /opt/MIKASA-Robo \
     && uv pip install --no-cache-dir --no-build-isolation . \
     && rm -rf /opt/MIKASA-Robo/.git
-
-WORKDIR /workspace
-COPY pyproject.toml README.md ./
-COPY src/ src/
-ARG HARNESS_VERSION=0.0.0
-ENV SETUPTOOLS_SCM_PRETEND_VERSION=${HARNESS_VERSION}
-RUN uv pip install --no-cache-dir -e .
-
-# Restore numpy 1.x compatibility (torch 2.2.1 was compiled against numpy 1.x)
-RUN uv pip install --no-cache-dir "numpy==1.23.5"
-
-COPY configs/ configs/

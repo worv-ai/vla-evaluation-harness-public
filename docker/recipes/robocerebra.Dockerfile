@@ -48,11 +48,3 @@ bddl_files: /tmp/RoboCerebra/LIBERO/libero/libero/bddl_files\n\
 init_states: /tmp/RoboCerebra/LIBERO/libero/libero/init_files\n\
 datasets: /tmp/RoboCerebra/LIBERO/libero/datasets\n\
 assets: /tmp/RoboCerebra/LIBERO/libero/libero/assets\n' > /root/.libero/config.yaml
-
-WORKDIR /workspace
-COPY pyproject.toml README.md ./
-COPY src/ src/
-ARG HARNESS_VERSION=0.0.0
-ENV SETUPTOOLS_SCM_PRETEND_VERSION=${HARNESS_VERSION}
-RUN uv pip install --no-cache-dir -e .
-COPY configs/ configs/

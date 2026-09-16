@@ -7,6 +7,8 @@
 ARG BASE_IMAGE=ghcr.io/allenai/vla-evaluation-harness/base:latest
 ARG RUNTIME_IMAGE=ghcr.io/allenai/vla-evaluation-harness/base-render:latest
 FROM ${BASE_IMAGE} AS builder
+ARG TORCH_BACKEND=cpu
+ENV UV_TORCH_BACKEND=${TORCH_BACKEND}
 
 ARG PYTHON_VERSION=3.11.13
 RUN uv python install "${PYTHON_VERSION}" \
@@ -37,15 +39,3 @@ RUN mkdir -p /app/robocasa365 \
 RUN cd /app/robocasa365 \
     && python robocasa/scripts/setup_macros.py \
     && echo "y" | python robocasa/scripts/download_kitchen_assets.py
-
-WORKDIR /workspace
-COPY pyproject.toml README.md ./
-COPY src/ src/
-ARG HARNESS_VERSION=0.0.0
-ENV SETUPTOOLS_SCM_PRETEND_VERSION=${HARNESS_VERSION}
-
-ARG TORCH_BACKEND=cpu
-ENV UV_TORCH_BACKEND=${TORCH_BACKEND}
-
-RUN uv pip install --no-cache-dir -e .
-COPY configs/ configs/

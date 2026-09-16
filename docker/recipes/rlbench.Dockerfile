@@ -82,12 +82,6 @@ RUN uv pip install --no-cache-dir natsort numpy Pillow pyquaternion scipy \
     && rm -rf /tmp/RLBench/.git
 
 WORKDIR /workspace
-COPY pyproject.toml README.md ./
-COPY src/ src/
-ARG HARNESS_VERSION=0.0.0
-ENV SETUPTOOLS_SCM_PRETEND_VERSION=${HARNESS_VERSION}
-RUN uv pip install --no-cache-dir gymnasium -e .
-COPY configs/ configs/
 
 # ── Entrypoint: start Xvfb then run vla-eval ──────────────────────
 COPY docker/rlbench_entrypoint.sh /rlbench_entrypoint.sh

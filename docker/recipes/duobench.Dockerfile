@@ -66,11 +66,3 @@ RUN mkdir -p /opt/duobench && cd /opt/duobench && uv pip install --no-cache-dir 
 
 ENV MUJOCO_GL=egl \
     PYOPENGL_PLATFORM=egl
-
-WORKDIR /workspace
-COPY pyproject.toml README.md ./
-COPY src/ src/
-ARG HARNESS_VERSION=0.0.0
-ENV SETUPTOOLS_SCM_PRETEND_VERSION=${HARNESS_VERSION}
-RUN uv pip install --no-cache-dir -e .
-COPY configs/ configs/

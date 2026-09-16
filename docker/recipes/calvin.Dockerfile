@@ -48,12 +48,6 @@ RUN find /app/calvin -name .git -exec rm -rf {} + 2>/dev/null || true \
 COPY docker/calvin_validation_data/ /data/calvin/dataset/validation/
 
 WORKDIR /workspace
-COPY pyproject.toml README.md ./
-COPY src/ src/
-ARG HARNESS_VERSION=0.0.0
-ENV SETUPTOOLS_SCM_PRETEND_VERSION=${HARNESS_VERSION}
-RUN uv pip install --no-cache-dir -e .
-COPY configs/ configs/
 
 # CALVIN otherwise compiles this GPU-discovery helper on first reset.
 RUN cd /app/calvin/calvin_env/egl_check && bash build.sh && test -x EGL_options.o

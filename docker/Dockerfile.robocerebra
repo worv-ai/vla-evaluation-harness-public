@@ -53,20 +53,19 @@ bddl_files: /tmp/RoboCerebra/LIBERO/libero/libero/bddl_files\n\
 init_states: /tmp/RoboCerebra/LIBERO/libero/libero/init_files\n\
 datasets: /tmp/RoboCerebra/LIBERO/libero/datasets\n\
 assets: /tmp/RoboCerebra/LIBERO/libero/libero/assets\n' > /root/.libero/config.yaml
-
-WORKDIR /workspace
-COPY pyproject.toml README.md ./
-COPY src/ src/
-ARG HARNESS_VERSION=0.0.0
-ENV SETUPTOOLS_SCM_PRETEND_VERSION=${HARNESS_VERSION}
-RUN uv pip install --no-cache-dir -e .
-COPY configs/ configs/
 COPY docker/images.json /usr/local/lib/vla/images.json
 ARG IMAGE_PROFILE=gpu
 COPY docker/locks/robocerebra-${IMAGE_PROFILE}.txt /usr/local/lib/vla/locks/robocerebra-${IMAGE_PROFILE}.txt
 COPY docker/locks/assets.json /usr/local/lib/vla/locks/assets.json
 RUN mkdir -p /app /root
 RUN python /usr/local/lib/vla/install_locked.py robocerebra "$IMAGE_PROFILE"
+WORKDIR /workspace
+COPY pyproject.toml README.md ./
+COPY src/ src/
+ARG HARNESS_VERSION=0.0.0
+ENV SETUPTOOLS_SCM_PRETEND_VERSION=${HARNESS_VERSION}
+RUN uv pip install --no-cache-dir --no-deps -e .
+COPY configs/ configs/
 RUN if [ "$IMAGE_PROFILE" = cpu ]; then python /usr/local/lib/vla/prepare_cpu.py && python /usr/local/lib/vla/prune_cpu.py; fi
 RUN python /usr/local/lib/vla/export_runtime.py --inventory-only /opt/pixi/.pixi/envs/py38 /app /workspace /root /tmp/RoboCerebra
 FROM builder AS assembled

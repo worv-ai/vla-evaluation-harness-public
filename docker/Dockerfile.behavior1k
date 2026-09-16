@@ -117,20 +117,19 @@ RUN uv pip install --no-cache-dir --reinstall cffi==1.17.1
 # Force-downgrade at the end with --no-deps so other resolved versions stay put.
 RUN uv pip install --no-cache-dir --no-deps "numpy<2"
 RUN rm -rf /app/BEHAVIOR-1K/.git
-
-WORKDIR /workspace
-COPY pyproject.toml README.md ./
-COPY src/ src/
-ARG HARNESS_VERSION=0.0.0
-ENV SETUPTOOLS_SCM_PRETEND_VERSION=${HARNESS_VERSION}
-RUN uv pip install --no-cache-dir -e .
-COPY configs/ configs/
 COPY docker/images.json /usr/local/lib/vla/images.json
 ARG IMAGE_PROFILE=gpu
 COPY docker/locks/behavior1k-${IMAGE_PROFILE}.txt /usr/local/lib/vla/locks/behavior1k-${IMAGE_PROFILE}.txt
 COPY docker/locks/assets.json /usr/local/lib/vla/locks/assets.json
 RUN mkdir -p /app /root
 RUN python /usr/local/lib/vla/install_locked.py behavior1k "$IMAGE_PROFILE"
+WORKDIR /workspace
+COPY pyproject.toml README.md ./
+COPY src/ src/
+ARG HARNESS_VERSION=0.0.0
+ENV SETUPTOOLS_SCM_PRETEND_VERSION=${HARNESS_VERSION}
+RUN uv pip install --no-cache-dir --no-deps -e .
+COPY configs/ configs/
 RUN python /usr/local/lib/vla/export_runtime.py --inventory-only /opt/pixi/.pixi/envs/behavior /app /workspace /root
 FROM builder AS assembled
 RUN python /usr/local/lib/vla/assemble.py behavior1k

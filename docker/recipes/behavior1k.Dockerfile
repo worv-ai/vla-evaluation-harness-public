@@ -112,11 +112,3 @@ RUN uv pip install --no-cache-dir --reinstall cffi==1.17.1
 # Force-downgrade at the end with --no-deps so other resolved versions stay put.
 RUN uv pip install --no-cache-dir --no-deps "numpy<2"
 RUN rm -rf /app/BEHAVIOR-1K/.git
-
-WORKDIR /workspace
-COPY pyproject.toml README.md ./
-COPY src/ src/
-ARG HARNESS_VERSION=0.0.0
-ENV SETUPTOOLS_SCM_PRETEND_VERSION=${HARNESS_VERSION}
-RUN uv pip install --no-cache-dir -e .
-COPY configs/ configs/

@@ -30,20 +30,19 @@ RUN uv pip install --no-cache-dir --upgrade "jax${JAX_EXTRAS:+[${JAX_EXTRAS}]}"
 # ── RTC level files ───────────────────────────────────────────────
 COPY --from=sources /app/rtc /app/rtc
 RUN mkdir -p /app/rtc      && cd /app/rtc && rm -rf /app/rtc/.git
-
-WORKDIR /workspace
-COPY pyproject.toml README.md ./
-COPY src/ src/
-ARG HARNESS_VERSION=0.0.0
-ENV SETUPTOOLS_SCM_PRETEND_VERSION=${HARNESS_VERSION}
-RUN uv pip install --no-cache-dir -e .
-COPY configs/ configs/
 COPY docker/images.json /usr/local/lib/vla/images.json
 ARG IMAGE_PROFILE=gpu
 COPY docker/locks/kinetix-${IMAGE_PROFILE}.txt /usr/local/lib/vla/locks/kinetix-${IMAGE_PROFILE}.txt
 COPY docker/locks/assets.json /usr/local/lib/vla/locks/assets.json
 RUN mkdir -p /app /root
 RUN python /usr/local/lib/vla/install_locked.py kinetix "$IMAGE_PROFILE"
+WORKDIR /workspace
+COPY pyproject.toml README.md ./
+COPY src/ src/
+ARG HARNESS_VERSION=0.0.0
+ENV SETUPTOOLS_SCM_PRETEND_VERSION=${HARNESS_VERSION}
+RUN uv pip install --no-cache-dir --no-deps -e .
+COPY configs/ configs/
 RUN if [ "$IMAGE_PROFILE" = cpu ]; then python /usr/local/lib/vla/prepare_cpu.py && python /usr/local/lib/vla/prune_cpu.py; fi
 RUN python /usr/local/lib/vla/export_runtime.py --inventory-only /opt/python /opt/venv /app /workspace /root /opt/kinetix
 FROM builder AS assembled

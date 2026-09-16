@@ -23,11 +23,3 @@ RUN uv pip install --no-cache-dir --upgrade "jax${JAX_EXTRAS:+[${JAX_EXTRAS}]}"
 # ── RTC level files ───────────────────────────────────────────────
 COPY --from=sources /app/rtc /app/rtc
 RUN mkdir -p /app/rtc      && cd /app/rtc && rm -rf /app/rtc/.git
-
-WORKDIR /workspace
-COPY pyproject.toml README.md ./
-COPY src/ src/
-ARG HARNESS_VERSION=0.0.0
-ENV SETUPTOOLS_SCM_PRETEND_VERSION=${HARNESS_VERSION}
-RUN uv pip install --no-cache-dir -e .
-COPY configs/ configs/

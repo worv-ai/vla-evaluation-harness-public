@@ -93,11 +93,3 @@ RUN cd /app/RoboTwin/assets \
 
 # ── Resolve embodiment config paths ──────────────────────────────────
 RUN cd /app/RoboTwin && python script/update_embodiment_config_path.py
-
-WORKDIR /workspace
-COPY pyproject.toml README.md ./
-COPY src/ src/
-ARG HARNESS_VERSION=0.0.0
-ENV SETUPTOOLS_SCM_PRETEND_VERSION=${HARNESS_VERSION}
-RUN uv pip install --no-cache-dir -e .
-COPY configs/ configs/

@@ -96,6 +96,36 @@ docker/build.sh maniskill2 --build-arg \
   MANISKILL_ASSET_IMAGE=ghcr.io/allenai/vla-evaluation-harness/maniskill2@sha256:710ebca79942e8c580af36cc71f7dacc340ba535f2be4efb17141d526ef4794a
 ```
 
+## Routine changes and size reports
+
+Simulator recipes stop before installing the harness. The generator installs the
+hashed runtime dependencies first, then copies and installs the harness with
+`--no-deps`. Code/config-only edits therefore reuse the expensive dependency
+layers. Update the profile locks when changing harness dependencies; the tests
+check that every lock includes its direct dependency names. Existing simulator
+version exceptions (for example RoboCasa's NumPy) remain in those locks.
+Upstream simulator installs and the final hash-verified reinstall still both
+run on a cold build; this change does not claim to eliminate that cost.
+
+After building, compare two **local runtime or full images** with:
+
+```bash
+uv run python docker/report.py BEFORE_IMAGE AFTER_IMAGE --output /tmp/image-report.json
+
+# Also run the existing reset/action/render smoke, preserving Xvfb/tini wrappers.
+uv run python docker/report.py BEFORE_IMAGE AFTER_IMAGE \
+  --config /workspace/configs/benchmarks/libero/spatial.yaml \
+  --action '[0,0,0,0,0,0,-1]' --render cpu --output /tmp/image-report.json
+```
+
+The report contains immutable image IDs, uncompressed size changes, the largest
+recursive directories and installed packages, and the smoke result. A failed
+smoke returns a nonzero exit code. Packages are measured from installed metadata;
+editable sources appear in directory totals. Images are not pulled or published.
+For smoke tests, use an image with the required assets embedded; GPU smoke takes
+`--render gpu --gpus device=0`. Registry transfer size and peak build disk use are
+not measured. No new size thresholds or baseline database are introduced.
+
 ## Run with separate assets
 
 ```yaml

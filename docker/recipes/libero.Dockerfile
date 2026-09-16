@@ -38,11 +38,3 @@ bddl_files: /app/libero/libero/libero/bddl_files\n\
 init_states: /app/libero/libero/libero/init_files\n\
 datasets: /app/libero/libero/datasets\n\
 assets: /app/libero/libero/libero/assets\n' > /root/.libero/config.yaml
-
-WORKDIR /workspace
-COPY pyproject.toml README.md ./
-COPY src/ src/
-ARG HARNESS_VERSION=0.0.0
-ENV SETUPTOOLS_SCM_PRETEND_VERSION=${HARNESS_VERSION}
-RUN uv pip install --no-cache-dir -e .
-COPY configs/ configs/

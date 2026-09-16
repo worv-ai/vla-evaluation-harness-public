@@ -42,11 +42,3 @@ RUN uv pip install --no-cache-dir numpy==1.24.4
 # ── Symlink for rgb_overlay_path config compatibility ─────────────────
 RUN mkdir -p /app/simpler \
     && ln -sfn /app/ManiSkill2_real2sim /app/simpler/ManiSkill2_real2sim
-
-WORKDIR /workspace
-COPY pyproject.toml README.md ./
-COPY src/ src/
-ARG HARNESS_VERSION=0.0.0
-ENV SETUPTOOLS_SCM_PRETEND_VERSION=${HARNESS_VERSION}
-RUN uv pip install --no-cache-dir -e .
-COPY configs/ configs/

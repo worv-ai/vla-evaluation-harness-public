@@ -6,6 +6,8 @@
 ARG BASE_IMAGE=ghcr.io/allenai/vla-evaluation-harness/base:latest
 ARG RUNTIME_IMAGE=ghcr.io/allenai/vla-evaluation-harness/base-render:latest
 FROM ${BASE_IMAGE} AS builder
+ARG TORCH_BACKEND=cpu
+ENV UV_TORCH_BACKEND=${TORCH_BACKEND}
 
 # Python 3.10: RoboCasa v0.2 pins numba==0.56.4, whose llvmlite has no
 # cp311 wheel.
@@ -32,20 +34,3 @@ RUN mkdir -p /app/robocasa &&      cd /app/robocasa &&      uv pip install --no-
 RUN cd /app/robocasa \
     && python robocasa/scripts/setup_macros.py \
     && echo "y" | python robocasa/scripts/download_kitchen_assets.py
-
-WORKDIR /workspace
-COPY pyproject.toml README.md ./
-COPY src/ src/
-ARG HARNESS_VERSION=0.0.0
-ENV SETUPTOOLS_SCM_PRETEND_VERSION=${HARNESS_VERSION}
-# robocasa/__init__.py asserts numpy is 1.23.{2,3,5}, which the harness floor of
-# >=1.24 would pull out from under it. Restore RoboCasa's pin after installing;
-# the harness test suite passes on 1.23.3.
-ARG ROBOCASA_NUMPY=1.23.3
-
-ARG TORCH_BACKEND=cpu
-ENV UV_TORCH_BACKEND=${TORCH_BACKEND}
-
-RUN uv pip install --no-cache-dir -e . && \
-    uv pip install --no-cache-dir "numpy==${ROBOCASA_NUMPY}"
-COPY configs/ configs/

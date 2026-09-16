@@ -42,11 +42,3 @@ assets: /app/libero-mem/libero/libero/assets\n' > /root/.libero/config.yaml
 # Pre-generated init states (avoids ~43 min MuJoCo generation during build)
 # To regenerate, run: docker/generate_libero_mem_inits.py
 COPY docker/init_states/libero_mem/ /app/libero-mem/libero/libero/init_files/libero_mem/
-
-WORKDIR /workspace
-COPY pyproject.toml README.md ./
-COPY src/ src/
-ARG HARNESS_VERSION=0.0.0
-ENV SETUPTOOLS_SCM_PRETEND_VERSION=${HARNESS_VERSION}
-RUN uv pip install --no-cache-dir -e .
-COPY configs/ configs/

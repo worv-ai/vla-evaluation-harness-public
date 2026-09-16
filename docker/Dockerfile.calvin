@@ -53,12 +53,6 @@ RUN find /app/calvin -name .git -exec rm -rf {} + 2>/dev/null || true \
 COPY docker/calvin_validation_data/ /data/calvin/dataset/validation/
 
 WORKDIR /workspace
-COPY pyproject.toml README.md ./
-COPY src/ src/
-ARG HARNESS_VERSION=0.0.0
-ENV SETUPTOOLS_SCM_PRETEND_VERSION=${HARNESS_VERSION}
-RUN uv pip install --no-cache-dir -e .
-COPY configs/ configs/
 
 # CALVIN otherwise compiles this GPU-discovery helper on first reset.
 RUN cd /app/calvin/calvin_env/egl_check && bash build.sh && test -x EGL_options.o
@@ -68,6 +62,13 @@ COPY docker/locks/calvin-${IMAGE_PROFILE}.txt /usr/local/lib/vla/locks/calvin-${
 COPY docker/locks/assets.json /usr/local/lib/vla/locks/assets.json
 RUN mkdir -p /app /root
 RUN python /usr/local/lib/vla/install_locked.py calvin "$IMAGE_PROFILE"
+WORKDIR /workspace
+COPY pyproject.toml README.md ./
+COPY src/ src/
+ARG HARNESS_VERSION=0.0.0
+ENV SETUPTOOLS_SCM_PRETEND_VERSION=${HARNESS_VERSION}
+RUN uv pip install --no-cache-dir --no-deps -e .
+COPY configs/ configs/
 RUN if [ "$IMAGE_PROFILE" = cpu ]; then python /usr/local/lib/vla/prepare_cpu.py && python /usr/local/lib/vla/prune_cpu.py; fi
 RUN python /usr/local/lib/vla/export_runtime.py --inventory-only /opt/pixi/.pixi/envs/calvin /app /workspace /root /data
 FROM builder AS assembled

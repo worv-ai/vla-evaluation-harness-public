@@ -45,20 +45,19 @@ RUN cd /app/robomme_benchmark && uv pip install --no-cache-dir -e .
 
 # ── Additional runtime deps (h5py imported by DemonstrationWrapper) ─────
 RUN uv pip install --no-cache-dir "opencv-python>=4.11.0.86" h5py imageio
-
-WORKDIR /workspace
-COPY pyproject.toml README.md ./
-COPY src/ src/
-ARG HARNESS_VERSION=0.0.0
-ENV SETUPTOOLS_SCM_PRETEND_VERSION=${HARNESS_VERSION}
-RUN uv pip install --no-cache-dir -e .
-COPY configs/ configs/
 COPY docker/images.json /usr/local/lib/vla/images.json
 ARG IMAGE_PROFILE=gpu
 COPY docker/locks/robomme-${IMAGE_PROFILE}.txt /usr/local/lib/vla/locks/robomme-${IMAGE_PROFILE}.txt
 COPY docker/locks/assets.json /usr/local/lib/vla/locks/assets.json
 RUN mkdir -p /app /root
 RUN python /usr/local/lib/vla/install_locked.py robomme "$IMAGE_PROFILE"
+WORKDIR /workspace
+COPY pyproject.toml README.md ./
+COPY src/ src/
+ARG HARNESS_VERSION=0.0.0
+ENV SETUPTOOLS_SCM_PRETEND_VERSION=${HARNESS_VERSION}
+RUN uv pip install --no-cache-dir --no-deps -e .
+COPY configs/ configs/
 RUN if [ "$IMAGE_PROFILE" = cpu ]; then python /usr/local/lib/vla/prepare_cpu.py && python /usr/local/lib/vla/prune_cpu.py; fi
 RUN python /usr/local/lib/vla/export_runtime.py --inventory-only /opt/python /opt/venv /app /workspace /root
 FROM builder AS assembled

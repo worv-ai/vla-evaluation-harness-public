@@ -76,3 +76,32 @@ def test_every_profile_lock_has_artifact_hashes_and_cpu_excludes_cuda():
                 assert "--hash=sha256:" in line, (name, line)
                 if profile == "cpu":
                     assert not line.startswith(("nvidia-", "jax-cuda", "triton==")), (name, line)
+
+
+def test_harness_changes_do_not_invalidate_locked_dependency_install(monkeypatch):
+    renderer = load_module("render", monkeypatch)
+    for name, spec in renderer.BENCHMARKS.items():
+        if "runtime_paths" not in spec:
+            continue
+        text = renderer.render(name, spec)
+        locked = text.index("RUN python /usr/local/lib/vla/install_locked.py")
+        assert text.count("COPY src/ src/") == 1
+        assert locked < text.index("COPY pyproject.toml README.md ./") < text.index("COPY src/ src/")
+        assert "RUN uv pip install --no-cache-dir --no-deps -e ." in text
+        if spec["prune"]["libero_numpy"]:
+            assert text.index("COPY src/ src/") < text.index("python /usr/local/lib/vla/optimize_libero.py")
+
+
+def test_locks_include_direct_harness_dependencies():
+    import tomllib
+
+    metadata = tomllib.loads((ROOT / "pyproject.toml").read_text())
+    names = set()
+    for requirement in metadata["project"]["dependencies"]:
+        match = re.match(r"[\w.-]+", requirement)
+        assert match is not None
+        names.add(re.sub(r"[-_.]+", "-", match[0].lower()))
+    for lock in (ROOT / "docker/locks").glob("*.in"):
+        installed = {line.split("==")[0] for line in lock.read_text().splitlines()}
+        # Python >=3.11 does not require the typing backport.
+        assert names - {"typing-extensions"} <= installed, lock.name

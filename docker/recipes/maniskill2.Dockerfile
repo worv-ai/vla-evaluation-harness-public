@@ -44,12 +44,3 @@ RUN --mount=from=asset_source,target=/asset-source \
         && python -m mani_skill2.utils.download_asset -y PickSingleEGAD-v0 \
         && python -m mani_skill2.utils.download_asset -y PickClutterYCB-v0; \
     fi
-
-COPY pyproject.toml README.md ./
-COPY src/ src/
-ARG HARNESS_VERSION=0.0.0
-ENV SETUPTOOLS_SCM_PRETEND_VERSION=${HARNESS_VERSION}
-RUN uv pip install --no-cache-dir -e .
-# torch 2.1.0 is incompatible with numpy >=2; pin to 1.x.
-RUN uv pip install --no-cache-dir "numpy<2"
-COPY configs/ configs/

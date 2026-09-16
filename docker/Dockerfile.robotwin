@@ -98,20 +98,19 @@ RUN cd /app/RoboTwin/assets \
 
 # ── Resolve embodiment config paths ──────────────────────────────────
 RUN cd /app/RoboTwin && python script/update_embodiment_config_path.py
-
-WORKDIR /workspace
-COPY pyproject.toml README.md ./
-COPY src/ src/
-ARG HARNESS_VERSION=0.0.0
-ENV SETUPTOOLS_SCM_PRETEND_VERSION=${HARNESS_VERSION}
-RUN uv pip install --no-cache-dir -e .
-COPY configs/ configs/
 COPY docker/images.json /usr/local/lib/vla/images.json
 ARG IMAGE_PROFILE=gpu
 COPY docker/locks/robotwin-${IMAGE_PROFILE}.txt /usr/local/lib/vla/locks/robotwin-${IMAGE_PROFILE}.txt
 COPY docker/locks/assets.json /usr/local/lib/vla/locks/assets.json
 RUN mkdir -p /app /root
 RUN python /usr/local/lib/vla/install_locked.py robotwin "$IMAGE_PROFILE"
+WORKDIR /workspace
+COPY pyproject.toml README.md ./
+COPY src/ src/
+ARG HARNESS_VERSION=0.0.0
+ENV SETUPTOOLS_SCM_PRETEND_VERSION=${HARNESS_VERSION}
+RUN uv pip install --no-cache-dir --no-deps -e .
+COPY configs/ configs/
 RUN python /usr/local/lib/vla/export_runtime.py --inventory-only /opt/python /opt/venv /app /workspace /root
 FROM builder AS assembled
 RUN python /usr/local/lib/vla/assemble.py robotwin
