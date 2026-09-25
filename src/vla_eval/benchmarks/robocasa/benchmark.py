@@ -12,6 +12,17 @@ Observations expose RGB images from configurable cameras (default:
 ``robot0_agentview_left`` and ``robot0_eye_in_hand``) plus a natural
 language task description obtained via ``env.get_ep_meta()["lang"]``.
 
+With ``send_state=True`` the observation also carries ``states``: the
+end-effector position and quaternion in the robot base frame and the gripper
+qpos (9-D), the first nine of the released demonstrations' proprio
+(``robot0_base_to_eef_pos``, ``robot0_base_to_eef_quat``,
+``robot0_gripper_qpos``).
+
+Non-root runtimes: RoboCasa writes a temporary copy of each object's MJCF next
+to the original, inside the image's root-owned asset tree, which fails under
+Charliecloud.  When that folder is not writable the copy goes to a temporary
+directory instead, with the MJCF's relative asset paths made absolute.
+
 The successor protocol (365 tasks, 12-D mobile-manipulation actions) lives
 in :mod:`vla_eval.benchmarks.robocasa365` and runs on its own image; the
 two upstream releases are not API-compatible.
@@ -20,6 +31,9 @@ two upstream releases are not API-compatible.
 from __future__ import annotations
 
 import os
+import tempfile
+import time
+import xml.etree.ElementTree as ET
 from typing import Any
 
 import numpy as np
@@ -30,6 +44,8 @@ from vla_eval.specs import GRIPPER_RAW, IMAGE_RGB, LANGUAGE, POSITION_DELTA, ROT
 from vla_eval.types import Action, EpisodeResult, Observation, Task
 
 ACTION_DIM = 7
+STATE_KEYS = ("robot0_base_to_eef_pos", "robot0_base_to_eef_quat", "robot0_gripper_qpos")
+STATE_SPEC = DimSpec("state", 9, "base_frame_eef_pos3_quat4_gripper2")
 
 # The benchmark's 24 atomic tasks: robocasa's ``SINGLE_STAGE_TASK_DATASETS``
 # minus ``NavigateKitchen``, which is locomotion rather than manipulation.
@@ -68,6 +84,87 @@ ATOMIC_TASKS = [
 EVAL_LAYOUT_AND_STYLE_IDS = ((1, 1), (2, 2), (4, 4), (6, 9), (7, 10))
 
 
+def _absolutize_asset_paths(root: ET.Element, folder: str) -> None:
+    """Make every relative ``file=`` attribute absolute against ``folder`` (where the MJCF was read from)."""
+    for elem in root.iter():
+        path = elem.get("file")
+        if path is not None and not os.path.isabs(path):
+            elem.set("file", os.path.normpath(os.path.join(folder, path)))
+
+
+def _patch_mjcf_object_for_read_only_assets() -> None:
+    """Route RoboCasa's temporary object MJCF to a temporary directory when the asset folder is read-only.
+
+    ``MJCFObject.__init__`` below is upstream's (RoboCasa v0.2) with that one change; a writable folder keeps the
+    original behavior.
+    """
+    from robocasa.models.objects import objects as rc_objects
+    from robosuite.models.objects import MujocoXMLObject
+
+    cls = rc_objects.MJCFObject
+    if getattr(cls, "_vla_eval_patched", False):
+        return
+    original_init = cls.__init__
+    tmp_dir = tempfile.mkdtemp(prefix="robocasa_mjcf_")
+
+    def __init__(
+        self,
+        name,
+        mjcf_path,
+        scale=1.0,
+        solimp=(0.998, 0.998, 0.001),
+        solref=(0.001, 1),
+        density=100,
+        friction=(0.95, 0.3, 0.1),
+        margin=None,
+        rgba=None,
+        priority=None,
+    ):
+        folder = os.path.dirname(mjcf_path)
+        if os.access(folder, os.W_OK):
+            return original_init(
+                self,
+                name,
+                mjcf_path,
+                scale=scale,
+                solimp=solimp,
+                solref=solref,
+                density=density,
+                friction=friction,
+                margin=margin,
+                rgba=rgba,
+                priority=priority,
+            )
+        if isinstance(scale, float):
+            scale = [scale, scale, scale]
+        elif isinstance(scale, (tuple, list)):
+            assert len(scale) == 3
+            scale = tuple(scale)
+        else:
+            raise TypeError(f"got invalid scale: {scale}")
+        self.solimp, self.solref, self.density, self.friction = solimp, solref, density, friction
+        self.margin, self.priority, self.rgba = margin, priority, rgba
+        root = ET.parse(mjcf_path).getroot()
+        _absolutize_asset_paths(root, folder)
+        xml_str = self.postprocess_model_xml(ET.tostring(root, encoding="utf8").decode("utf8"))
+        path = os.path.join(tmp_dir, f"{str(time.time()).replace('.', '_')}_{os.getpid()}.xml")
+        with open(path, "w") as f:
+            f.write(xml_str)
+        MujocoXMLObject.__init__(
+            self,
+            fname=path,
+            name=name,
+            joints=[{"type": "free", "damping": "0.0005"}],
+            obj_type="all",
+            duplicate_collision_geoms=False,
+            scale=np.array(scale),
+        )
+        os.remove(path)
+
+    cls.__init__ = __init__
+    cls._vla_eval_patched = True
+
+
 def _task_horizon(task_name: str) -> int:
     from robocasa.utils.dataset_registry import MULTI_STAGE_TASK_DATASETS, SINGLE_STAGE_TASK_DATASETS
 
@@ -95,6 +192,8 @@ class RoboCasaBenchmark(StepBenchmark):
             evaluation scenes.  Disable to sample the full scene distribution.
         seed: Base seed; episode ``i`` of each task runs at ``seed + i``.
             ``None`` leaves the environment unseeded.
+        send_state: Include the 9-D proprio ``states`` in each observation
+            (see the module docstring).
     """
 
     _ALL_RECORD_FIELDS = frozenset({"reward", "done", "success"})
@@ -115,6 +214,7 @@ class RoboCasaBenchmark(StepBenchmark):
         obj_instance_split: str | None = "B",
         eval_scenes: bool = True,
         seed: int | None = None,
+        send_state: bool = False,
     ) -> None:
         super().__init__()
         if obj_instance_split not in {"A", "B", None}:
@@ -132,6 +232,7 @@ class RoboCasaBenchmark(StepBenchmark):
         self._obj_instance_split = obj_instance_split
         self._eval_scenes = eval_scenes
         self._seed = seed
+        self.send_state = send_state
         self._env: Any = None
         self._current_task: str | None = None
         self._lang: str = ""
@@ -157,6 +258,7 @@ class RoboCasaBenchmark(StepBenchmark):
         os.environ.setdefault("MUJOCO_GL", "egl")
         from robocasa.utils.env_utils import create_env
 
+        _patch_mjcf_object_for_read_only_assets()
         return create_env(
             env_name=task_name,
             robots=self._robot,
@@ -235,10 +337,10 @@ class RoboCasaBenchmark(StepBenchmark):
             if key in raw_obs:
                 # RoboCasa images are upside-down — flip vertically
                 images[cam] = np.ascontiguousarray(raw_obs[key][::-1])
-        return {
-            "images": images,
-            "task_description": self._lang,
-        }
+        obs: Observation = {"images": images, "task_description": self._lang}
+        if self.send_state:
+            obs["states"] = np.concatenate([np.asarray(raw_obs[k], dtype=np.float32) for k in STATE_KEYS])
+        return obs
 
     def check_done(self, step_result: StepResult) -> bool:
         return step_result.done or step_result.info.get("success", False)
@@ -265,10 +367,10 @@ class RoboCasaBenchmark(StepBenchmark):
         }
 
     def get_observation_spec(self) -> dict[str, DimSpec]:
-        return {
-            "robot0_agentview_left": IMAGE_RGB,
-            "language": LANGUAGE,
-        }
+        spec = {"robot0_agentview_left": IMAGE_RGB, "language": LANGUAGE}
+        if self.send_state:
+            spec["state"] = STATE_SPEC
+        return spec
 
     def render(self) -> np.ndarray | None:
         try:
