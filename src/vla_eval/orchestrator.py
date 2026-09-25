@@ -55,12 +55,15 @@ def _effective_recording_config(raw: dict[str, Any] | None, *, no_save: bool) ->
 _SHARD_SHUFFLE_SEED = 42
 
 
-def _shard_work_items(work_items: list[Any], num_shards: int, shard_id: int) -> list[Any]:
+def _shard_work_items(work_items: list[Any], num_shards: int, shard_id: int, offset: int = 0) -> list[Any]:
     """Fixed-seed shuffle so a shard never collects one episode index across every task
-    (gcd(num_shards, episodes_per_task) > 1 does that); re-sort by task to keep env rebuilds rare."""
+    (gcd(num_shards, episodes_per_task) > 1 does that); re-sort by task to keep env rebuilds rare.
+
+    ``offset`` rotates the round-robin start. Without it, an entry with fewer items than shards always
+    lands on shards 0..n-1, and with many such entries the other shards stay idle."""
     items = list(work_items)
     random.Random(_SHARD_SHUFFLE_SEED).shuffle(items)
-    mine = [w for i, w in enumerate(items) if i % num_shards == shard_id]
+    mine = [w for i, w in enumerate(items) if (i + offset) % num_shards == shard_id]
     mine.sort(key=lambda w: w[0])
     return mine
 
@@ -155,6 +158,7 @@ class Orchestrator:
         # ``vla-eval export`` owns the aggregate push for sharded runs.
         self._trackers: list[Tracker] = get_reporting_trackers((config.get("tracking") or {}).get("report_to"))
         self._live_tracking = num_shards is None
+        self._entry_index = 0  # position of the running benchmark entry in the config; rotates its sharding
         if self._trackers and not self._live_tracking:
             logger.warning(
                 "tracking.report_to set with sharding active; per-episode and eval-end "
@@ -187,7 +191,8 @@ class Orchestrator:
 
         all_results = []
         try:
-            for bench_cfg in self.config.get("benchmarks", []):
+            for entry_index, bench_cfg in enumerate(self.config.get("benchmarks", [])):
+                self._entry_index = entry_index
                 result = await self._run_benchmark(bench_cfg)
                 all_results.append(result)
                 if self._live_tracking:
@@ -319,7 +324,9 @@ class Orchestrator:
             (task_idx, task, ep) for task_idx, task in enumerate(tasks) for ep in range(cfg.episodes_per_task)
         ]
         if self.num_shards is not None and self.shard_id is not None:
-            work_items = _shard_work_items(work_items, self.num_shards, self.shard_id)
+            # Entry k starts where k equal-sized entries before it would have ended, so small entries tile the shards.
+            offset = self._entry_index * len(work_items)
+            work_items = _shard_work_items(work_items, self.num_shards, self.shard_id, offset)
             logger.info("Shard %d/%d: %d episodes assigned", self.shard_id, self.num_shards, len(work_items))
 
         collector = ResultCollector(benchmark_name=name, mode=cfg.mode, metric_keys=benchmark.get_metric_keys())
