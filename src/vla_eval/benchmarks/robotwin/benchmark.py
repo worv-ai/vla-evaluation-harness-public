@@ -196,6 +196,13 @@ class RoboTwinBenchmark(StepBenchmark):
         fast_render: If ``True``, use SAPIEN's default camera shader instead of
             RoboTwin's ray-traced renderer. Faster, but observation fidelity may
             differ from the reference benchmark.
+        clear_cache_freq: ``0`` (default) builds a new task environment for every
+            episode and clears SAPIEN's asset cache each time. ``k > 0`` follows
+            RoboTwin's own ``eval_policy.py``: one environment is reused
+            (``close_env`` then ``setup_demo`` for the next seed) and the cache is
+            cleared every ``k`` episodes (RoboTwin's task configs use 5). An
+            episode that does not finish (an exception, or a runner cap below
+            ``step_lim``) gets a fresh environment next time.
     """
 
     _ALL_RECORD_FIELDS = frozenset({"reward", "done", "success"})
@@ -210,6 +217,7 @@ class RoboTwinBenchmark(StepBenchmark):
         skip_expert_check: bool = False,
         fast_init: bool = True,
         fast_render: bool = False,
+        clear_cache_freq: int = 0,
     ) -> None:
         import re
 
@@ -226,6 +234,11 @@ class RoboTwinBenchmark(StepBenchmark):
         self.skip_expert_check = skip_expert_check
         self.fast_init = fast_init
         self.fast_render = fast_render
+        if clear_cache_freq < 0:
+            raise ValueError(f"clear_cache_freq must be >= 0, got {clear_cache_freq}")
+        self.clear_cache_freq = clear_cache_freq
+        self._episodes_since_clear = 0
+        self._env_finished = False  # the current env's last episode ended through done
         self._env: Any = None
         self._env_class: Any = None
         self._args: dict[str, Any] | None = None
@@ -384,14 +397,23 @@ class RoboTwinBenchmark(StepBenchmark):
         self._init_robotwin()
         assert self._args is not None
 
+        reuse = self.clear_cache_freq > 0 and self._env is not None and self._env_finished
         if self._env is not None:
+            clear = not reuse or self._episodes_since_clear >= self.clear_cache_freq
             try:
-                self._env.close_env(clear_cache=True)
+                self._env.close_env(clear_cache=clear)
             except Exception as e:
                 logger.warning("Failed to close previous RoboTwin env: %s", e)
-            self._env = None
+                reuse, clear = False, True
+            if clear:
+                self._episodes_since_clear = 0
+            if not reuse:
+                self._env = None
 
-        self._env = self._create_env()
+        if self._env is None:
+            self._env = self._create_env()
+        self._env_finished = False
+        self._episodes_since_clear += 1
         with _patched_robot_set_planner(self.fast_init), _patched_render_setup(self.fast_render):
             self._env.setup_demo(
                 now_ep_num=task.get("episode_idx", 0),
@@ -417,6 +439,7 @@ class RoboTwinBenchmark(StepBenchmark):
         raw_obs = self._env.get_obs()
         success = bool(self._env.eval_success)
         done = success or (self._env.take_action_cnt >= self._env.step_lim)
+        self._env_finished = done
         self._recorder.record_video(self._extract_frame(raw_obs))
         self._recorder.record_step(reward=1.0 if success else 0.0, done=done, success=success)
         return StepResult(obs=raw_obs, reward=1.0 if success else 0.0, done=done, info={"success": success})
