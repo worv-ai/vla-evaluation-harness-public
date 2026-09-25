@@ -29,6 +29,10 @@ from vla_eval.types import Action, EpisodeResult, Observation, Task
 logger = logging.getLogger(__name__)
 
 ROBOTWIN_ROOT = "/app/RoboTwin"
+# Per-task evaluation step limits, which end episodes through ``done``. The runner's cap (``max_steps``) comes from
+# here; when the file cannot be read it falls back to the largest published limit (put_bottles_dustbin).
+STEP_LIMIT_FILE = "task_config/_eval_step_limit.yml"
+MAX_STEP_LIMIT = 1700
 
 
 class _EvalGripperPlanner:
@@ -196,6 +200,10 @@ class RoboTwinBenchmark(StepBenchmark):
         fast_render: If ``True``, use SAPIEN's default camera shader instead of
             RoboTwin's ray-traced renderer. Faster, but observation fidelity may
             differ from the reference benchmark.
+        max_expert_seeds: Give up the expert check (``RuntimeError``) after this
+            many seeds without collecting ``test_num`` solvable ones. Default
+            ``20 * test_num``; an environment where every seed fails (e.g. a broken
+            planner install) would otherwise loop forever.
     """
 
     _ALL_RECORD_FIELDS = frozenset({"reward", "done", "success"})
@@ -210,6 +218,7 @@ class RoboTwinBenchmark(StepBenchmark):
         skip_expert_check: bool = False,
         fast_init: bool = True,
         fast_render: bool = False,
+        max_expert_seeds: int | None = None,
     ) -> None:
         import re
 
@@ -226,6 +235,7 @@ class RoboTwinBenchmark(StepBenchmark):
         self.skip_expert_check = skip_expert_check
         self.fast_init = fast_init
         self.fast_render = fast_render
+        self.max_expert_seeds = max_expert_seeds if max_expert_seeds is not None else 20 * test_num
         self._env: Any = None
         self._env_class: Any = None
         self._args: dict[str, Any] | None = None
@@ -343,6 +353,11 @@ class RoboTwinBenchmark(StepBenchmark):
         logger.info("Running expert checks from seed %d ...", st_seed)
 
         while len(tasks) < self.test_num:
+            if now_seed - st_seed >= self.max_expert_seeds:
+                raise RuntimeError(
+                    f"{self.task_name}: expert check found {len(tasks)}/{self.test_num} solvable seeds in "
+                    f"{self.max_expert_seeds} tries (seeds {st_seed}..{now_seed - 1}); see the warnings above"
+                )
             try:
                 env.setup_demo(
                     now_ep_num=episode_idx,
@@ -450,9 +465,19 @@ class RoboTwinBenchmark(StepBenchmark):
     def get_step_result(self, step_result: StepResult) -> EpisodeResult:
         return {"success": step_result.info.get("success", False)}
 
+    def _step_limit(self) -> int:
+        """The task's official evaluation step limit, or ``MAX_STEP_LIMIT`` if it cannot be read."""
+        import yaml
+
+        try:
+            with open(os.path.join(ROBOTWIN_ROOT, STEP_LIMIT_FILE)) as f:
+                return int(yaml.safe_load(f)[self.task_name])
+        except (OSError, KeyError, TypeError, ValueError):
+            return MAX_STEP_LIMIT
+
     def get_metadata(self) -> dict[str, Any]:
         return {
-            "max_steps": 400,
+            "max_steps": self._step_limit(),
             "task_name": self.task_name,
             "action_dim": 14,
             "max_episodes_per_task": self.test_num,
