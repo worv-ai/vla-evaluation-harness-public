@@ -179,6 +179,28 @@ def _patched_render_setup(enabled: bool):
             setattr(sapien_render, name, func)
 
 
+def _restore_play_once_attributes(env: Any) -> None:
+    """Set the attributes a task's check_success reads but only its expert's play_once assigns.
+
+    RoboTwin's eval_policy.py runs play_once on the same environment before evaluating the policy, so these exist
+    there; here each episode gets a fresh environment and check_success raises AttributeError on every step of these
+    tasks. play_once computes them from the initial scene before moving anything, so the same expressions after
+    setup_demo give the values RoboTwin's own evaluation uses.
+    """
+    name = type(env).__name__
+    if name not in ("open_laptop", "place_object_scale", "put_object_cabinet"):
+        return
+    from envs.utils import ArmTag, get_face_prod  # RoboTwin's package; importable once _init_robotwin ran
+
+    if name == "open_laptop":
+        face_prod = get_face_prod(env.laptop.get_pose().q, [1, 0, 0], [1, 0, 0])
+        env.arm_tag = ArmTag("left" if face_prod > 0 else "right")
+        return
+    env.arm_tag = ArmTag("right" if env.object.get_pose().p[0] > 0 else "left")
+    if name == "put_object_cabinet":
+        env.origin_z = env.object.get_pose().p[2]
+
+
 class RoboTwinBenchmark(StepBenchmark):
     """RoboTwin dual-arm manipulation benchmark (SAPIEN/CuRobo).
 
@@ -399,6 +421,7 @@ class RoboTwinBenchmark(StepBenchmark):
                 is_test=True,
                 **self._args,
             )
+        _restore_play_once_attributes(self._env)
         self._env.set_instruction(instruction=task["instruction"])
         raw_obs = self._env.get_obs()
         self._recorder.record_video(self._extract_frame(raw_obs))
