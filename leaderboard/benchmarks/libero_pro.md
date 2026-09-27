@@ -60,7 +60,6 @@ suites:
 - task_object
 - task_perturbation
 - task_spatial
-detail_notes: "LIBERO-Pro robustness benchmark (<a href='https://arxiv.org/abs/2510.03827'>2510.03827</a>). Standard protocol: 4 suites (goal, spatial, long, object) × 5 perturbations (original, object_swap, position, semantic, task) = 20 cells. Optional 6th perturbation: environment (object suite only). <code>overall_score</code> = mean of 20 core cells (excl env). Null if &lt;20 cells reported."
 aggregation:
   container: suite_scores
   keys:

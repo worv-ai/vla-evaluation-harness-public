@@ -4,6 +4,7 @@ on:
     branches: [main]
     paths:
       - 'leaderboard/**'
+      - 'pyproject.toml'
       - '.github/workflows/pages.yml'
   workflow_dispatch:
 
@@ -19,36 +20,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-        with:
-          # leaderboard/data/{leaderboard,extractions,scan_results}.json
-          # live in LFS. scan.py reads leaderboard.json and the site
-          # serves it verbatim, so the blob must be smudged here.
-          lfs: true
-
-      - uses: actions/setup-python@v7
-        with:
-          python-version: '3.11'
-
+      - uses: astral-sh/setup-uv@v7
+      - run: uv sync --python 3.11 --only-group leaderboard
       - name: Build site
         run: |
-          python leaderboard/scripts/scan.py --check
-          python leaderboard/scripts/update_citations.py
-          mkdir -p _site/leaderboard
-          # The site lives under /leaderboard/; keep the Pages root from 404ing.
+          uv run --no-sync python leaderboard/scripts/build.py --output _site/leaderboard
           cat > _site/index.html <<'HTML'
           <!doctype html>
           <meta charset="utf-8">
-          <title>VLA Model Leaderboard</title>
-          <link rel="canonical" href="https://allenai.github.io/vla-evaluation-harness/leaderboard/">
+          <title>VLA benchmark results</title>
           <meta http-equiv="refresh" content="0; url=./leaderboard/">
-          <p><a href="./leaderboard/">VLA Model Leaderboard</a></p>
+          <p><a href="./leaderboard/">VLA benchmark results</a></p>
           HTML
-          cp leaderboard/site/* _site/leaderboard/
-          cp leaderboard/data/leaderboard.json _site/leaderboard/
-          cp leaderboard/data/benchmarks.json _site/leaderboard/
-          cp leaderboard/data/coverage.json _site/leaderboard/
-          cp leaderboard/data/citations.json _site/leaderboard/
-
       - name: Deploy to gh-pages branch
         uses: peaceiris/actions-gh-pages@v4
         with:

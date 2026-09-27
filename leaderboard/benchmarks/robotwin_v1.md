@@ -45,7 +45,6 @@ tasks:
 - put_apple_cabinet
 - shoe_place
 - tool_adjust
-detail_notes: "RoboTwin 1.0 (ECCV 2024). Task counts vary by paper (4–17). Scores across different task subsets are not directly comparable."
 ---
 
 **Standard**: RoboTwin v1 ([2409.02920](https://arxiv.org/abs/2409.02920), ECCV 2024) with no fixed task set — entries evaluate 4–17 tasks from the original paper; `overall_score` = mean success rate across the evaluated tasks ONLY when the task set matches the original paper's exact set, otherwise `null`. (v1 and v2 are separate benchmarks — v2 lives at `robotwin_v2`.)

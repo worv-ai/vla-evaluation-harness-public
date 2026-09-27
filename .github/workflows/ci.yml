@@ -39,16 +39,9 @@ jobs:
 
   test-leaderboard:
     runs-on: ubuntu-latest
-    name: Pytest (leaderboard)
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v7
-      - name: Install leaderboard deps
-        # --no-install-project so we don't pull vla_eval's runtime
-        # (anyio, websockets, numpy, …) for tests that only touch
-        # leaderboard/scripts/*.py. --group leaderboard gets the
-        # uv-script-level deps (typer, bs4, markdownify); --dev gets
-        # pytest + jsonschema.
-        run: uv sync --python 3.11 --no-install-project --dev --group leaderboard
-      - name: Run pytest
-        run: uv run pytest leaderboard/tests/
+      - run: uv sync --python 3.11 --only-group leaderboard --group dev
+      - run: uv run --no-sync pytest leaderboard/tests
+      - run: node --test leaderboard/tests/test_site.cjs

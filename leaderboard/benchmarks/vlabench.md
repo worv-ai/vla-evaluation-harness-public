@@ -45,7 +45,6 @@ tasks:
 - select_chemistry_tube
 - set_study_table
 - texas_holdem
-detail_notes: "Standard: Track 1-4 Progress Score (PS) avg. Official 6-track system from OpenMOSS/VLABench: (1) in_distribution, (2) cross_category, (3) common_sense, (4) semantic_instruction, (5) cross_task [open], (6) unseen_texture. Metrics: IS (Intention Score) = approached correct object; PS (Progress Score) = task completion. overall_score = Track 1-4 PS avg. Entries from the original VLABench paper (2412.18194) use a pre-track IS-based protocol and have overall_score=null."
 aggregation:
   container: suite_scores
   keys:

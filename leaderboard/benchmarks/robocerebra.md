@@ -23,7 +23,6 @@ tasks:
 - Mix
 - Observation_Mismatching
 - Random_Disturbance
-detail_notes: "Embodied reasoning benchmark (<a href='https://arxiv.org/abs/2506.06677'>2506.06677</a>) with 6 evaluation dimensions. <code>overall_score</code> = mean of 6 dimensions. <strong>Architecture types</strong>: end-to-end VLAs, hierarchical (VLM+controller), and oracle (GT-Plan) upper bounds are not directly comparable. Check <em>notes</em> for architecture type."
 ---
 
 **Standard**: Embodied reasoning benchmark ([2506.06677](https://arxiv.org/abs/2506.06677)) with 6 evaluation dimensions (ideal, memory_execution, memory_exploration, mix, observation_mismatching, random_disturbance); `overall_score` = arithmetic mean of all 6 dimensions.

@@ -20,7 +20,6 @@ tasks:
 - T7
 - T8
 - T9
-detail_notes: "LIBERO-Mem memory benchmark (<a href='https://arxiv.org/abs/2511.11478'>2511.11478</a>). 10 tasks (T1–T10). Metric: <strong>subgoal completion rate</strong> (not task success rate). 20 rollouts per task."
 aggregation:
   container: task_scores
   keys:

@@ -1,995 +1,527 @@
-// VLA Leaderboard app.js
-// Vanilla JS, no frameworks.
+"use strict";
 
-(function () {
-  'use strict';
-
-  // ─── Global state ───────────────────────────────────────────────────────────
-  let data = null;
-  let pivotMap = {};       // model key → { benchmarkKey: resultObj }
-  let modelKeys = [];      // ordered model keys (rows)
-  let benchmarkKeys = [];  // ordered benchmark keys (columns with data)
-  let overviewColumns = []; // expanded columns: suite-only benchmarks get one col per suite
-  let selectedBenchmark = null; // null = overview, string = detail view
-  let sortState = { column: null, direction: 'desc' };
-  let detailSortSuite = null; // which suite column to sort by in detail view
-  let coverageData = null;
-  let citationData = null; // arxiv_id → citation count
-
-  // ─── Caches (computed once in buildPivot, static until data reload) ────────
-  let suiteOnlyCache = {};   // bmKey → boolean
-  let modelDisplayCache = {}; // model key → display name
-  let bestByColumnCache = {}; // colId → model key (best score)
-
-  // ─── Pagination state ─────────────────────────────────────────────────────
-  const PAGE_SIZE = 50;
-  let currentPage = 0;
-  let lastFilteredModels = []; // cached for pagination
-  let lastSortCol = null;      // track whether sort/filter changed vs page-only
-  let lastSortDir = null;
-
-  // ─── DOM refs ──────────────────────────────────────────────────────────────
-  const $ = id => document.getElementById(id);
-  const loadingEl = $('loading');
-  const tableEl = $('leaderboard-table');
-  const theadEl = tableEl ? tableEl.querySelector('thead') : null;
-  const tbodyEl = tableEl ? tableEl.querySelector('tbody') : null;
-  const statsEl = $('stats');
-  const benchmarkFilterEl = $('benchmark-filter');
-  const modelSearchEl = $('model-search');
-  const dateFromEl = $('date-from');
-  const dateToEl = $('date-to');
-  const minCitationsEl = $('min-citations');
-  const firstPartyOnlyEl = $('first-party-only');
-  const breakdownPanelEl = $('breakdown-panel');
-  const coverageBarEl = $('coverage-bar');
-
-  // ─── Bootstrap ─────────────────────────────────────────────────────────────
-  document.addEventListener('DOMContentLoaded', () => {
-    Promise.all([
-      fetch('./leaderboard.json').then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); }),
-      fetch('./benchmarks.json').then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); }),
-    ]).then(([leaderboard, benchmarks]) => {
-      data = { ...leaderboard, benchmarks };
-      init();
-    }).catch(err => { if (loadingEl) loadingEl.textContent = 'Failed to load: ' + err.message; });
-
-    fetch('./coverage.json')
-      .then(r => r.ok ? r.json() : null)
-      .then(json => { if (json) { coverageData = json; renderCoverage(); } })
-      .catch(() => {});
-
-    fetch('./citations.json')
-      .then(r => r.ok ? r.json() : null)
-      .then(json => { if (json) { citationData = json.papers || {}; renderTable(); } })
-      .catch(() => {});
-
-    function resetAndRender() {
-      currentPage = 0;
-      // Filter-affecting controls also need the model list re-filtered,
-      // not just the page reset: the cached list keyed off sort state
-      // would otherwise still reflect the pre-filter state.
-      lastFilteredModels = [];
-      renderTable();
-    }
-    if (benchmarkFilterEl) benchmarkFilterEl.addEventListener('change', onBenchmarkFilterChange);
-    for (const [elem, evt] of [
-      [modelSearchEl, 'input'], [dateFromEl, 'change'], [dateToEl, 'change'],
-      [minCitationsEl, 'input'], [firstPartyOnlyEl, 'change'],
-    ]) {
-      if (elem) elem.addEventListener(evt, resetAndRender);
-    }
-    if (breakdownPanelEl) breakdownPanelEl.addEventListener('click', e => {
-      if (e.target.classList.contains('breakdown-close')) closeBreakdown();
+const LABELS = {
+  google_robot_vm: "Google Robot · Visual Matching",
+  google_robot_va: "Google Robot · Variant Aggregation",
+  widowx_vm: "WidowX · Visual Matching",
+  libero_spatial: "LIBERO-Spatial",
+  libero_object: "LIBERO-Object",
+  libero_goal: "LIBERO-Goal",
+  libero_90: "LIBERO-90",
+  libero_10: "LIBERO-10",
+};
+const label = (key) =>
+  LABELS[key] ||
+  key
+    .replaceAll("_", " ")
+    .replace(/\b\w/g, (c) => c.toUpperCase())
+    .replace(/\b(Vm|Va|Is|Ps)\b/g, (c) => c.toUpperCase());
+const escapeHTML = (value) =>
+  String(value ?? "").replace(
+    /[&<>"']/g,
+    (c) =>
+      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[
+        c
+      ],
+  );
+const safeURL = (value) => (/^https?:\/\//i.test(value || "") ? value : null);
+function paperID(url) {
+  return (
+    String(url || "").match(
+      /arxiv\.org\/(?:abs|pdf)\/(\d{4}\.\d{4,5})(?:v\d+)?(?:\.pdf)?(?:[?#].*)?$/i,
+    )?.[1] || null
+  );
+}
+function paperMonth(url) {
+  const id = paperID(url);
+  if (!id || +id.slice(2, 4) < 1 || +id.slice(2, 4) > 12) return null;
+  return `20${id.slice(0, 2)}-${id.slice(2, 4)}`;
+}
+function sourceID(url) {
+  return paperID(url) || String(url || "").replace(/\/$/, "");
+}
+function firstParty(row) {
+  return Boolean(
+    row.reported_paper &&
+      row.model_paper &&
+      sourceID(row.reported_paper) === sourceID(row.model_paper),
+  );
+}
+function score(row, key) {
+  const [container, component] = key.split(".");
+  const value = component ? row[container]?.[component] : row[container];
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+function comparisons(bm, rows) {
+  const columns = [];
+  if (bm.aggregation !== "forbidden")
+    columns.push({
+      key: "overall_score",
+      name: bm.avg_label || "Overall",
+      unit: bm.metric.unit,
+      range: bm.metric.range,
     });
-
-    // Tooltip: single delegated listener on tbody
-    if (tbodyEl) {
-      tbodyEl.addEventListener('mouseenter', e => {
-        const cell = e.target.closest('.score-cell[data-tip-curator]');
-        if (cell) showTooltip(cell);
-      }, true);
-      tbodyEl.addEventListener('mouseleave', e => {
-        const cell = e.target.closest('.score-cell[data-tip-curator]');
-        if (cell) hideTooltip();
-      }, true);
-    }
-  });
-
-  function init() {
-    if (loadingEl) loadingEl.style.display = 'none';
-    buildPivot();
-    buildBenchmarkFilter();
-    renderStats();
-    renderTable();
-  }
-
-  // ─── Pivot builder ─────────────────────────────────────────────────────────
-  function buildPivot() {
-    pivotMap = {};
-    const bmSet = new Set();
-    for (const r of data.results) {
-      if (!pivotMap[r.model]) pivotMap[r.model] = {};
-      pivotMap[r.model][r.benchmark] = r;
-      bmSet.add(r.benchmark);
-    }
-    const seen = new Set();
-    modelKeys = [];
-    for (const r of data.results) {
-      if (!seen.has(r.model)) { seen.add(r.model); modelKeys.push(r.model); }
-    }
-    const defOrder = Object.keys(data.benchmarks || {});
-    benchmarkKeys = defOrder.filter(k => bmSet.has(k));
-    for (const k of bmSet) { if (!benchmarkKeys.includes(k)) benchmarkKeys.push(k); }
-    const countEl = document.getElementById('benchmark-count');
-    if (countEl) countEl.textContent = benchmarkKeys.length + '+';
-    if (!sortState.column) {
-      sortState.column = '_date';
-      sortState.direction = 'desc';
-    }
-
-    // Cache suite-only status per benchmark
-    suiteOnlyCache = {};
-    for (const bmKey of benchmarkKeys) {
-      const bm = data.benchmarks[bmKey] || {};
-      if (!bm.suites || bm.suites.length === 0) { suiteOnlyCache[bmKey] = false; continue; }
-      const bmResults = data.results.filter(r => r.benchmark === bmKey);
-      suiteOnlyCache[bmKey] = bmResults.length > 0 && bmResults.every(r => r.overall_score == null);
-    }
-
-    // Cache model display names
-    modelDisplayCache = {};
-    for (const mk of modelKeys) {
-      const r = Object.values(pivotMap[mk])[0];
-      modelDisplayCache[mk] = r ? (r.display_name || mk) : mk;
-    }
-
-    // Cache best-per-column (static for all models; only changes on data reload)
-    bestByColumnCache = {};
-
-    buildOverviewColumns();
-    computeBestByColumn();
-  }
-
-  // ─── Overview columns (expand suite-only benchmarks) ─────────────────────
-  function buildOverviewColumns() {
-    overviewColumns = [];
-    for (const bmKey of benchmarkKeys) {
-      if (shouldExpandSuites(bmKey)) {
-        const bm = data.benchmarks[bmKey] || {};
-        const suites = bm.suites || [];
-        const bmName = bm.display_name || bmKey;
-        const showAvg = !suiteOnlyCache[bmKey];
-        const avgPos = showAvg ? (bm.avg_position ?? suites.length) : -1;
-        for (let i = 0; i < suites.length; i++) {
-          if (i === avgPos) {
-            overviewColumns.push({ bmKey, suite: '_avg', label: bmName + ' ' + (bm.avg_label || 'Avg'), colId: bmKey + ':_avg' });
-          }
-          overviewColumns.push({
-            bmKey, suite: suites[i],
-            label: bmName + ' ' + shortSuiteLabel(suites[i], bmName),
-            colId: bmKey + ':' + suites[i]
-          });
-        }
-        if (showAvg && avgPos >= suites.length) {
-          overviewColumns.push({ bmKey, suite: '_avg', label: bmName + ' ' + (bm.avg_label || 'Avg'), colId: bmKey + ':_avg' });
-        }
-      } else {
-        overviewColumns.push({
-          bmKey,
-          suite: null,
-          label: (data.benchmarks[bmKey] || {}).display_name || bmKey,
-          colId: bmKey
+  for (const [field, container] of [
+    ["suites", "suite_scores"],
+    ["tasks", "task_scores"],
+  ]) {
+    for (const key of bm[field] || []) {
+      if (
+        key !== "reported_avg" &&
+        rows.some((row) => score(row, `${container}.${key}`) !== null)
+      )
+        columns.push({
+          key: `${container}.${key}`,
+          name: label(key),
+          unit: "%",
+          range: [0, 100],
         });
-      }
     }
   }
-
-  function parseColId(colId) {
-    const idx = colId.indexOf(':');
-    if (idx === -1) return { bmKey: colId, suite: null };
-    return { bmKey: colId.substring(0, idx), suite: colId.substring(idx + 1) };
+  return columns;
+}
+function metricLabel(bm, column) {
+  if (column?.unit === "%" && bm.metric.unit !== "%")
+    return "Chain success rate (%)";
+  if (bm.display_name === "VLABench") {
+    const key = column?.key || "";
+    if (key === "overall_score" || /_PS$|progress_score/.test(key))
+      return "Progress score (%)";
+    if (/_IS$|intention_score/.test(key)) return "Intention score (%)";
+    return "Reported score (%)";
   }
-
-  // ─── Benchmark filter ──────────────────────────────────────────────────────
-  function buildBenchmarkFilter() {
-    if (!benchmarkFilterEl) return;
-    benchmarkFilterEl.innerHTML = '';
-    const allOpt = document.createElement('option');
-    allOpt.value = ''; allOpt.textContent = 'All Benchmarks (Overview)';
-    benchmarkFilterEl.appendChild(allOpt);
-    for (const key of benchmarkKeys) {
-      const opt = document.createElement('option');
-      opt.value = key;
-      opt.textContent = (data.benchmarks[key] || {}).display_name || key;
-      benchmarkFilterEl.appendChild(opt);
-    }
-    const externals = externalBenchmarks();
-    if (externals.length > 0) {
-      const group = document.createElement('optgroup');
-      group.label = 'External leaderboards';
-      for (const [key, bm] of externals) {
-        const opt = document.createElement('option');
-        opt.value = key;
-        opt.textContent = (bm.display_name || key) + ' ↗';
-        group.appendChild(opt);
-      }
-      benchmarkFilterEl.appendChild(group);
-    }
-  }
-
-  function onBenchmarkFilterChange() {
-    const val = benchmarkFilterEl.value;
-    selectedBenchmark = val || null;
-    detailSortSuite = null;
-    currentPage = 0;
-    if (val) { sortState.column = val; sortState.direction = 'desc'; }
-    else { sortState.column = '_date'; sortState.direction = 'desc'; }
-    closeBreakdown();
-    renderTable();
-  }
-
-  // ─── Arxiv helpers (single parse, shared across all callers) ──────────────
-  function rawArxivId(url) {
-    if (!url) return null;
-    const m = url.match(/arxiv\.org\/abs\/(\d+\.\d+)/);
-    return m ? m[1] : null;
-  }
-
-  function extractPubMonth(url) {
-    if (!url) return null;
-    const m = url.match(/arxiv\.org\/abs\/(\d{2})(\d{2})\.\d+/);
-    if (!m) return null;
-    const yy = parseInt(m[1], 10);
-    return (yy >= 50 ? '19' : '20') + m[1] + '-' + m[2];
-  }
-
-  /** Get pub month from a result, trying model_paper then reported_paper. */
-  function getResultPubMonth(r) {
-    return extractPubMonth(r.model_paper) || extractPubMonth(r.reported_paper);
-  }
-
-  /** Get arxiv ID from a result, trying model_paper then reported_paper. */
-  function getResultArxivId(r) {
-    return rawArxivId(r.model_paper) || rawArxivId(r.reported_paper);
-  }
-
-  // ─── Search & Filters ─────────────────────────────────────────────────────
-  function searchQuery() { return modelSearchEl ? modelSearchEl.value.trim().toLowerCase() : ''; }
-
-  function getModelPubMonth(mk) {
-    const entries = pivotMap[mk];
-    if (!entries) return null;
-    for (const r of Object.values(entries)) {
-      const pm = getResultPubMonth(r);
-      if (pm) return pm;
-    }
-    return null;
-  }
-
-  function getModelCitations(mk) {
-    if (!citationData) return null;
-    const entries = pivotMap[mk];
-    if (!entries) return null;
-    for (const r of Object.values(entries)) {
-      const aid = getResultArxivId(r);
-      if (aid && citationData[aid] != null) return citationData[aid];
-    }
-    return null;
-  }
-
-  /** Whether citation data has been loaded with actual entries. */
-  function hasCitationData() {
-    return citationData && Object.keys(citationData).length > 0;
-  }
-
-  /** A row is "third-party" when the paper that reported it differs from the
-   *  paper that introduced the model. The bibkey-style `__` separator in the
-   *  model field is a fallback signal for the same fact. */
-  function isThirdParty(r) {
-    if (r.reported_paper && r.model_paper && r.reported_paper !== r.model_paper) return true;
-    if (typeof r.model === 'string' && r.model.includes('__')) return true;
-    return false;
-  }
-
-  /** A model key is third-party when ALL its rows are third-party. */
-  function isModelThirdParty(mk) {
-    const entries = pivotMap[mk];
-    if (!entries) return false;
-    const rows = Object.values(entries);
-    if (rows.length === 0) return false;
-    return rows.every(isThirdParty);
-  }
-
-  /** Shared filter logic: date range + citation threshold. */
-  function passesDateCitationFilter(pubMonth, arxivId) {
-    const dateFrom = dateFromEl ? dateFromEl.value : '';
-    const dateTo = dateToEl ? dateToEl.value : '';
-    if (dateFrom || dateTo) {
-      if (!pubMonth) return false;
-      if (dateFrom && pubMonth < dateFrom) return false;
-      if (dateTo && pubMonth > dateTo) return false;
-    }
-    const minCit = minCitationsEl ? parseInt(minCitationsEl.value, 10) : NaN;
-    if (!isNaN(minCit) && minCit > 0 && hasCitationData()) {
-      const cit = arxivId ? (citationData[arxivId] ?? null) : null;
-      if (cit === null || cit < minCit) return false;
-    }
-    return true;
-  }
-
-  function isModelVisible(mk) {
-    const q = searchQuery();
-    if (q && !getModelDisplay(mk).toLowerCase().includes(q)) return false;
-    if (firstPartyOnlyEl && firstPartyOnlyEl.checked && isModelThirdParty(mk)) return false;
-    return passesDateCitationFilter(getModelPubMonth(mk), getResultArxivId(Object.values(pivotMap[mk])[0]));
-  }
-
-  function isResultVisible(r) {
-    const q = searchQuery();
-    if (q && !getModelDisplay(r.model).toLowerCase().includes(q)) return false;
-    if (firstPartyOnlyEl && firstPartyOnlyEl.checked && isThirdParty(r)) return false;
-    return passesDateCitationFilter(getResultPubMonth(r), getResultArxivId(r));
-  }
-
-  // ─── Stats ─────────────────────────────────────────────────────────────────
-  function renderStats() {
-    if (!statsEl) return;
-    const nExternal = externalBenchmarks().length;
-    const externalStat = nExternal > 0
-      ? ` · <span class="stat"><strong>${nExternal}</strong> external leaderboards (see dropdown)</span>`
-      : '';
-    statsEl.innerHTML =
-      `<span class="stat"><strong>${modelKeys.length}</strong> models</span> · ` +
-      `<span class="stat"><strong>${benchmarkKeys.length}</strong> benchmarks</span> · ` +
-      `<span class="stat"><strong>${data.results.length}</strong> results</span> · ` +
-      `Last updated: <span class="stat">${data.last_updated || '?'}</span>${externalStat}`;
-  }
-
-  // ─── External leaderboards ────────────────────────────────────────────────
-  function stripHtml(html) {
-    const t = document.createElement('div');
-    t.innerHTML = html || '';
-    return t.textContent || '';
-  }
-
-  function externalBenchmarks() {
-    return Object.entries(data.benchmarks || {})
-      .filter(([, bm]) => bm.external_only && bm.official_leaderboard)
-      .sort(([, a], [, b]) => (a.display_name || '').localeCompare(b.display_name || ''));
-  }
-
-  function isExternal(bmKey) {
-    const bm = bmKey && data.benchmarks[bmKey];
-    return !!(bm && bm.external_only && bm.official_leaderboard);
-  }
-
-  // Full-width panel shown in place of the table when an external benchmark
-  // is selected from the dropdown.
-  function renderExternalPanel(bmKey) {
-    const el = $('external-panel');
-    if (!el) return;
-    const bm = data.benchmarks[bmKey] || {};
-    const name = escHtml(bm.display_name || bmKey);
-    const url = escHtml(bm.official_leaderboard);
-    // detail_notes is trusted curated HTML (same trust as benchmark-notes below)
-    el.innerHTML =
-      `<h2>${name}</h2>` +
-      `<p>${bm.detail_notes || ''}</p>` +
-      `<a class="external-panel-button" href="${url}" target="_blank" rel="noopener noreferrer">View the official ${name} leaderboard ↗</a>`;
-    el.style.display = '';
-  }
-
-  // ─── Render dispatcher ─────────────────────────────────────────────────────
-  function renderTable() {
-    const panelEl = $('external-panel');
-    const wrapEl = tableEl ? tableEl.closest('.table-wrapper') : null;
-    const pagerEl = $('pagination');
-    if (isExternal(selectedBenchmark)) {
-      renderExternalPanel(selectedBenchmark);
-      if (wrapEl) wrapEl.style.display = 'none';
-      if (pagerEl) pagerEl.style.display = 'none';
-      const n = $('official-notice'); if (n) n.style.display = 'none';
-      const b = $('benchmark-notes'); if (b) b.style.display = 'none';
-      return;
-    }
-    if (panelEl) panelEl.style.display = 'none';
-    if (wrapEl) wrapEl.style.display = '';
-
-    const noticeEl = $('official-notice');
-    if (noticeEl) {
-      const bm = selectedBenchmark && data.benchmarks[selectedBenchmark];
-      if (bm && bm.official_leaderboard) {
-        noticeEl.innerHTML =
-          `This benchmark has an <a href="${escHtml(bm.official_leaderboard)}" target="_blank" rel="noopener noreferrer">official leaderboard</a>. ` +
-          `Our data may be incomplete or outdated; check the official source for the latest results.`;
-        noticeEl.style.display = '';
-      } else {
-        noticeEl.style.display = 'none';
-      }
-    }
-    const notesEl = $('benchmark-notes');
-    if (notesEl) {
-      const bmNotes = selectedBenchmark && (data.benchmarks[selectedBenchmark] || {}).detail_notes;
-      if (bmNotes) { notesEl.innerHTML = bmNotes; notesEl.style.display = ''; }
-      else { notesEl.style.display = 'none'; }
-    }
-
-    if (selectedBenchmark) renderDetailView(selectedBenchmark);
-    else renderOverviewTable();
-  }
-
-  // ═══════════════════════════════════════════════════════════════════════════
-  // OVERVIEW TABLE (multi-benchmark pivot)
-  // ═══════════════════════════════════════════════════════════════════════════
-  function renderOverviewTable() {
-    if (!theadEl || !tbodyEl) return;
-    hideTooltip();
-    tableEl.className = 'overview-mode';
-
-    // Detect whether sort/filter changed or this is a page-only change
-    const sortChanged = sortState.column !== lastSortCol || sortState.direction !== lastSortDir;
-    const needsRecompute = sortChanged || lastFilteredModels.length === 0;
-
-    // Recompute best-per-column each render so it tracks filter toggles.
-    computeBestByColumn();
-
-    if (needsRecompute) {
-      // Header (only rebuild when sort state changes)
-      const htr = document.createElement('tr');
-      htr.appendChild(th('Model', 'model-col'));
-      htr.appendChild(th('Params', 'params-col'));
-      for (const col of overviewColumns) {
-        const cell = th('', 'benchmark-col');
-        cell.dataset.colid = col.colId;
-        cell.appendChild(el('span', col.label));
-        const arrow = el('span', '', 'sort-arrow');
-        updateArrow(arrow, col.colId);
-        cell.appendChild(arrow);
-        if (sortState.column === col.colId) cell.classList.add('sorted');
-        cell.addEventListener('click', () => { toggleSort(col.colId); renderTable(); });
-        htr.appendChild(cell);
-      }
-      theadEl.innerHTML = ''; theadEl.appendChild(htr);
-
-      // Recompute filtered + sorted list
-      const sorted = getSortedModels(sortState.column);
-      lastFilteredModels = sorted.filter(mk => isModelVisible(mk));
-      lastSortCol = sortState.column;
-      lastSortDir = sortState.direction;
-    }
-
-    // Paginate
-    const totalPages = Math.max(1, Math.ceil(lastFilteredModels.length / PAGE_SIZE));
-    if (currentPage >= totalPages) currentPage = totalPages - 1;
-    const start = currentPage * PAGE_SIZE;
-    const pageModels = lastFilteredModels.slice(start, start + PAGE_SIZE);
-
-    // Build rows in a DocumentFragment
-    const frag = document.createDocumentFragment();
-    for (const mk of pageModels) {
-      const model = Object.values(pivotMap[mk] || {})[0] || {};
-      const tr = document.createElement('tr');
-      tr.appendChild(buildModelCell(model.display_name || mk, model.model_paper));
-
-      const ptd = document.createElement('td');
-      ptd.className = 'params-col';
-      ptd.textContent = model.params || '—';
-      tr.appendChild(ptd);
-
-      for (const col of overviewColumns) {
-        const result = pivotMap[mk] && pivotMap[mk][col.bmKey];
-        const bm = data.benchmarks[col.bmKey] || {};
-        const metric = bm.metric || {};
-        const cell = document.createElement('td');
-        cell.className = 'score-cell';
-        cell.dataset.colid = col.colId;
-
-        // Per-cell filter: even if the model row is visible (at least one
-        // first-party entry somewhere), a specific benchmark cell should be
-        // hidden when that benchmark's entry for this model is third-party.
-        const filteredOut = result && firstPartyOnlyEl && firstPartyOnlyEl.checked && isThirdParty(result);
-
-        if (result && !filteredOut) {
-          if (bestByColumnCache[col.colId] === mk) cell.classList.add('best');
-          const displayScore = getDisplayScore(result, col.bmKey, col.suite);
-          cell.appendChild(el('span', formatScore(displayScore, metric.name), 'score-value'));
-          if (displayScore != null) cell.dataset.score = displayScore;
-          storeTooltipData(cell, result);
-        } else {
-          cell.classList.add('empty');
-          cell.textContent = '—';
-        }
-        tr.appendChild(cell);
-      }
-      frag.appendChild(tr);
-    }
-    tbodyEl.innerHTML = '';
-    tbodyEl.appendChild(frag);
-
-    requestAnimationFrame(applyHeatmapColors);
-    renderPagination(totalPages);
-  }
-
-  // ─── Pagination controls ─────────────────────────────────────────────────
-  function renderPagination(totalPages) {
-    let pager = $('pagination');
-    if (totalPages <= 1) {
-      if (pager) pager.style.display = 'none';
-      return;
-    }
-    if (!pager) {
-      pager = document.createElement('div');
-      pager.id = 'pagination';
-      pager.className = 'pagination';
-      tableEl.parentNode.insertBefore(pager, tableEl.nextSibling);
-    }
-    pager.style.display = '';
-    const total = lastFilteredModels.length;
-    const s = currentPage * PAGE_SIZE + 1;
-    const e = Math.min(s + PAGE_SIZE - 1, total);
-    pager.innerHTML =
-      `<button class="page-btn" ${currentPage === 0 ? 'disabled' : ''} data-dir="prev">\u2190 Prev</button>` +
-      `<span class="page-info">${s}\u2013${e} of ${total}</span>` +
-      `<button class="page-btn" ${currentPage >= totalPages - 1 ? 'disabled' : ''} data-dir="next">Next \u2192</button>`;
-    pager.onclick = e => {
-      const btn = e.target.closest('[data-dir]');
-      if (!btn || btn.disabled) return;
-      currentPage += btn.dataset.dir === 'next' ? 1 : -1;
-      renderTable();
-      tableEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    };
-  }
-
-  function applyHeatmapColors() {
-    const cells = tbodyEl.querySelectorAll('.score-cell[data-score]');
-    const colScores = {};
-    for (const cell of cells) {
-      const colId = cell.dataset.colid;
-      if (!colScores[colId]) colScores[colId] = [];
-      colScores[colId].push({ cell, score: parseFloat(cell.dataset.score) });
-    }
-    for (const [colId, entries] of Object.entries(colScores)) {
-      let min = Infinity, max = -Infinity;
-      for (const { score } of entries) {
-        if (score < min) min = score;
-        if (score > max) max = score;
-      }
-      if (min === max) continue;
-      const { bmKey } = parseColId(colId);
-      const GREEN_HUE = 142;
-      const higher = (data.benchmarks[bmKey] || {}).metric?.higher_is_better !== false;
-      for (const { cell, score } of entries) {
-        let norm = (score - min) / (max - min);
-        if (!higher) norm = 1 - norm;
-        cell.style.backgroundColor = `hsla(${Math.round(norm * GREEN_HUE)}, 70%, 35%, 0.3)`;
-      }
-    }
-  }
-
-  // ═══════════════════════════════════════════════════════════════════════════
-  // DETAIL VIEW (single benchmark: flat table with full metadata)
-  // ═══════════════════════════════════════════════════════════════════════════
-  function renderDetailView(bmKey) {
-    if (!theadEl || !tbodyEl) return;
-    tableEl.className = 'detail-mode';
-    const pager = $('pagination');
-    if (pager) pager.style.display = 'none';
-    const bm = data.benchmarks[bmKey] || {};
-    const metric = bm.metric || {};
-    const expandSuites = shouldExpandSuites(bmKey);
-    const suites = expandSuites ? (bm.suites || []) : [];
-
-    // Build ordered column list: suites + _avg inserted at avg_position
-    const showAvg = expandSuites && !suiteOnlyCache[bmKey];
-    const avgPos = showAvg ? (bm.avg_position ?? suites.length) : -1;
-    const detailColumns = [];
-    for (let i = 0; i < suites.length; i++) {
-      if (i === avgPos) detailColumns.push('_avg');
-      detailColumns.push(suites[i]);
-    }
-    if (showAvg && avgPos >= suites.length) detailColumns.push('_avg');
-
-    if (expandSuites && (!detailSortSuite || !detailColumns.includes(detailSortSuite))) {
-      detailSortSuite = showAvg ? '_avg' : (detailColumns[0] || null);
-    }
-
-    function colScore(r, col) {
-      return col === '_avg' ? r.overall_score : (r.suite_scores || {})[col];
-    }
-
-    const results = data.results
-      .filter(r => r.benchmark === bmKey && isResultVisible(r))
-      .sort((a, b) => {
-        if (expandSuites && detailSortSuite) {
-          return (colScore(b, detailSortSuite) || 0) - (colScore(a, detailSortSuite) || 0);
-        }
-        return (b.overall_score || 0) - (a.overall_score || 0);
-      });
-
-    // Find best per column
-    const bestByCol = {};
-    if (expandSuites) {
-      for (const col of detailColumns) {
-        let bestVal = null, bestModel = null;
-        for (const r of results) {
-          const v = colScore(r, col);
-          if (v != null && (bestVal === null || v > bestVal)) { bestVal = v; bestModel = r.model; }
-        }
-        if (bestModel) bestByCol[col] = bestModel;
-      }
-    }
-
-    // Header
-    const htr = document.createElement('tr');
-    htr.appendChild(th('#', 'rank-col'));
-    htr.appendChild(th('Model', 'model-col'));
-    htr.appendChild(th('Params', 'params-col'));
-
-    if (expandSuites) {
-      for (const col of detailColumns) {
-        const label = col === '_avg' ? (bm.avg_label || 'Avg') : shortSuiteLabel(col, bm.display_name);
-        const cell = th('', 'score-col');
-        cell.style.cursor = 'pointer';
-        cell.appendChild(el('span', label));
-        if (detailSortSuite === col) {
-          cell.classList.add('sorted');
-          cell.appendChild(el('span', ' \u25BC', 'sort-arrow'));
-        }
-        cell.addEventListener('click', ((c) => () => { detailSortSuite = c; renderTable(); })(col));
-        htr.appendChild(cell);
-      }
-    } else {
-      const scoreH = th(metric.name === 'avg_len' ? 'Avg Len' : 'Score (%)', 'score-col sorted');
-      htr.appendChild(scoreH);
-    }
-
-    htr.appendChild(th('Source Paper', 'paper-col'));
-    htr.appendChild(th('Table', 'table-col'));
-    htr.appendChild(th('Curated By', 'curator-col'));
-    htr.appendChild(th('Date Added', 'date-col'));
-    htr.appendChild(th('Notes', 'notes-col'));
-    theadEl.innerHTML = ''; theadEl.appendChild(htr);
-
-    const colSpan = expandSuites ? 8 + detailColumns.length : 9;
-
-    // Body: use DocumentFragment
-    const frag = document.createDocumentFragment();
-    let rank = 0;
-    for (const r of results) {
-      rank++;
-      const tr = document.createElement('tr');
-      if (rank === 1) tr.classList.add('best-row');
-
-      tr.appendChild(td(String(rank), 'rank-col'));
-      tr.appendChild(buildModelCell(r.display_name || r.model, r.model_paper));
-      tr.appendChild(td(r.params || '\u2014', 'params-col'));
-
-      if (expandSuites) {
-        for (const col of detailColumns) {
-          const v = colScore(r, col);
-          const stc = td(formatScore(v, metric.name), 'score-col');
-          if (v != null) {
-            stc.classList.add('score-value');
-            if (bestByCol[col] === r.model) stc.classList.add('best');
-          } else {
-            stc.classList.add('empty');
-          }
-          tr.appendChild(stc);
-        }
-      } else {
-        const stc = td(formatScore(r.overall_score, metric.name), 'score-col');
-        stc.classList.add('score-value');
-        if (rank === 1) stc.classList.add('best');
-        tr.appendChild(stc);
-      }
-
-      // Source paper
-      const ptd = document.createElement('td');
-      ptd.className = 'paper-col';
-      if (r.reported_paper) {
-        ptd.appendChild(externalLink(r.reported_paper, extractArxivId(r.reported_paper) || r.reported_paper, 'source-link'));
-      } else {
-        ptd.textContent = '\u2014';
-      }
-      tr.appendChild(ptd);
-
-      tr.appendChild(td(r.reported_table || '\u2014', 'table-col'));
-
-      const ctd = document.createElement('td');
-      ctd.className = 'curator-col';
-      const isHuman = r.curated_by && r.curated_by.startsWith('@');
-      ctd.innerHTML = `${isHuman ? '\uD83D\uDC64' : '\uD83E\uDD16'} ${escHtml(r.curated_by || '?')}`;
-      tr.appendChild(ctd);
-
-      tr.appendChild(td(r.date_added || '\u2014', 'date-col'));
-
-      const ntd = td(r.notes || '\u2014', 'notes-col');
-      ntd.title = r.notes || '';
-      tr.appendChild(ntd);
-
-      frag.appendChild(tr);
-
-      // Sub-scores row: show task_scores breakdown (skip suite_scores when already shown as columns).
-      // Use the first non-empty source; an empty `suite_scores: {}` must not mask task_scores.
-      const hasKeys = o => o && Object.keys(o).length > 0;
-      const subScores = expandSuites
-        ? r.task_scores
-        : (hasKeys(r.suite_scores) ? r.suite_scores : r.task_scores);
-      if (subScores && Object.keys(subScores).length > 0) {
-        const subTr = document.createElement('tr');
-        subTr.className = 'sub-scores-row';
-        const subTd = document.createElement('td');
-        subTd.colSpan = colSpan;
-        let html = '<div class="sub-scores-grid">';
-        for (const [label, val] of Object.entries(subScores)) {
-          html += `<span class="sub-score-item"><span class="sub-label">${escHtml(label)}</span> `;
-          html += `<span class="sub-value">${formatScore(val, metric.name)}</span></span>`;
-        }
-        html += '</div>';
-        subTd.innerHTML = html;
-        subTr.appendChild(subTd);
-        frag.appendChild(subTr);
-      }
-    }
-    tbodyEl.innerHTML = '';
-    tbodyEl.appendChild(frag);
-  }
-
-  // ─── Score resolver ────────────────────────────────────────────────────────
-  function getDisplayScore(result, bmKey, suite) {
-    if (suite === '_avg') return result.overall_score ?? null;
-    if (suite) {
-      return (result.suite_scores || {})[suite] ?? null;
-    }
-    // Unexpanded overview column: show overall_score only. Falling back to
-    // a suite value here would mix scales in the same column (e.g. CALVIN's
-    // overall_score is 0–5 avg_len while suite_scores are 0–100 percent).
-    return result.overall_score ?? null;
-  }
-
-  // Does every result for this benchmark have null overall_score?
-  function isSuiteOnlyBenchmark(bmKey) {
-    const results = data.results.filter(r => r.benchmark === bmKey);
-    return results.length > 0 && results.every(r => r.overall_score == null)
-      && (data.benchmarks[bmKey] || {}).suites && (data.benchmarks[bmKey] || {}).suites.length > 0;
-  }
-
-  function shouldExpandSuites(bmKey) {
-    const bm = data.benchmarks[bmKey] || {};
-    if (!bm.suites || bm.suites.length === 0) return false;
-    if (bm.expand_suites) return true;
-    return suiteOnlyCache[bmKey];
-  }
-
-  function shortSuiteLabel(suite, bmDisplayName) {
-    let label = suite.replace(/_/g, ' ');
-    if (bmDisplayName) {
-      const prefix = bmDisplayName.toLowerCase() + ' ';
-      if (label.startsWith(prefix)) label = label.substring(prefix.length);
-    }
-    return label.replace(/google robot/, 'GR');
-  }
-
-  // ─── Sorting ───────────────────────────────────────────────────────────────
-  function toggleSort(col) {
-    if (sortState.column === col) sortState.direction = sortState.direction === 'asc' ? 'desc' : 'asc';
-    else { sortState.column = col; sortState.direction = 'desc'; }
-    currentPage = 0;
-  }
-
-  function getLatestDate(mk) {
-    let latest = '';
-    const results = pivotMap[mk];
-    if (results) {
-      for (const r of Object.values(results)) {
-        if (r.date_added && r.date_added > latest) latest = r.date_added;
-      }
-    }
-    return latest || '\u2014';
-  }
-
-  function getSortedModels(col) {
-    const dir = sortState.direction;
-    if (col === '_date') {
-      return [...modelKeys].sort((a, b) => {
-        const da = getLatestDate(a);
-        const db = getLatestDate(b);
-        if (da === db) return 0;
-        return dir === 'asc' ? (da < db ? -1 : 1) : (da > db ? -1 : 1);
-      });
-    }
-    const { bmKey, suite } = parseColId(col);
-    return [...modelKeys].sort((a, b) => {
-      const ra = pivotMap[a] && pivotMap[a][bmKey];
-      const rb = pivotMap[b] && pivotMap[b][bmKey];
-      const sa = ra ? getDisplayScore(ra, bmKey, suite) : null;
-      const sb = rb ? getDisplayScore(rb, bmKey, suite) : null;
-      if (sa === null && sb === null) return 0;
-      if (sa === null) return 1;
-      if (sb === null) return -1;
-      return dir === 'asc' ? sa - sb : sb - sa;
-    });
-  }
-
-  function computeBestByColumn() {
-    // Best-per-column is filter-aware: when "First-party results only" is
-    // on, a best-cell highlight on a third-party entry would be hidden
-    // (rendered as '—') and no column would show a winner. Skip
-    // third-party rows here so the highlight matches the visible top.
-    const firstPartyOnly = firstPartyOnlyEl && firstPartyOnlyEl.checked;
-    bestByColumnCache = {};
-    for (const col of overviewColumns) {
-      const higher = (data.benchmarks[col.bmKey] || {}).metric?.higher_is_better !== false;
-      let bestM = null, bestS = null;
-      for (const mk of modelKeys) {
-        const r = pivotMap[mk] && pivotMap[mk][col.bmKey];
-        if (!r) continue;
-        if (firstPartyOnly && isThirdParty(r)) continue;
-        const s = getDisplayScore(r, col.bmKey, col.suite);
-        if (s === null) continue;
-        if (bestS === null || (higher ? s > bestS : s < bestS)) { bestS = s; bestM = mk; }
-      }
-      if (bestM) bestByColumnCache[col.colId] = bestM;
-    }
-  }
-
-  function updateArrow(arrowEl, key) {
-    if (sortState.column === key) {
-      arrowEl.textContent = sortState.direction === 'asc' ? ' \u25B2' : ' \u25BC';
-      arrowEl.style.opacity = '1';
-    } else {
-      arrowEl.textContent = ' \u25BC'; arrowEl.style.opacity = '0.3';
-    }
-  }
-
-  // ─── Shared tooltip (single DOM element, positioned on hover) ─────────────
-  let sharedTooltip = null;
-
-  function ensureSharedTooltip() {
-    if (sharedTooltip) return sharedTooltip;
-    sharedTooltip = document.createElement('div');
-    sharedTooltip.className = 'tooltip-content';
-    sharedTooltip.style.display = 'none';
-    document.body.appendChild(sharedTooltip);
-    return sharedTooltip;
-  }
-
-  function storeTooltipData(td, result) {
-    td.dataset.tipPaper = result.reported_paper || '';
-    td.dataset.tipTable = result.reported_table || '';
-    td.dataset.tipCurator = result.curated_by || '';
-    td.dataset.tipDate = result.date_added || '';
-    td.dataset.tipNotes = result.notes || '';
-  }
-
-  function showTooltip(td) {
-    const tip = ensureSharedTooltip();
-    let html = '';
-    function row(label, val) { html += `<span class="tip-label">${label}</span><span>${val}</span>`; }
-    if (td.dataset.tipPaper) row('Paper', `<a href="${escHtml(td.dataset.tipPaper)}" target="_blank" class="tip-link">${escHtml(td.dataset.tipPaper)}</a>`);
-    if (td.dataset.tipTable) row('Table', escHtml(td.dataset.tipTable));
-    row('Curated', escHtml(td.dataset.tipCurator || '?'));
-    if (td.dataset.tipDate) row('Date', escHtml(td.dataset.tipDate));
-    if (td.dataset.tipNotes) row('Notes', escHtml(td.dataset.tipNotes));
-    tip.innerHTML = html;
-    const rect = td.getBoundingClientRect();
-    tip.style.visibility = 'hidden';
-    tip.style.display = 'grid';
-    const tipW = tip.offsetWidth;
-    const tipH = tip.offsetHeight;
-    tip.style.left = Math.max(0, rect.right - tipW) + window.scrollX + 'px';
-    tip.style.top = (rect.top - tipH - 4) + window.scrollY + 'px';
-    tip.style.visibility = '';
-  }
-
-  function hideTooltip() {
-    if (sharedTooltip) sharedTooltip.style.display = 'none';
-  }
-
-  // ─── Breakdown panel ───────────────────────────────────────────────────────
-  function closeBreakdown() {
-    if (breakdownPanelEl) { breakdownPanelEl.classList.remove('active'); breakdownPanelEl.innerHTML = ''; }
-  }
-
-  // ─── Coverage bar ─────────────────────────────────────────────────────────
-  function renderCoverage() {
-    if (!coverageBarEl || !coverageData) return;
-    const bms = coverageData.benchmarks || {};
-    const keys = Object.keys(bms).sort(
-      (a, b) => (bms[b].arxiv_citing_papers || bms[b].citing_papers || 0)
-              - (bms[a].arxiv_citing_papers || bms[a].citing_papers || 0)
+  return `${label(bm.metric.name)} (${column?.unit || bm.metric.unit})`;
+}
+function ranked(rows, key, higher = true) {
+  const result = rows
+    .filter((r) => score(r, key) !== null)
+    .sort(
+      (a, b) =>
+        (score(b, key) - score(a, key)) * (higher ? 1 : -1) ||
+        a.display_name.localeCompare(b.display_name),
     );
-
-    let html = '<div class="coverage-header">';
-    html += '<span class="coverage-title">Paper Coverage by Benchmark</span>';
-    html += `<span class="coverage-summary">${coverageData.total_results} results from ${coverageData.total_models} models`;
-    if (coverageData.total_papers_reviewed) html += ` \xB7 ${coverageData.total_papers_reviewed} papers reviewed`;
-    html += '</span></div>';
-    html += '<div class="coverage-explanation">Denominator = arXiv-preprint papers citing the benchmark (via <a href="https://www.semanticscholar.org/" target="_blank" rel="noopener noreferrer">Semantic Scholar</a>) plus the benchmark paper itself. Total citations in parentheses include non-arXiv publications that cannot be reviewed via the arxiv reading pipeline. Not every citing paper reports new evaluation numbers \u2014 this shows how much of the reviewable pool we have covered.</div>';
-    html += '<div class="coverage-grid">';
-
-    for (const key of keys) {
-      const bm = bms[key];
-      const citingTotal = bm.citing_papers;
-      const citingArxiv = bm.arxiv_citing_papers || citingTotal;
-      const reviewed = bm.papers_reviewed || 0;
-      if (!citingArxiv) continue;
-      // scan.py already folds the benchmark paper itself into
-      // ``arxiv_citing_papers`` (len of the unioned pool), so we use the
-      // reported counts directly here, no +1 needed.
-      const denomArxiv = citingArxiv;
-      const denomTotal = citingTotal || null;
-      const pct = Math.min(100, Math.round((reviewed / denomArxiv) * 100));
-      const barColor = pct > 15 ? 'var(--accent)' : pct > 5 ? '#da9679' : '#e24a8d';
-      // Hide the total-citations figure when it's ≤ the arXiv-reviewable
-      // count: after post-scan pool unions (e.g. robocasa after gr1
-      // merge), the S2-reported total can be smaller than the real
-      // reviewable pool, which would misleadingly read "631 total / 768
-      // arxiv".
-      const showTotal = denomTotal && denomTotal > denomArxiv;
-      const numsText = showTotal
-        ? `${reviewed}/${denomArxiv} <span class="coverage-nums-sub">(${denomTotal} total)</span>`
-        : `${reviewed}/${denomArxiv}`;
-      const titleText = showTotal
-        ? `${reviewed} reviewed / ${denomArxiv} arXiv papers (${denomTotal} total incl. non-arXiv; includes the benchmark paper)`
-        : `${reviewed} reviewed / ${denomArxiv} arXiv papers (includes the benchmark paper)`;
-      html += `<div class="coverage-item" title="${titleText}">`;
-      html += `<div class="coverage-label"><span>${escHtml(bm.display_name)}</span><span class="coverage-nums">${numsText}</span></div>`;
-      html += `<div class="coverage-track"><div class="coverage-fill" style="width:${Math.max(2, pct)}%;background:${barColor}"></div></div>`;
-      html += '</div>';
+  let rank = 0,
+    previous;
+  return result.map((row, i) => {
+    const value = score(row, key);
+    if (value !== previous) rank = i + 1;
+    previous = value;
+    return { row, value, rank };
+  });
+}
+function statistics(entries, range, higher = true) {
+  const byMonth = new Map(),
+    years = new Map();
+  let undated = 0;
+  for (const { row, value } of entries) {
+    const month = paperMonth(row.reported_paper);
+    if (!month) {
+      undated++;
+      continue;
     }
-    html += '</div>';
-    coverageBarEl.innerHTML = html;
+    if (
+      !byMonth.has(month) ||
+      (higher
+        ? value > byMonth.get(month).value
+        : value < byMonth.get(month).value)
+    )
+      byMonth.set(month, { value, name: row.display_name });
+    const year = month.slice(0, 4);
+    if (!years.has(year)) years.set(year, new Set());
+    years.get(year).add(sourceID(row.reported_paper));
   }
+  let best = higher ? -Infinity : Infinity,
+    method = "";
+  const history = [...byMonth]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([month, point]) => {
+      if (higher ? point.value > best : point.value < best) {
+        best = point.value;
+        method = point.name;
+      }
+      return { label: month, value: best, detail: method };
+    });
+  const [lo, hi] = range,
+    width = (hi - lo) / 10;
+  const histogram = Array.from({ length: 10 }, (_, i) => ({
+    label: `${+(lo + i * width).toFixed(2)}–${+(lo + (i + 1) * width).toFixed(2)}`,
+    value: 0,
+  }));
+  for (const { value } of entries)
+    if (value >= lo && value <= hi)
+      histogram[Math.min(9, Math.floor((value - lo) / width))].value++;
+  return {
+    history,
+    histogram,
+    years: [...years]
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([year, papers]) => ({ label: year, value: papers.size })),
+    undated,
+  };
+}
+function format(value) {
+  if (value === null) return "—";
+  return Number.isInteger(value)
+    ? String(value)
+    : value.toFixed(2).replace(/0$/, "");
+}
+function svgPlot(points, { line = false, range, unit = "", width = 680 } = {}) {
+  if (!points.length)
+    return '<p class="empty">No dated reports in this selection.</p>';
+  const W = width,
+    H = 240,
+    left = 45,
+    right = 18,
+    top = 16,
+    bottom = 40;
+  const min = range?.[0] ?? 0,
+    max = range?.[1] ?? Math.max(1, ...points.map((p) => p.value));
+  const span = W - left - right,
+    height = H - top - bottom;
+  const times = line
+    ? points.map((p) => Date.parse(`${p.label}-01T00:00:00Z`))
+    : [];
+  const x = (i) =>
+    line
+      ? times.length === 1
+        ? left + span / 2
+        : left + ((times[i] - times[0]) / (times.at(-1) - times[0])) * span
+      : left + ((i + 0.5) * span) / points.length;
+  const y = (v) => top + ((max - v) / (max - min)) * height;
+  const ticks = [
+    ...new Set(
+      Array.from({ length: 5 }, (_, i) =>
+        range ? min + ((max - min) * i) / 4 : Math.round((max * i) / 4),
+      ),
+    ),
+  ];
+  const grid = ticks
+    .map(
+      (v) =>
+        `<line class="grid" x1="${left}" x2="${W - right}" y1="${y(v)}" y2="${y(v)}"/><text x="${left - 8}" y="${y(v) + 4}" text-anchor="end">${format(v)}</text>`,
+    )
+    .join("");
+  let previousLabel = -Infinity;
+  const labels = points
+    .map((p, i) => {
+      const position = x(i);
+      const last = i === points.length - 1;
+      if (
+        !last &&
+        (position - previousLabel < 80 || x(points.length - 1) - position < 80)
+      )
+        return "";
+      previousLabel = position;
+      return `<text x="${position}" y="${H - 12}" text-anchor="middle">${escapeHTML(p.label)}</text>`;
+    })
+    .join("");
+  const path = line
+    ? `<path class="line" d="${points.map((p, i) => `${i ? "H" : "M"}${x(i)}${i ? "V" : ","}${y(p.value)}`).join(" ")}"/>`
+    : "";
+  const marks = points
+    .map((p, i) => {
+      const title = `<title>${escapeHTML(`${p.label}: ${format(p.value)}${unit}${p.detail ? " · " + p.detail : ""}`)}</title>`;
+      return line
+        ? `<circle class="point" cx="${x(i)}" cy="${y(p.value)}" r="4">${title}</circle>`
+        : `<rect class="bar" x="${x(i) - (span / points.length) * 0.35}" y="${y(p.value)}" width="${(span / points.length) * 0.7}" height="${y(min) - y(p.value)}" rx="2">${title}</rect>`;
+    })
+    .join("");
+  return `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="${line ? "Score history" : "Distribution"}; exact values available in the data table below">${grid}${labels}${path}${marks}</svg><details><summary>View data</summary><table><thead><tr><th scope="col">Period / interval</th><th scope="col">Value</th></tr></thead><tbody>${points.map((p) => `<tr><td>${escapeHTML(p.label)}</td><td>${format(p.value)}${escapeHTML(unit)}${p.detail ? " · " + escapeHTML(p.detail) : ""}</td></tr>`).join("")}</tbody></table></details>`;
+}
 
-  // ─── Helpers ───────────────────────────────────────────────────────────────
-  function formatScore(v, metricName) {
-    if (v === null || v === undefined) return '\u2014';
-    const n = parseFloat(v);
-    if (isNaN(n)) return String(v);
-    return metricName === 'avg_len' ? n.toFixed(3) : n.toFixed(1);
-  }
-
-  function getModelDisplay(mk) {
-    const r = Object.values(pivotMap[mk] || {})[0];
-    return r ? (r.display_name || mk) : mk;
-  }
-
-  function extractArxivId(url) {
-    if (!url) return null;
-    const m = url.match(/arxiv\.org\/abs\/(\d+\.\d+)/);
-    return m ? 'arXiv:' + m[1] : null;
-  }
-
-  function escHtml(s) {
-    return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-  }
-
-  // DOM helpers
-  function el(tag, text, cls) {
-    const e = document.createElement(tag);
-    if (text) e.textContent = text;
-    if (cls) e.className = cls;
-    return e;
-  }
-  function th(text, cls) { return el('th', text, cls); }
-  function td(text, cls) { return el('td', text, cls); }
-
-  function externalLink(href, text, cls) {
-    const a = el('a', text, cls);
-    a.href = href; a.target = '_blank'; a.rel = 'noopener noreferrer';
-    return a;
-  }
-
-  function buildModelCell(displayName, paperUrl) {
-    const mtd = document.createElement('td');
-    mtd.className = 'model-col';
-    if (paperUrl) {
-      mtd.appendChild(externalLink(paperUrl, displayName, 'model-name'));
-    } else {
-      mtd.appendChild(el('span', displayName, 'model-name'));
+async function start() {
+  const $ = (id) => document.getElementById(id);
+  const response = await fetch("leaderboard.json");
+  if (!response.ok)
+    throw new Error(`Could not load results (${response.status}).`);
+  const data = await response.json();
+  let page = 0,
+    reverse = false,
+    view = "results",
+    current = [],
+    missing = [],
+    showMissing = false,
+    column,
+    config;
+  const PAGE_SIZE = 40;
+  const keys = Object.keys(data.benchmarks).sort((a, b) =>
+    data.benchmarks[a].display_name.localeCompare(
+      data.benchmarks[b].display_name,
+    ),
+  );
+  for (const external of [false, true]) {
+    const group = document.createElement("optgroup");
+    group.label = external ? "Official leaderboards" : "Collected results";
+    for (const key of keys.filter(
+      (k) => Boolean(data.benchmarks[k].external_only) === external,
+    )) {
+      const option = document.createElement("option");
+      option.value = key;
+      option.textContent = data.benchmarks[key].display_name;
+      group.append(option);
     }
-    return mtd;
+    $("benchmark").append(group);
   }
-})();
+  const initial = new URLSearchParams(location.hash.slice(1));
+  $("benchmark").value = keys.includes(initial.get("benchmark"))
+    ? initial.get("benchmark")
+    : "simpler_env";
+  function sourceLink(url, name) {
+    return safeURL(url)
+      ? `<a href="${escapeHTML(url)}" target="_blank" rel="noopener noreferrer">${escapeHTML(name)} ↗</a>`
+      : "—";
+  }
+  function detail(row) {
+    $("detail-title").textContent = row.display_name;
+    const values = [];
+    if (row.overall_score != null)
+      values.push(["Overall", row.overall_score, config.metric.unit]);
+    for (const field of ["suite_scores", "task_scores"])
+      for (const [key, value] of Object.entries(row[field] || {}))
+        values.push([
+          key === "reported_avg"
+            ? "Reported average (outside this comparison)"
+            : label(key),
+          value,
+          key.startsWith("reported_avg") ? config.metric.unit : "%",
+        ]);
+    $("detail-body").innerHTML =
+      `<h3>Reported measurement</h3><p>${sourceLink(row.reported_paper, paperID(row.reported_paper) ? "arXiv:" + paperID(row.reported_paper) : "Source paper")}${row.reported_table ? " · " + escapeHTML(row.reported_table) : ""}</p>${row.name_in_paper ? `<p>Table label: ${escapeHTML(row.name_in_paper)}</p>` : ""}${row.evidence ? `<blockquote>${escapeHTML(row.evidence)}</blockquote>` : ""}${row.notes ? `<h3>Context</h3><p>${escapeHTML(row.notes)}</p>` : ""}<h3>Reported scores</h3><table><tbody>${values.map(([key, value, unit]) => `<tr><td>${escapeHTML(key)}</td><td>${format(value)} ${escapeHTML(unit)}</td></tr>`).join("")}</tbody></table><h3>Method and provenance</h3><p>${sourceLink(row.model_paper, "Method paper")} · ${escapeHTML(row.weight_type)} weights${row.params ? " · " + escapeHTML(row.params) + " parameters" : ""}</p><p>Added ${escapeHTML(row.date_added)}${row.updated ? " · Updated " + escapeHTML(row.updated) : ""}. Reviewer: ${escapeHTML(row.curated_by)}.${row.score_basis ? " Aggregate: " + escapeHTML(row.score_basis) + "." : ""}</p>`;
+    $("detail").showModal();
+  }
+  function renderRows() {
+    const displayed = showMissing
+      ? missing
+      : reverse
+        ? [...current].reverse()
+        : current;
+    $("rows").innerHTML =
+      displayed
+        .slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE)
+        .map(
+          ({ row, value, rank }, i) =>
+            `<tr><td>${rank ?? "—"}</td><td><button class="method" data-index="${i}">${escapeHTML(row.display_name)}</button></td><td>${escapeHTML(row.params || "—")}</td><td>${escapeHTML(row.weight_type)}</td><td class="score score-value">${format(value)}</td><td class="source">${sourceLink(row.reported_paper, paperMonth(row.reported_paper) || "Paper")}</td></tr>`,
+        )
+        .join("") ||
+      '<tr><td colspan="6" class="empty">No reported scores match this selection.</td></tr>';
+    $("rows")
+      .querySelectorAll(".method")
+      .forEach(
+        (button) =>
+          (button.onclick = () =>
+            detail(
+              displayed[page * PAGE_SIZE + Number(button.dataset.index)].row,
+            )),
+      );
+    $("page").textContent = displayed.length
+      ? `${page * PAGE_SIZE + 1}–${Math.min((page + 1) * PAGE_SIZE, displayed.length)} of ${displayed.length}`
+      : "0 results";
+    $("previous").disabled = page === 0;
+    $("next").disabled = (page + 1) * PAGE_SIZE >= displayed.length;
+    $("sort-score").textContent =
+      `Score ${reverse === config.metric.higher_is_better ? "↑" : "↓"}`;
+  }
+  function renderCharts() {
+    const stats = statistics(
+      current,
+      column.range,
+      config.metric.higher_is_better,
+    );
+    const availableWidth = $("charts").clientWidth;
+    const chart = (title, description, points, options) =>
+      `<article class="chart"><h3>${title}</h3><p>${description}</p>${svgPlot(points, { ...options, width: Math.max(240, (options.line || availableWidth < 700 ? availableWidth : (availableWidth - 20) / 2) - 44) })}</article>`;
+    $("charts").innerHTML =
+      chart(
+        "Best collected score over paper dates",
+        `Running best by reporting paper’s first arXiv month. Later revisions can contain newer results, so this is not a historical SOTA record. ${stats.undated} entries without an arXiv date omitted.`,
+        stats.history,
+        {
+          line: true,
+          range: column.range,
+          unit: column.unit === "%" ? "%" : "",
+        },
+      ) +
+      chart(
+        "Score distribution",
+        `Entries with a ${escapeHTML(column.name)} score. Bins include their lower bound; the last includes the maximum.`,
+        stats.histogram,
+        {},
+      ) +
+      chart(
+        "Reporting papers by year",
+        "Unique reporting papers with a score in this comparison, by first arXiv year. Collection coverage varies; this does not measure research activity.",
+        stats.years,
+        {},
+      );
+  }
+  function render() {
+    page = 0;
+    const rows = data.results.filter(
+      (r) => r.benchmark === $("benchmark").value,
+    );
+    const selected = rows.filter(
+      (r) =>
+        (!$("first-party").checked || firstParty(r)) &&
+        r.display_name
+          .toLowerCase()
+          .includes($("search").value.toLowerCase().trim()),
+    );
+    current = column
+      ? ranked(selected, column.key, config.metric.higher_is_better)
+      : [];
+    missing = selected
+      .filter((r) => !column || score(r, column.key) === null)
+      .map((row) => ({ row, value: null, rank: null }));
+    $("summary").innerHTML =
+      `${current.length} scored entries · ${new Set(current.map((x) => sourceID(x.row.reported_paper)).filter(Boolean)).size} reporting papers` +
+      (missing.length && view === "results"
+        ? ` · <button id="show-missing" aria-pressed="${showMissing}">${showMissing ? "Back to scored entries" : `${missing.length} without this score`}</button>`
+        : "");
+    if ($("show-missing"))
+      $("show-missing").onclick = () => {
+        showMissing = !showMissing;
+        render();
+      };
+    if (!missing.length) showMissing = false;
+    $("results-view").hidden = view !== "results";
+    $("insights-view").hidden = view !== "insights";
+    $("results-tab").setAttribute("aria-pressed", String(view === "results"));
+    $("insights-tab").setAttribute("aria-pressed", String(view === "insights"));
+    renderRows();
+    if (view === "insights" && column) renderCharts();
+    history.replaceState(
+      null,
+      "",
+      "#" +
+        new URLSearchParams({
+          benchmark: $("benchmark").value,
+          comparison: $("comparison").value,
+          view,
+        }),
+    );
+  }
+  function chooseBenchmark(wanted) {
+    const key = $("benchmark").value;
+    config = data.benchmarks[key];
+    const external = Boolean(config.external_only);
+    $("board").hidden = external;
+    $("external").hidden = !external;
+    $("comparison-control").hidden = external;
+    $("search-control").hidden = external;
+    if (external) {
+      $("external").innerHTML =
+        `<h2>${escapeHTML(config.display_name)}</h2><p>Results are maintained on the benchmark’s official leaderboard.</p>${sourceLink(config.official_leaderboard, "Open official leaderboard")}`;
+      history.replaceState(
+        null,
+        "",
+        "#" + new URLSearchParams({ benchmark: key }),
+      );
+      return;
+    }
+    const columns = comparisons(
+      config,
+      data.results.filter((r) => r.benchmark === key),
+    );
+    $("comparison").innerHTML = columns
+      .map(
+        (c) =>
+          `<option value="${escapeHTML(c.key)}">${escapeHTML(c.name)}</option>`,
+      )
+      .join("");
+    const populated = columns.find((c) =>
+      data.results.some((r) => r.benchmark === key && score(r, c.key) !== null),
+    );
+    if (populated) $("comparison").value = populated.key;
+    if (columns.some((c) => c.key === wanted)) $("comparison").value = wanted;
+    function chooseColumn() {
+      showMissing = false;
+      column = columns.find((c) => c.key === $("comparison").value);
+      $("board-title").textContent =
+        `${config.display_name} · ${column?.name || "Results"}`;
+      $("metric").textContent =
+        `${metricLabel(config, column)} · ${config.metric.higher_is_better ? "Higher" : "Lower"} is better`;
+      $("protocol").href = `protocols/${key}.md`;
+      render();
+    }
+    $("comparison").onchange = chooseColumn;
+    chooseColumn();
+  }
+  $("benchmark").onchange = () => {
+    $("search").value = "";
+    reverse = false;
+    chooseBenchmark();
+  };
+  $("search").oninput = () => {
+    showMissing = false;
+    render();
+  };
+  $("first-party").onchange = render;
+  $("results-tab").onclick = () => {
+    view = "results";
+    render();
+  };
+  $("insights-tab").onclick = () => {
+    view = "insights";
+    render();
+  };
+  $("previous").onclick = () => {
+    page--;
+    renderRows();
+  };
+  $("next").onclick = () => {
+    page++;
+    renderRows();
+  };
+  $("sort-score").onclick = () => {
+    reverse = !reverse;
+    page = 0;
+    renderRows();
+  };
+  $("close-detail").onclick = () => $("detail").close();
+  $("detail").onclick = (event) => {
+    if (event.target === $("detail")) {
+      const r = $("detail").getBoundingClientRect();
+      if (
+        event.clientX < r.left ||
+        event.clientX > r.right ||
+        event.clientY < r.top ||
+        event.clientY > r.bottom
+      )
+        $("detail").close();
+    }
+  };
+  let resizeTimer;
+  window.addEventListener("resize", () => {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => {
+      if (view === "insights" && column && !config.external_only)
+        renderCharts();
+    }, 120);
+  });
+  $("updated").textContent = data.last_updated
+    ? `Latest recorded update: ${data.last_updated}.`
+    : "";
+  view = initial.get("view") === "insights" ? "insights" : "results";
+  chooseBenchmark(initial.get("comparison"));
+}
+if (typeof module !== "undefined")
+  module.exports = {
+    metricLabel,
+    paperID,
+    paperMonth,
+    sourceID,
+    firstParty,
+    score,
+    comparisons,
+    ranked,
+    statistics,
+    svgPlot,
+  };
+if (typeof document !== "undefined")
+  start().catch((error) => {
+    const el = document.getElementById("error");
+    el.hidden = false;
+    el.textContent =
+      error.message +
+      " Build and serve the site using leaderboard/scripts/build.py.";
+  });
