@@ -18,7 +18,7 @@ Columns: `render` is the backend (`gpu` = the image's native path, `cpu` = softw
 |---|:-:|---|:-:|---|--:|--:|--:|---|
 | LIBERO-Plus | 1 | MuJoCo / OSMesa (cpu) or EGL (gpu) | **yes** | cpu, 48–96 shards | 143 @ N=48 (see text) | 10,030 ep × ~300 = 3.0 M | ~3 h cpu-only (128 cores); ~1 h with EGL on 2 GPUs (est.) | Sensor-noise variants 2–3× slower (CPU image corruption) |
 | RoboTwin 2.0 | 1 | SAPIEN 3 ray tracer (32 spp + OIDN) | cpu path exists, 60× slower | gpu, 4 GPUs, open-loop chunks | see text | 10,000 ep × ≤1,700 (worst 6.2 M; typical ~2.5 M) | 6–14 h with open-loop chunks on 4 GPUs; 60+ h cpu-only | Expert check skipped; `--render cpu` frames are undenoised |
-| RoboCasa365 | 2 | MuJoCo / OSMesa or EGL | yes | cpu, 32–48 shards | 144 @ N=32 | 50 tasks × 50 ep × registry horizon (~800) ≈ 2 M | ~4 h cpu-only | 0.25 s/step/shard, ~8 GB/shard (kitchen assets) |
+| RoboCasa365 | 2 | MuJoCo / OSMesa or EGL | yes | cpu, 32–48 shards | 103 @ N=64 (peak ~110 @ N=32) | 50 tasks × 50 ep × registry horizon (mean ~1,800, up to 3,600) ≈ 4.5 M | ~12 h cpu-only; est. ~5 h with 2 EGL GPUs | 0.29–0.40 s/step/shard, 5–7 GB/shard; episodes 500–1,300 s, so the queue matters most here |
 | RoboDojo | 2 | Isaac Lab RTX | no (A100 only, one lane per GPU) | | ~0.5–0.8 /lane | 42 tasks × 50 ep | ~12–20 GPU-h per task | H100 crashes upstream's renderer ([reproductions/robodojo.md](reproductions/robodojo.md)); not re-measured here |
 | LIBERO | ref | MuJoCo / OSMesa or EGL | yes | cpu, 64 shards | 158 @ N=64 | 2,000 ep × ~330 = 0.66 M | ~1.2 h cpu-only | 0.27–0.34 s/step/shard; EGL 2.7× faster per shard |
 | LIBERO-Pro | 3 | MuJoCo / OSMesa or EGL | yes | cpu, 64 shards | 101 @ N=64 | 4 suites × 10 tasks × 50 ep × ~220 | ~1 h cpu-only | 0.38–0.47 s/step/shard |
@@ -117,7 +117,7 @@ which the expert check would have filtered.
 |---|--:|--:|--:|--:|--:|---|
 | LIBERO (4 suites × 10 tasks × 5 ep = 200 ep, 66 k steps) | 16 / 32 / 64 | 40 / 99 / 158 | 0.31 / 0.27 / 0.34 | 1.4 / 1.5 / 1.4 | 2.9 / 2.8 / 2.4 | shard wall spread 1205–1662 s at N=16 |
 | LIBERO-Pro (10 tasks × 10 ep, 22 k steps) | 16 / 32 / 64 | 35 / 71 / 101 | 0.38 / 0.38 / 0.47 | 1.7 / 1.6 / 1.3 | 2.5 / 2.5 / 2.1 | contention starts at 64 shards on 64 cores |
-| RoboCasa365 (50 tasks × 2 ep, ~100 k steps) | 16 / 32 | 59 / 144 | 0.26 / 0.25 | ~1.5 | ~8 | registry horizons 500–1,200 steps |
+| RoboCasa365 (50 tasks × 2 ep, 181 k steps) | 16 / 32 / 64 | 46 / 78 / 103 | 0.29 / 0.33 / 0.40 | 1.6 / 1.4 / 1.1 | 6.8 / 5.5 / 5.1 | episode mean 520–720 s, p90 960–1,300 s; shard busy 1,442–3,747 s at N=16 under the fixed split |
 | RoboCasa (24 tasks × 4 ep, 52 k steps) | 16 / 32 / 64 | 49 / 90 / 101 | 0.29 / 0.27 / 0.34 | 1.3 / 1.2 / 0.8 | 8.4 / 7.9 / 7.8 | peak 499 GB at N=64; n64 shared its node with an image export |
 | CALVIN (48 sequences, 360 steps each) | 16 / 32 / 64 | 162 / 227 / 254 | 0.065 / 0.063 / 0.080 | 1.1 / 1.1 / 1.1 | 1.1 / 0.7 / 0.6 | run too short for the aggregate to matter; per-shard rate is the number |
 | SimplerEnv WidowX (96 ep × 75 steps), with #84 | 32 | 87 | 0.29 | 1.6 | 1.0 | without #84 (lavapipe frames on /tmp): 0.34 at N=16, then 1.9–3.8 s/step at N=32 and 5.4–6.2 at N=64 whenever the node's disk was busy, the job using 6–11 cores |
