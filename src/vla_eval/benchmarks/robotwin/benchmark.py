@@ -308,6 +308,8 @@ class RoboTwinBenchmark(StepBenchmark):
         self.fast_init = fast_init
         self.fast_render = fast_render
         self.use_bundled_expert_seeds = use_bundled_expert_seeds
+        if self._render_mode == "cpu" and not fast_init:
+            raise ValueError("render: cpu has no CuRobo (CUDA-only): fast_init must stay true")
         self._env: Any = None
         self._env_done = False  # the env's last episode ended through done, so setup_demo can reuse it
         self._episodes_since_clear = 0
@@ -422,6 +424,11 @@ class RoboTwinBenchmark(StepBenchmark):
         bundled = self._bundled_tasks(st_seed)
         if bundled is not None:
             return bundled
+        if self._render_mode == "cpu":
+            raise ValueError(
+                f"render: cpu cannot run the expert check (CuRobo is CUDA-only) and expert_seeds/{self.task_config}.json "
+                f"does not cover {self.task_name} x {self.test_num}; run it on a GPU host, or set skip_expert_check=true"
+            )
 
         env = self._create_env()
         tasks: list[Task] = []
