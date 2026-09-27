@@ -1,7 +1,7 @@
 {
   "last_updated": "2026-09-01",
-  "total_models": 3475,
-  "total_results": 3971,
+  "total_models": 3160,
+  "total_results": 3576,
   "total_papers_reviewed": 2504,
   "benchmarks": {
     "calvin": {
@@ -153,7 +153,7 @@
       "arxiv_id": "2506.18088",
       "citing_papers": 414,
       "arxiv_citing_papers": 392,
-      "leaderboard_entries": 395,
+      "leaderboard_entries": 0,
       "papers_reviewed": 335
     },
     "simpler_env": {
