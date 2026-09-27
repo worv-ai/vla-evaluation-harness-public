@@ -13,7 +13,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v7
-      - run: uv sync --python 3.11 --only-group leaderboard --group dev
+      - run: uv sync --python 3.11 --only-group leaderboard --only-group dev
       - run: uv run --no-sync python leaderboard/scripts/build.py --check
       - run: uv run --no-sync pytest leaderboard/tests
       - run: node --test leaderboard/tests/test_site.cjs

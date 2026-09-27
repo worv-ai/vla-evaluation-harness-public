@@ -10,7 +10,7 @@
    details. Describe source checks and unresolved cases in the PR.
 
 ```bash
-uv sync --only-group leaderboard --group dev
+uv sync --only-group leaderboard --only-group dev
 uv run --no-sync python leaderboard/scripts/build.py --check
 uv run --no-sync pytest leaderboard/tests
 node --test leaderboard/tests/test_site.cjs
