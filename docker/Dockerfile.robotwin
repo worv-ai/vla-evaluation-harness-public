@@ -21,6 +21,14 @@ RUN uv pip install --no-cache-dir \
         "torch==2.4.1" "torchvision" \
         --torch-backend cu121
 
+# ── Software Vulkan for `--render cpu` ────────────────────────────────
+# SAPIEN 3's ray tracer needs VK_KHR_ray_tracing_pipeline, in lavapipe since Mesa 24.1; the system
+# Mesa 23.2 lacks it. Isolated prefix so the native GPU path keeps the system libraries.
+RUN conda create -y -p /opt/lavapipe-env -c conda-forge "mesa-lavapipe==26.2.1" \
+    && conda clean -afy \
+    && mkdir -p /opt/lavapipe \
+    && cp /opt/lavapipe-env/share/vulkan/icd.d/lvp_icd.x86_64.json /opt/lavapipe/lvp_icd.json
+
 # ── SAPIEN 3, mplib, and core simulation dependencies ────────────────
 # sapien imports pkg_resources, removed from conda-forge setuptools >=70.
 RUN uv pip install --no-cache-dir "setuptools<70"

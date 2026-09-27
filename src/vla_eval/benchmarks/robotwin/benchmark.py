@@ -25,6 +25,7 @@ from typing import Any, cast
 import numpy as np
 
 from vla_eval.benchmarks.base import StepBenchmark, StepResult
+from vla_eval.render import DEFAULT_RENDER_MODE, assert_lavapipe_vulkan, configure_sapien_render
 from vla_eval.specs import IMAGE_RGB, LANGUAGE, STATE_JOINT, DimSpec
 from vla_eval.types import Action, EpisodeResult, Observation, Task
 
@@ -34,6 +35,7 @@ ROBOTWIN_ROOT = "/app/RoboTwin"
 # Expert-check results shipped per task config (gen_expert_seeds.py): the oracle's accepted seeds from 100000 on.
 EXPERT_SEEDS_DIR = Path(__file__).parent / "expert_seeds"
 BUNDLED_SEED_BASE = 100000
+LAVAPIPE_ICD_ENV_VAR = "ROBOTWIN_LAVAPIPE_ICD"
 
 
 class _EvalGripperPlanner:
@@ -184,6 +186,48 @@ def _patched_render_setup(enabled: bool):
             setattr(sapien_render, name, func)
 
 
+def _stub_curobo_planner() -> None:
+    """Let RoboTwin import without a GPU: planner.py defines CuroboPlanner inside a try that needs CUDA, and
+    robot.py imports the name unconditionally. Eval never plans (fast_init), so a placeholder class suffices."""
+    import importlib.abc
+    import importlib.util
+
+    class _Loader(importlib.abc.Loader):
+        def __init__(self, path: str) -> None:
+            self.path = path
+
+        def exec_module(self, module: Any) -> None:
+            src = open(self.path).read() + "\nif 'CuroboPlanner' not in globals():\n    class CuroboPlanner: ...\n"
+            exec(compile(src, self.path, "exec"), module.__dict__)
+
+    class _Finder(importlib.abc.MetaPathFinder):
+        def find_spec(self, fullname: str, path: Any, target: Any = None) -> Any:
+            if fullname != "envs.robot.planner" or not path:
+                return None
+            file = os.path.join(list(path)[0], "planner.py")
+            return importlib.util.spec_from_file_location(fullname, file, loader=_Loader(file))
+
+    if not any(isinstance(f, _Finder) for f in sys.meta_path):
+        sys.meta_path.insert(0, _Finder())
+
+
+@contextmanager
+def _patched_denoiser(enabled: bool):
+    """SAPIEN's OIDN denoiser is CUDA-only; on the CPU path leave the ray-traced frame undenoised."""
+    if not enabled:
+        yield
+        return
+
+    import sapien.render as sapien_render
+
+    original = sapien_render.set_ray_tracing_denoiser
+    sapien_render.set_ray_tracing_denoiser = lambda name: original("none")
+    try:
+        yield
+    finally:
+        sapien_render.set_ray_tracing_denoiser = original
+
+
 def _restore_play_once_attributes(env: Any, task_name: str) -> None:
     """Set what these tasks' check_success reads but only play_once assigns (eval_policy.py runs play_once on the same
     env first); play_once derives it from the initial scene, so the same expressions after setup_demo match."""
@@ -223,6 +267,18 @@ class RoboTwinBenchmark(StepBenchmark):
     """
 
     _ALL_RECORD_FIELDS = frozenset({"reward", "done", "success"})
+
+    # cpu: lavapipe software Vulkan (Mesa >= 24.1 ray-tracing pipelines; the image ships one under
+    # /opt/lavapipe). The frame is the same ray tracer minus OIDN denoising, and 30-50x slower per
+    # frame, so pair it with open-loop chunks. gpu: the image's native path.
+    render_backends = frozenset({"gpu", "cpu"})
+    _render_mode: str = DEFAULT_RENDER_MODE
+
+    @classmethod
+    def configure_render(cls, mode: str) -> dict[str, str]:
+        applied = configure_sapien_render(mode, LAVAPIPE_ICD_ENV_VAR)
+        cls._render_mode = mode
+        return applied
 
     def __init__(
         self,
@@ -323,6 +379,8 @@ class RoboTwinBenchmark(StepBenchmark):
         args["eval_mode"] = True
 
         self._args = args
+        if self._render_mode == "cpu":
+            _stub_curobo_planner()
         with _defer_open3d_import(enabled=not args.get("data_type", {}).get("pointcloud", False)):
             envs_module = importlib.import_module(f"envs.{self.task_name}")
         self._env_class = getattr(envs_module, self.task_name)
@@ -458,6 +516,9 @@ class RoboTwinBenchmark(StepBenchmark):
     def reset(self, task: Task) -> Any:
         self._init_robotwin()
         assert self._args is not None
+        cpu = self._render_mode == "cpu"
+        if cpu:
+            assert_lavapipe_vulkan(type(self).__name__)
 
         # As eval_policy.py: one env, SAPIEN's asset cache cleared every clear_cache_freq episodes (task configs: 5).
         if self._env is not None:
@@ -475,7 +536,12 @@ class RoboTwinBenchmark(StepBenchmark):
             self._env = self._create_env()
         self._env_done = False
         self._episodes_since_clear += 1
-        with _patched_robot_set_planner(self.fast_init), _patched_render_setup(self.fast_render):
+        planner, shader, denoiser = (
+            _patched_robot_set_planner(self.fast_init),
+            _patched_render_setup(self.fast_render),
+            _patched_denoiser(cpu),
+        )
+        with planner, shader, denoiser:
             self._env.setup_demo(
                 now_ep_num=task.get("episode_idx", 0),
                 seed=task["seed"],
