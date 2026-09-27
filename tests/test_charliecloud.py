@@ -610,3 +610,19 @@ def test_squashfs_cache_does_not_collide_with_directory_exports(tmp_path: Path, 
     directory = ch.image_dir_for(reference, root=tmp_path)
     squash = ch.image_dir_for("repo:tag", root=tmp_path, image_format="squashfs")
     assert directory != squash and directory not in squash.parents
+
+
+def test_reap_stale_mounts_removes_dead_and_empty_points(tmp_path: Path, monkeypatch) -> None:
+    """An empty leftover mount dir is removed; a live (non-empty) one and other users' dirs are left alone."""
+    import vla_eval.cli._charliecloud as ch
+
+    empty = tmp_path / "vla-eval-ch-dead"
+    empty.mkdir()
+    live = tmp_path / "vla-eval-ch-live"
+    live.mkdir()
+    (live / "ch").mkdir()
+    calls: list[list[str]] = []
+    monkeypatch.setattr(ch.subprocess, "call", lambda cmd, **kw: calls.append(cmd) or 0)
+    assert ch.reap_stale_mounts("fusermount", tmp_path) == 1
+    assert not empty.exists() and live.exists()
+    assert calls == [["fusermount", "-u", "-z", str(empty)]]

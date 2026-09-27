@@ -210,6 +210,33 @@ def ensure_image_dir(
     return img_dir
 
 
+_MOUNT_PREFIX = "vla-eval-ch-"
+
+
+def reap_stale_mounts(fusermount: str, tmp: Path | None = None) -> int:
+    """Release this user's leftover mount points (a shard killed with SIGKILL, e.g. by a scheduler time
+    limit, never reaches the unmount): a dead FUSE mount reads as ENOTCONN, an unmounted one is empty."""
+    import errno
+
+    reaped = 0
+    for mnt in (tmp or Path(tempfile.gettempdir())).glob(f"{_MOUNT_PREFIX}*"):
+        try:
+            dead = not os.listdir(mnt)
+        except OSError as exc:
+            if exc.errno not in (errno.ENOTCONN, errno.EIO):
+                continue
+            dead = True
+        if not dead or mnt.stat().st_uid != os.getuid():
+            continue
+        subprocess.call([fusermount, "-u", "-z", str(mnt)], stderr=subprocess.DEVNULL)
+        with contextlib.suppress(OSError):
+            mnt.rmdir()
+            reaped += 1
+    if reaped:
+        logger.info("Released %d stale image mount(s)", reaped)
+    return reaped
+
+
 @contextlib.contextmanager
 def mount_image(img: Path, squashfuse: tuple[str, str] | None) -> Iterator[Path]:
     """Mount a SquashFS export for this run and release it on every exit path."""
@@ -218,7 +245,8 @@ def mount_image(img: Path, squashfuse: tuple[str, str] | None) -> Iterator[Path]
         return
     assert squashfuse is not None
     mount_tool, fusermount = squashfuse
-    mnt = Path(tempfile.mkdtemp(prefix="vla-eval-ch-"))
+    reap_stale_mounts(fusermount)
+    mnt = Path(tempfile.mkdtemp(prefix=_MOUNT_PREFIX))
     mounted = False
     try:
         options = f"ro,uid={os.getuid()},gid={os.getgid()}"
