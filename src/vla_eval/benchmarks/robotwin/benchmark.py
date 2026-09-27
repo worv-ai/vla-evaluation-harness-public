@@ -13,11 +13,13 @@ Non-obvious behaviors:
 from __future__ import annotations
 
 import importlib
+import json
 import logging
 import os
 import sys
 import types
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Any, cast
 
 import numpy as np
@@ -29,6 +31,9 @@ from vla_eval.types import Action, EpisodeResult, Observation, Task
 logger = logging.getLogger(__name__)
 
 ROBOTWIN_ROOT = "/app/RoboTwin"
+# Expert-check results shipped per task config (gen_expert_seeds.py): the oracle's accepted seeds from 100000 on.
+EXPERT_SEEDS_DIR = Path(__file__).parent / "expert_seeds"
+BUNDLED_SEED_BASE = 100000
 
 
 class _EvalGripperPlanner:
@@ -204,7 +209,9 @@ class RoboTwinBenchmark(StepBenchmark):
         instruction_type: Instruction variant (``"seen"`` or ``"unseen"``).
         test_num: Number of valid episodes to evaluate.
         skip_expert_check: If ``True``, skip oracle planner verification in
-            ``get_tasks()`` (useful for quick smoke tests).
+            ``get_tasks()`` (useful for quick smoke tests). With ``seed=0`` the
+            verified seeds and instructions come from ``expert_seeds/`` when it
+            covers ``test_num``; other runs verify at startup.
         fast_init: If ``True``, skip CuRobo planner warmup for qpos evaluation
             episodes after task discovery. This preserves the eval path used by
             the harness while substantially reducing cold-start time.
@@ -350,58 +357,78 @@ class RoboTwinBenchmark(StepBenchmark):
                 for i in range(self.test_num)
             ]
 
-        # Full expert check — run oracle planner per seed
-        from generate_episode_instructions import generate_episode_descriptions
+        bundled = self._bundled_tasks(st_seed)
+        if bundled is not None:
+            return bundled
 
         env = self._create_env()
         tasks: list[Task] = []
         now_seed = st_seed
-        episode_idx = 0
         logger.info("Running expert checks from seed %d ...", st_seed)
 
-        # a broken planner install fails every seed; the worst demo_clean task needs about 5 seeds per solvable one
-        max_seeds = 20 * self.test_num
+        # a broken planner install fails every seed; the worst task (put_object_cabinet, demo_randomized) needs ~21
+        max_seeds = 50 * self.test_num
         while len(tasks) < self.test_num:
             if now_seed - st_seed >= max_seeds:
                 raise RuntimeError(
                     f"{self.task_name}: {len(tasks)}/{self.test_num} solvable seeds in {max_seeds} tries"
                 )
-            try:
-                env.setup_demo(
-                    now_ep_num=episode_idx,
-                    seed=now_seed,
-                    is_test=True,
-                    **self._args,
+            info = self._expert_check(env, now_seed, len(tasks))
+            if info is not None:
+                tasks.append(
+                    self._task_entry(now_seed, len(tasks), self._instructions(info, now_seed)[self.instruction_type])
                 )
-                episode_info = env.play_once()
-                env.close_env()
-                if env.plan_success and env.check_success():
-                    results = generate_episode_descriptions(
-                        self.task_name,
-                        [episode_info["info"]],
-                        self.test_num,
-                    )
-                    instruction = np.random.choice(
-                        results[0][self.instruction_type],
-                    )
-                    tasks.append(
-                        {
-                            "name": self.task_name,
-                            "suite": "robotwin",
-                            "seed": now_seed,
-                            "episode_idx": episode_idx,
-                            "instruction": instruction,
-                        }
-                    )
-                    episode_idx += 1
-            except Exception as e:
-                logger.warning("Expert check failed for seed %d: %s", now_seed, e)
-                try:
-                    env.close_env()
-                except Exception:
-                    pass
             now_seed += 1
         return tasks
+
+    def _task_entry(self, seed: int, episode_idx: int, instruction: str) -> Task:
+        return {
+            "name": self.task_name,
+            "suite": "robotwin",
+            "seed": seed,
+            "episode_idx": episode_idx,
+            "instruction": instruction,
+        }
+
+    def _expert_check(self, env: Any, seed: int, episode_idx: int) -> dict[str, Any] | None:
+        """Run the oracle on ``seed``; its episode info if the plan and the task succeed, else ``None``."""
+        assert self._args is not None
+        try:
+            env.setup_demo(now_ep_num=episode_idx, seed=seed, is_test=True, **self._args)
+            episode_info = env.play_once()
+            env.close_env()
+            return episode_info["info"] if env.plan_success and env.check_success() else None
+        except Exception as e:
+            logger.warning("Expert check failed for seed %d: %s", seed, e)
+            try:
+                env.close_env()
+            except Exception:
+                pass
+            return None
+
+    def _instructions(self, episode_info: dict[str, Any], seed: int) -> dict[str, str]:
+        """One ``seen`` and one ``unseen`` instruction, drawn with ``seed`` (RoboTwin's own draw is unseeded)."""
+        import random
+
+        from generate_episode_instructions import generate_episode_descriptions
+
+        random.seed(seed)  # generate_episode_descriptions samples with the global ``random``
+        results = generate_episode_descriptions(self.task_name, [episode_info], 100)[0]  # 100: independent of test_num
+        rng = np.random.default_rng(seed)
+        return {kind: str(rng.choice(results[kind])) for kind in ("seen", "unseen")}
+
+    def _bundled_tasks(self, st_seed: int) -> list[Task] | None:
+        """Tasks from the shipped expert-check list (``expert_seeds/<task_config>.json``), when it covers this run."""
+        path = EXPERT_SEEDS_DIR / f"{self.task_config}.json"
+        if st_seed != BUNDLED_SEED_BASE or not path.is_file():
+            return None
+        episodes = json.loads(path.read_text())["tasks"].get(self.task_name, [])
+        if len(episodes) < self.test_num:
+            return None
+        logger.info("Expert check from %s (%d of %d seeds)", path.name, self.test_num, len(episodes))
+        return [
+            self._task_entry(e["seed"], i, e[self.instruction_type]) for i, e in enumerate(episodes[: self.test_num])
+        ]
 
     def reset(self, task: Task) -> Any:
         self._init_robotwin()

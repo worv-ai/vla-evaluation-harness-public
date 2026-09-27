@@ -1,0 +1,93 @@
+"""Build the shipped expert-check lists (``expert_seeds/<task_config>.json``); runs inside the RoboTwin image.
+
+    python -m vla_eval.benchmarks.robotwin.gen_expert_seeds check TASK CONFIG FIRST LAST OUT.jsonl
+    python -m vla_eval.benchmarks.robotwin.gen_expert_seeds assemble CONFIG N OUT.json PART.jsonl...
+    python -m vla_eval.benchmarks.robotwin.gen_expert_seeds verify CONFIG TASK K
+
+``check`` runs the oracle on seeds FIRST..LAST-1 (one line per seed), so a task's seeds can be split over processes;
+``assemble`` keeps each task's first N accepted seeds in seed order; ``verify`` re-runs the oracle on a task's first
+K listed seeds and reports any it now rejects.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import sys
+from pathlib import Path
+
+from vla_eval.benchmarks.robotwin.benchmark import EXPERT_SEEDS_DIR, RoboTwinBenchmark
+
+
+def _benchmark(task: str, config: str) -> RoboTwinBenchmark:
+    bench = RoboTwinBenchmark(task_name=task, task_config=config, seed=0)  # seeds from BUNDLED_SEED_BASE
+    bench._init_robotwin()
+    return bench
+
+
+def _provenance() -> dict[str, str]:
+    import torch
+
+    out = {"image": os.environ.get("VLA_EVAL_IMAGE", "unknown")}
+    out["gpu"] = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "none"
+    for name in ("sapien", "curobo", "warp"):
+        try:
+            out[name] = __import__(name).__version__
+        except Exception:  # provenance is best effort
+            out[name] = "unknown"
+    return out
+
+
+def check(task: str, config: str, first: int, last: int, out: str) -> None:
+    bench = _benchmark(task, config)
+    env = bench._create_env()
+    with open(out, "w") as f:
+        f.write(json.dumps({"provenance": _provenance()}) + "\n")
+        for seed in range(first, last):
+            info = bench._expert_check(env, seed, 0)
+            row = {"task": task, "seed": seed, "ok": info is not None}
+            if info is not None:
+                row.update(bench._instructions(info, seed))
+            f.write(json.dumps(row) + "\n")
+            f.flush()
+
+
+def assemble(config: str, n: int, out: str, parts: list[str]) -> None:
+    rows, provenance = {}, set()
+    for part in parts:
+        lines = [json.loads(line) for line in Path(part).read_text().splitlines()]
+        provenance.add(json.dumps(lines[0]["provenance"], sort_keys=True))
+        for r in lines[1:]:
+            rows[(r["task"], r["seed"])] = r
+    tasks: dict[str, list[dict[str, object]]] = {}
+    for task in sorted({t for t, _ in rows}):
+        seeds = sorted(s for t, s in rows if t == task)
+        if seeds != list(range(seeds[0], seeds[0] + len(seeds))):
+            raise ValueError(f"{task}: checked seeds are not contiguous")
+        accepted = [rows[task, s] for s in seeds if rows[task, s]["ok"]][:n]
+        if len(accepted) < n:
+            raise ValueError(f"{task}: {len(accepted)} accepted seeds, need {n}")
+        tasks[task] = [{k: r[k] for k in ("seed", "seen", "unseen")} for r in accepted]
+    lines = ",\n".join(f"  {json.dumps(t)}: {json.dumps(v, ensure_ascii=False)}" for t, v in tasks.items())
+    prov = json.dumps([json.loads(p) for p in sorted(provenance)])
+    Path(out).write_text(f'{{"provenance": {prov},\n"tasks": {{\n{lines}\n}}}}\n')  # one line per task
+
+
+def verify(config: str, task: str, k: int) -> None:
+    listed = json.loads((EXPERT_SEEDS_DIR / f"{config}.json").read_text())["tasks"][task][:k]
+    bench = _benchmark(task, config)
+    env = bench._create_env()
+    rejected = [e["seed"] for e in listed if bench._expert_check(env, e["seed"], 0) is None]
+    print(json.dumps({"task": task, "config": config, "checked": len(listed), "rejected": rejected, **_provenance()}))
+
+
+if __name__ == "__main__":
+    cmd, *a = sys.argv[1:]
+    if cmd == "check":
+        check(a[0], a[1], int(a[2]), int(a[3]), a[4])
+    elif cmd == "assemble":
+        assemble(a[0], int(a[1]), a[2], a[3:])
+    elif cmd == "verify":
+        verify(a[0], a[1], int(a[2]))
+    else:
+        raise SystemExit(__doc__)
