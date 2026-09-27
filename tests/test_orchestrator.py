@@ -105,6 +105,15 @@ def test_shard_work_items_mixes_episode_indices_and_stays_task_sorted() -> None:
     assert _shard_work_items(items, shards, 3) == slices[3]
 
 
+def test_shard_offsets_spread_small_entries_over_all_shards() -> None:
+    """24 entries of 10 episodes on 60 shards: every shard gets 4 episodes, and each entry is split exactly once."""
+    entries = [[(0, {"name": f"t{k}"}, e) for e in range(10)] for k in range(24)]
+    slices = [[_shard_work_items(items, 60, s, k * len(items)) for s in range(60)] for k, items in enumerate(entries)]
+    assert {sum(len(sl[s]) for sl in slices) for s in range(60)} == {4}
+    for items, sl in zip(entries, slices):
+        assert sorted(w for part in sl for w in part) == sorted(items)
+
+
 @pytest.mark.anyio
 async def test_orchestrator_runs_to_completion(echo_server, tmp_path):
     """Echo server + stub benchmark → orchestrator returns a complete result."""

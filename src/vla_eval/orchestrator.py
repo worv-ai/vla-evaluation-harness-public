@@ -55,12 +55,13 @@ def _effective_recording_config(raw: dict[str, Any] | None, *, no_save: bool) ->
 _SHARD_SHUFFLE_SEED = 42
 
 
-def _shard_work_items(work_items: list[Any], num_shards: int, shard_id: int) -> list[Any]:
+def _shard_work_items(work_items: list[Any], num_shards: int, shard_id: int, offset: int = 0) -> list[Any]:
     """Fixed-seed shuffle so a shard never collects one episode index across every task
-    (gcd(num_shards, episodes_per_task) > 1 does that); re-sort by task to keep env rebuilds rare."""
+    (gcd(num_shards, episodes_per_task) > 1 does that); re-sort by task to keep env rebuilds rare.
+    ``offset`` rotates the round-robin so entries smaller than ``num_shards`` do not all land on the first shards."""
     items = list(work_items)
     random.Random(_SHARD_SHUFFLE_SEED).shuffle(items)
-    mine = [w for i, w in enumerate(items) if i % num_shards == shard_id]
+    mine = [w for i, w in enumerate(items) if (i + offset) % num_shards == shard_id]
     mine.sort(key=lambda w: w[0])
     return mine
 
@@ -187,8 +188,8 @@ class Orchestrator:
 
         all_results = []
         try:
-            for bench_cfg in self.config.get("benchmarks", []):
-                result = await self._run_benchmark(bench_cfg)
+            for entry_index, bench_cfg in enumerate(self.config.get("benchmarks", [])):
+                result = await self._run_benchmark(bench_cfg, entry_index)
                 all_results.append(result)
                 if self._live_tracking:
                     call_each(self._trackers, "on_benchmark_end", result.get("benchmark", ""), result)
@@ -214,7 +215,7 @@ class Orchestrator:
         tmp.write_text(json.dumps({"completed": completed, "total": total, "errors": errors}))
         tmp.replace(self._progress_path)
 
-    async def _run_benchmark(self, bench_cfg: dict[str, Any]) -> dict[str, Any]:
+    async def _run_benchmark(self, bench_cfg: dict[str, Any], entry_index: int = 0) -> dict[str, Any]:
         cfg = EvalConfig.from_dict(bench_cfg)
         name = cfg.resolved_name()
         safe_name = _SAFE_NAME_RE.sub("_", name)
@@ -226,9 +227,11 @@ class Orchestrator:
         logger.info("Starting benchmark: %s (mode=%s)", name, cfg.mode)
         if self._live_tracking:
             call_each(self._trackers, "on_benchmark_begin", name, bench_cfg)
-        return await self._run_benchmark_inner(cfg, name, safe_name)
+        return await self._run_benchmark_inner(cfg, name, safe_name, entry_index)
 
-    async def _run_benchmark_inner(self, cfg: EvalConfig, name: str, safe_name: str) -> dict[str, Any]:
+    async def _run_benchmark_inner(
+        self, cfg: EvalConfig, name: str, safe_name: str, entry_index: int = 0
+    ) -> dict[str, Any]:
         self._progress_path = self._output_dir / f"{self._shard_stem(safe_name)}.progress"
         self._progress_last = None
 
@@ -319,7 +322,8 @@ class Orchestrator:
             (task_idx, task, ep) for task_idx, task in enumerate(tasks) for ep in range(cfg.episodes_per_task)
         ]
         if self.num_shards is not None and self.shard_id is not None:
-            work_items = _shard_work_items(work_items, self.num_shards, self.shard_id)
+            offset = entry_index * len(work_items)
+            work_items = _shard_work_items(work_items, self.num_shards, self.shard_id, offset)
             logger.info("Shard %d/%d: %d episodes assigned", self.shard_id, self.num_shards, len(work_items))
 
         collector = ResultCollector(benchmark_name=name, mode=cfg.mode, metric_keys=benchmark.get_metric_keys())
