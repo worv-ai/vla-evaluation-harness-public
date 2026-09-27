@@ -613,16 +613,29 @@ def test_squashfs_cache_does_not_collide_with_directory_exports(tmp_path: Path, 
 
 
 def test_reap_stale_mounts_removes_dead_and_empty_points(tmp_path: Path, monkeypatch) -> None:
-    """An empty leftover mount dir is removed; a live (non-empty) one and other users' dirs are left alone."""
+    """An old empty leftover is removed; a live (non-empty) mount, a fresh empty dir (a shard about to mount) and
+    a dead mount that only fusermount can release are handled without touching the live ones."""
+    import errno
+    import os
+    import time
+
     import vla_eval.cli._charliecloud as ch
 
-    empty = tmp_path / "vla-eval-ch-dead"
-    empty.mkdir()
-    live = tmp_path / "vla-eval-ch-live"
-    live.mkdir()
+    old, fresh, live, dead = (tmp_path / f"vla-eval-ch-{n}" for n in ("old", "fresh", "live", "dead"))
+    for d in (old, fresh, live, dead):
+        d.mkdir()
     (live / "ch").mkdir()
+    os.utime(old, (time.time() - 3600, time.time() - 3600))
+    real_listdir = os.listdir
+
+    def listdir(path):  # noqa: ANN001
+        if Path(path) == dead:
+            raise OSError(errno.ENOTCONN, "Transport endpoint is not connected")
+        return real_listdir(path)
+
+    monkeypatch.setattr(ch.os, "listdir", listdir)
     calls: list[list[str]] = []
     monkeypatch.setattr(ch.subprocess, "call", lambda cmd, **kw: calls.append(cmd) or 0)
-    assert ch.reap_stale_mounts("fusermount", tmp_path) == 1
-    assert not empty.exists() and live.exists()
-    assert calls == [["fusermount", "-u", "-z", str(empty)]]
+    assert ch.reap_stale_mounts("fusermount", tmp_path) == 2
+    assert not old.exists() and not dead.exists() and fresh.exists() and live.exists()
+    assert calls == [["fusermount", "-u", "-z", str(dead)]]

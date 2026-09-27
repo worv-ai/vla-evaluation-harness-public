@@ -213,22 +213,31 @@ def ensure_image_dir(
 _MOUNT_PREFIX = "vla-eval-ch-"
 
 
-def reap_stale_mounts(fusermount: str, tmp: Path | None = None) -> int:
-    """Release this user's leftover mount points (a shard killed with SIGKILL, e.g. by a scheduler time
-    limit, never reaches the unmount): a dead FUSE mount reads as ENOTCONN, an unmounted one is empty."""
+def reap_stale_mounts(fusermount: str, tmp: Path | None = None, min_age_s: float = 60.0) -> int:
+    """Release leftover mount points: a shard killed with SIGKILL (a scheduler time limit, say) never reaches
+    the unmount. A dead FUSE mount reads as ENOTCONN and is lazily unmounted (fusermount refuses other users'
+    mounts); an empty directory is a mount that never happened, removed only when it is this user's and older
+    than ``min_age_s``, so a shard that is between mkdtemp and squashfuse keeps its directory."""
     import errno
+    import time
 
     reaped = 0
     for mnt in (tmp or Path(tempfile.gettempdir())).glob(f"{_MOUNT_PREFIX}*"):
         try:
-            dead = not os.listdir(mnt)
+            entries = os.listdir(mnt)
         except OSError as exc:
             if exc.errno not in (errno.ENOTCONN, errno.EIO):
                 continue
-            dead = True
-        if not dead or mnt.stat().st_uid != os.getuid():
-            continue
-        subprocess.call([fusermount, "-u", "-z", str(mnt)], stderr=subprocess.DEVNULL)
+            subprocess.call([fusermount, "-u", "-z", str(mnt)], stderr=subprocess.DEVNULL)
+        else:
+            if entries:
+                continue  # a live mount
+            try:
+                st = mnt.stat()
+            except OSError:
+                continue
+            if st.st_uid != os.getuid() or time.time() - st.st_mtime < min_age_s:
+                continue
         with contextlib.suppress(OSError):
             mnt.rmdir()
             reaped += 1
