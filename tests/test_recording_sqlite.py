@@ -765,18 +765,23 @@ def test_readonly_directory_reports_journal_permission_requirement(tmp_path):
 
 
 def test_work_queue_claims(tmp_path: Path) -> None:
-    """Two shards share one queue: no item twice, the loaded task first, a rerun resumes its own unfinished item."""
+    """Two shards share a queue: each works its own block forward, no item runs twice, the loaded task comes first,
+    an idle shard steals from the end of another block, and a rerun resumes its own unfinished item."""
     db = tmp_path / "q.sqlite"
     a, b = RecordingStore(db), RecordingStore(db)
     for store in (a, b):
-        store.seed_queue("ev", [0, 0, 1, 1])  # idempotent
-    assert a.claim("ev", 0, None) == 0
-    assert b.claim("ev", 1, 1) == 2  # prefers its loaded task
-    assert a.claim("ev", 0, None) == 0  # item 0 unfinished: a rerun of shard 0 gets it back
-    a.finish("ev", 0)
-    assert a.claim("ev", 0, 0) == 1
-    b.finish("ev", 2)
-    assert b.claim("ev", 1, 1) == 3
+        store.seed_queue("ev", [0, 0, 0, 1, 1, 1])  # idempotent
+    assert a.claim("ev", 0, None, (0, 3)) == 0
+    assert b.claim("ev", 1, None, (3, 6)) == 3
+    assert a.claim("ev", 0, 0, (0, 3)) == 0  # item 0 unfinished: a rerun of shard 0 gets it back
+    for item in (0, 3):
+        a.finish("ev", item)
+    assert [a.claim("ev", 0, 0, (0, 3)) for _ in range(1)] == [1]
     a.finish("ev", 1)
-    b.finish("ev", 3)
-    assert a.claim("ev", 0, 0) is None and b.claim("ev", 1, None) is None
+    assert a.claim("ev", 0, 0, (0, 3)) == 2
+    a.finish("ev", 2)
+    assert a.claim("ev", 0, 0, (0, 3)) == 5  # own block done: steal from the end of shard 1's
+    assert b.claim("ev", 1, 1, (3, 6)) == 4
+    for item in (4, 5):
+        a.finish("ev", item)
+    assert a.claim("ev", 0, 1, (0, 3)) is None and b.claim("ev", 1, 1, (3, 6)) is None

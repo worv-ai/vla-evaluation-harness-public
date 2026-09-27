@@ -225,14 +225,15 @@ class RecordingStore:
                 [(eval_id, i, t) for i, t in enumerate(task_idxs)],
             )
 
-    def claim(self, eval_id: str, shard_id: int, task_idx: int | None) -> int | None:
-        """Next item for ``shard_id``: its own unfinished items first (a rerun after a crash), then unclaimed items
-        of ``task_idx`` (the loaded env), then any unclaimed item. Marks nothing done; see ``finish``."""
+    def claim(self, eval_id: str, shard_id: int, task_idx: int | None, block: tuple[int, int]) -> int | None:
+        """Next item for ``shard_id``: its own unfinished items first (a rerun after a crash), then unclaimed items of
+        ``task_idx`` (the loaded env), then its ``block`` of items forward, then others' blocks from their ends."""
         with self.transaction():
             row = self._conn.execute(
                 "SELECT item FROM work_queue WHERE eval_id = ? AND done = 0 AND (shard_id = ? OR shard_id IS NULL) "
-                "ORDER BY shard_id IS NULL, task_idx IS NOT ?, item LIMIT 1",
-                (eval_id, shard_id, task_idx),
+                "ORDER BY shard_id IS NULL, task_idx IS NOT ?, item NOT BETWEEN ? AND ?, "
+                "CASE WHEN item BETWEEN ? AND ? THEN item ELSE -item END LIMIT 1",
+                (eval_id, shard_id, task_idx, block[0], block[1] - 1, block[0], block[1] - 1),
             ).fetchone()
             if row is None:
                 return None
