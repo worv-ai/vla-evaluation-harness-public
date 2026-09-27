@@ -54,7 +54,7 @@ path.
 | Kinetix | JAX (no GL) | ✅ | ✅ | `JAX_PLATFORMS=cpu` | No GL: frames are computed as JAX arrays, so the device switch is the whole backend |
 | SimplerEnv | SAPIEN 2.2.2 | ✅ | ✅ | lavapipe (software Vulkan) | Needs a lavapipe from Mesa >= 24.3, which the image installs from conda-forge into its own prefix. See below |
 | ManiSkill2 | SAPIEN 2.2.2 | ✅ | ✅ | lavapipe (software Vulkan) | same |
-| RoboTwin | SAPIEN 3.0.0b1 | ✅ | ❌ | — | Fails on the image's Mesa 23.2 lavapipe with `ErrorExtensionNotPresent`. Not re-measured against a newer Mesa |
+| RoboTwin | SAPIEN 3.0.0b1 | ✅ | ✅ | lavapipe (software Vulkan, Mesa 26.2 from conda-forge in `/opt/lavapipe-env`) | Same ray tracer (32 spp) minus the CUDA-only OIDN denoiser, so frames are noisier than the GPU path's; ~10 s per 3-camera frame on 8 threads (H100 renders one in ~0.25 s). Only worth it with open-loop action chunks. The system Mesa 23.2 lacks `VK_KHR_ray_tracing_pipeline` |
 | MIKASA-Robo | SAPIEN 3.0.0b1 | ✅ | ❌ | — | same |
 | BEHAVIOR-1K | OmniGibson (Isaac Sim) | ✅ | ❌ | — | Isaac Sim dumps core during extension startup with no GPU |
 | RoboDojo | Isaac Lab | ✅ | ❌ | — | Isaac reports `ERROR_INCOMPATIBLE_DRIVER` / "Failed to create any GPU devices" with no GPU; the RTX renderer has no software path |
@@ -84,8 +84,10 @@ CPU mode selects `/opt/lavapipe/lvp_icd.json` through both Vulkan loader variabl
 `VK_ICD_FILENAMES` and `VK_DRIVER_FILES`, and checks the manifests before creating
 the simulator to catch overrides that would expose a GPU.
 
-RoboTwin and MIKASA-Robo remain unsupported: they fail with the shipped Mesa 23.2
-and have not been tested with newer lavapipe.
+RoboTwin's ray tracer needs `VK_KHR_ray_tracing_pipeline`, which lavapipe gained in Mesa 24.1; its image
+installs Mesa 26.2.1 the same way and CPU mode selects `/opt/lavapipe/lvp_icd.json` (`ROBOTWIN_LAVAPIPE_ICD`
+overrides). MIKASA-Robo remains unsupported: it fails with the shipped Mesa 23.2 and has not been tested with newer
+lavapipe.
 
 RoboMME carries two caveats. First, its shipped configs default to `render: cpu`,
 unlike every other benchmark: the native path hangs at the first capture on a small
