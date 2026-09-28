@@ -3,12 +3,11 @@
     python -m vla_eval.benchmarks.robotwin.gen_expert_seeds check TASK CONFIG FIRST LAST OUT.jsonl
     python -m vla_eval.benchmarks.robotwin.gen_expert_seeds assemble CONFIG N OUT.json PART.jsonl...
     python -m vla_eval.benchmarks.robotwin.gen_expert_seeds verify CONFIG TASK K
-    python -m vla_eval.benchmarks.robotwin.gen_expert_seeds stamp CONFIG
 
 ``check`` runs the oracle on seeds FIRST..LAST-1 (one line per seed), so a task's seeds can be split over processes;
 ``assemble`` keeps each task's first N accepted seeds in seed order; ``verify`` re-runs the oracle on a task's first
-K listed seeds and reports any it now rejects; ``stamp`` records each task's ``fingerprint`` (configs and task code), which
-``get_tasks`` checks before using a list.
+K listed seeds and reports any it now rejects. Each task keeps the ``fingerprint`` (configs and task code) it was
+checked with; ``get_tasks`` uses a list only while it matches.
 """
 
 from __future__ import annotations
@@ -83,14 +82,6 @@ def assemble(config: str, n: int, out: str, parts: list[str]) -> None:
     _write(Path(out), [json.loads(p) for p in sorted(provenance)], tasks)
 
 
-def stamp(config: str) -> None:
-    path = EXPERT_SEEDS_DIR / f"{config}.json"
-    doc = json.loads(path.read_text())
-    for task, entry in doc["tasks"].items():
-        entry["fingerprint"] = _benchmark(task, config).fingerprint()
-    _write(path, doc["provenance"], doc["tasks"])
-
-
 def verify(config: str, task: str, k: int) -> None:
     listed = json.loads((EXPERT_SEEDS_DIR / f"{config}.json").read_text())["tasks"][task]["episodes"][:k]
     bench = _benchmark(task, config)
@@ -105,8 +96,6 @@ if __name__ == "__main__":
         check(a[0], a[1], int(a[2]), int(a[3]), a[4])
     elif cmd == "assemble":
         assemble(a[0], int(a[1]), a[2], a[3:])
-    elif cmd == "stamp":
-        stamp(a[0])
     elif cmd == "verify":
         verify(a[0], a[1], int(a[2]))
     else:
