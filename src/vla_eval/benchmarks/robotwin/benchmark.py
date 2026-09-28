@@ -210,9 +210,10 @@ class RoboTwinBenchmark(StepBenchmark):
         test_num: Number of valid episodes to evaluate.
         skip_expert_check: If ``True``, skip oracle planner verification in
             ``get_tasks()`` (useful for quick smoke tests).
-        use_bundled_expert_seeds: With ``seed=0``, take the verified seeds and
-            instructions from ``expert_seeds/`` when it covers ``test_num`` and
-            matches the configs and task code. ``False`` always verifies at startup.
+        use_bundled_expert_seeds: When seeds start at 100000 (``seed=0``, the
+            official protocol), take the verified seeds and instructions from
+            ``expert_seeds/`` if it covers ``test_num`` and matches the configs and
+            task code. ``False`` always verifies at startup.
         fast_init: If ``True``, skip CuRobo planner warmup for qpos evaluation
             episodes after task discovery. This preserves the eval path used by
             the harness while substantially reducing cold-start time.
