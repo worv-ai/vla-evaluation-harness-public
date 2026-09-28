@@ -41,6 +41,7 @@ def _provenance() -> dict[str, str]:
 
 
 def check(task: str, config: str, first: int, last: int, out: str) -> None:
+    out = os.path.abspath(out)  # _init_robotwin changes the working directory
     bench = _benchmark(task, config)
     env = bench._create_env()
     with open(out, "w") as f:
