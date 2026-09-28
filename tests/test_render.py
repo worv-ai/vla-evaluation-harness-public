@@ -9,6 +9,8 @@ from typing import Any
 
 import pytest
 
+import vla_eval.render
+
 from vla_eval.benchmarks.base import Benchmark
 from vla_eval.cli import smoke
 from vla_eval.docker_resources import gpu_docker_flag, shard_docker_flags
@@ -487,6 +489,9 @@ class TestNoGpuDockerFlags:
 # ---------------------------------------------------------------------------
 
 
+_real_shm_usable = vla_eval.render._shm_usable
+
+
 @pytest.fixture(autouse=True)
 def unbound_sapien_renderer(monkeypatch: pytest.MonkeyPatch) -> None:
     """The bound-renderer cache is process-wide by design; each test starts unbound."""
@@ -557,16 +562,14 @@ class TestConfigureSapienRender:
         assert render.keep_lavapipe_memory_on_tmpfs() is None and not link.is_symlink()
 
     def test_shm_usable_needs_room(self, monkeypatch):
-        import vla_eval.render as render
-
         class St:
             def __init__(self, avail):
                 self.f_bavail, self.f_frsize = avail, 1
 
         monkeypatch.setattr(os, "statvfs", lambda p: St(64 << 20))
-        assert render._shm_usable() is False
+        assert _real_shm_usable() is False
         monkeypatch.setattr(os, "statvfs", lambda p: St(8 << 30))
-        assert render._shm_usable() is True
+        assert _real_shm_usable() is True
 
     def test_an_existing_thread_setting_wins(self, lavapipe_icd: str):
         os.environ["LP_NUM_THREADS"] = "16"
