@@ -85,9 +85,11 @@ task paths and consecutive episodes. Inspect images/state, action effects,
 termination, resource growth, and shard coverage; compare upstream behavior using
 a released baseline or replay when available.
 
-Test pure transformations and harness mechanics directly. Do not fabricate simulator
-packages to stand in for integration tests. An echo-policy smoke proves plumbing,
-not simulator fidelity or reproduced performance.
+Host `tests/` is for simulator-independent harness logic. Do not add host pytest
+cases that import container-only benchmark adapters, install simulator dependencies
+on the host to run them, or fake those dependencies through `sys.modules`.
+Validate adapter code through smoke/integration runs inside the real benchmark image.
+An echo-policy smoke proves plumbing, not simulator fidelity or reproduced performance.
 
 Deliver asset instructions, runnable configs, supported runtime/rendering, protocol
 deviations, and separate statements of structural, runtime, and reproduction checks.

@@ -80,9 +80,11 @@ tensors and decoded actions to locate the first divergence. Follow with a real
 rollout, consecutive episodes, and concurrent sessions where supported. If upstream
 also fails, report that limitation instead of tuning toward a published score.
 
-Test transformations and lifecycle mechanics directly; fake model-library modules
-cannot replace real loading/inference checks. Distinguish loading, inference,
-rollout, and reproduction support in the documentation.
+Host `tests/` is for model-independent harness logic. Do not add host pytest cases
+that require a server's isolated model dependencies, install those dependencies into
+the host test environment, or fake them through `sys.modules`. Validate model-specific
+code with real loading/inference checks in the server's PEP 723 uv environment.
+Distinguish loading, inference, rollout, and reproduction support in the documentation.
 
 After correctness checks, measure warm latency, throughput, and memory on representative
 inputs, separately from download/load/compile costs. Record and validate changes to
