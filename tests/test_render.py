@@ -542,8 +542,9 @@ class TestConfigureSapienRender:
         monkeypatch.setenv("XDG_RUNTIME_DIR", "/run/user/1")
         assert render.keep_lavapipe_memory_on_tmpfs() is None
         monkeypatch.delenv("XDG_RUNTIME_DIR")
-        monkeypatch.setattr(render, "_shm_usable", lambda: False)  # Docker's 64 MiB default, or no /dev/shm
+        monkeypatch.setattr(render, "_shm_usable", lambda: False)  # Docker's 64 MiB default, or a full /dev/shm
         assert render.keep_lavapipe_memory_on_tmpfs() is None
+        assert not link.exists()  # our earlier link is withdrawn so Mesa falls back to disk again
 
     def test_a_leftover_real_directory_is_replaced_only_when_empty(self, tmp_path, monkeypatch):
         import vla_eval.render as render

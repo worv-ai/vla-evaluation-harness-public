@@ -144,13 +144,18 @@ def keep_lavapipe_memory_on_tmpfs() -> str | None:
     touched; a user's own ``XDG_RUNTIME_DIR`` is left alone. Returns the tmpfs directory, or None when nothing
     was linked (``XDG_RUNTIME_DIR`` set, ``/dev/shm`` missing or too small, a non-empty real directory in the way).
     """
-    if os.environ.get("XDG_RUNTIME_DIR") or not _shm_usable():
+    if os.environ.get("XDG_RUNTIME_DIR"):
         return None
     link = _lavapipe_fallback_dir()
     target = os.path.join(_LAVAPIPE_SHM_DIR, os.path.basename(link))
+    ours = os.path.islink(link) and os.readlink(link) == target
+    if not _shm_usable():
+        if ours:  # a link from an earlier run on a shared /tmp must not keep pointing at a full tmpfs
+            os.unlink(link)
+        return None
     os.makedirs(target, mode=0o700, exist_ok=True)
     if os.path.islink(link):
-        return target if os.readlink(link) == target else None
+        return target if ours else None
     if os.path.isdir(link):  # left by an earlier run on a shared /tmp; Mesa unlinks its files, so it is empty
         try:
             os.rmdir(link)
