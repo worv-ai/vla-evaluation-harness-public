@@ -159,6 +159,31 @@ async def test_closed_loop_default_keeps_buffering(chunk_server):
     assert benchmark.observations == 6
 
 
+class PassthroughChunkServer(ChunkModelServer):
+    """``chunk_size=None``: the 2-D prediction is sent as is and the adapter decides what to do with it."""
+
+    def __init__(self):
+        PredictModelServer.__init__(self, chunk_size=None)
+        self._action_dim = 7
+
+    def predict(self, obs, ctx):
+        return {"actions": np.ones((4, 7), dtype=np.float32)}
+
+
+@pytest.mark.anyio
+async def test_closed_loop_leaves_a_2d_action_to_the_benchmark(free_port):
+    task = await start_server(PassthroughChunkServer(), free_port)
+    try:
+        benchmark = CountingChunkBenchmark(done_at_step=3)
+        shapes = []
+        benchmark.step = lambda a, _s=benchmark.step: (shapes.append(np.shape(a["actions"])), _s(a))[1]
+        async with Connection(f"ws://127.0.0.1:{free_port}") as conn:
+            result = await SyncEpisodeRunner().run_episode(benchmark, {"name": "t"}, conn, max_steps=50)
+    finally:
+        await stop_server(task)
+    assert result["steps"] == 3 and shapes == [(4, 7)] * 3  # one request per step, chunk untouched
+
+
 def test_split_action_chunk():
     single = {"actions": np.arange(7)}
     assert split_action_chunk(single) is not None and len(split_action_chunk(single)) == 1

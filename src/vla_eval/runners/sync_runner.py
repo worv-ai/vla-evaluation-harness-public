@@ -79,7 +79,9 @@ class SyncEpisodeRunner(EpisodeRunner):
             return not done and (max_steps is None or step < max_steps)
 
         while more():
-            chunk = split_action_chunk(await conn.act(obs_dict))
+            action = await conn.act(obs_dict)
+            # Closed-loop, a 2-D action reaches the benchmark as is (adapters may take its first row).
+            chunk = split_action_chunk(action) if self.open_loop else [action]
             for i, action in enumerate(chunk):
                 benchmark.observation_needed = i == len(chunk) - 1
                 await benchmark.apply_action(action)
