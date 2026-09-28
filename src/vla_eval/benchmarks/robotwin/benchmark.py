@@ -209,10 +209,10 @@ class RoboTwinBenchmark(StepBenchmark):
         instruction_type: Instruction variant (``"seen"`` or ``"unseen"``).
         test_num: Number of valid episodes to evaluate.
         skip_expert_check: If ``True``, skip oracle planner verification in
-            ``get_tasks()`` (useful for quick smoke tests). With ``seed=0`` the
-            verified seeds and instructions come from ``expert_seeds/`` when it
-            covers ``test_num`` and matches the configs and task code; otherwise
-            they are verified at startup.
+            ``get_tasks()`` (useful for quick smoke tests).
+        use_bundled_expert_seeds: With ``seed=0``, take the verified seeds and
+            instructions from ``expert_seeds/`` when it covers ``test_num`` and
+            matches the configs and task code. ``False`` always verifies at startup.
         fast_init: If ``True``, skip CuRobo planner warmup for qpos evaluation
             episodes after task discovery. This preserves the eval path used by
             the harness while substantially reducing cold-start time.
@@ -233,6 +233,7 @@ class RoboTwinBenchmark(StepBenchmark):
         skip_expert_check: bool = False,
         fast_init: bool = True,
         fast_render: bool = False,
+        use_bundled_expert_seeds: bool = True,
     ) -> None:
         import re
 
@@ -249,6 +250,7 @@ class RoboTwinBenchmark(StepBenchmark):
         self.skip_expert_check = skip_expert_check
         self.fast_init = fast_init
         self.fast_render = fast_render
+        self.use_bundled_expert_seeds = use_bundled_expert_seeds
         self._env: Any = None
         self._env_done = False  # the env's last episode ended through done, so setup_demo can reuse it
         self._episodes_since_clear = 0
@@ -436,7 +438,7 @@ class RoboTwinBenchmark(StepBenchmark):
         """Tasks from the shipped expert-check list (``expert_seeds/<task_config>.json``) when it covers this run and
         was built from the same configs and task code; otherwise ``None`` (verify at startup)."""
         path = EXPERT_SEEDS_DIR / f"{self.task_config}.json"
-        if st_seed != BUNDLED_SEED_BASE or not path.is_file():
+        if not self.use_bundled_expert_seeds or st_seed != BUNDLED_SEED_BASE or not path.is_file():
             return None
         entry = json.loads(path.read_text())["tasks"].get(self.task_name)
         if entry is None or len(entry["episodes"]) < self.test_num:
