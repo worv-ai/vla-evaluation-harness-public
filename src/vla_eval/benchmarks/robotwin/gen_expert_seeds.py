@@ -3,10 +3,12 @@
     python -m vla_eval.benchmarks.robotwin.gen_expert_seeds check TASK CONFIG FIRST LAST OUT.jsonl
     python -m vla_eval.benchmarks.robotwin.gen_expert_seeds assemble CONFIG N OUT.json PART.jsonl...
     python -m vla_eval.benchmarks.robotwin.gen_expert_seeds verify CONFIG TASK K
+    python -m vla_eval.benchmarks.robotwin.gen_expert_seeds stamp CONFIG
 
 ``check`` runs the oracle on seeds FIRST..LAST-1 (one line per seed), so a task's seeds can be split over processes;
 ``assemble`` keeps each task's first N accepted seeds in seed order; ``verify`` re-runs the oracle on a task's first
-K listed seeds and reports any it now rejects.
+K listed seeds and reports any it now rejects; ``stamp`` records each task's ``fingerprint`` (configs and task code), which
+``get_tasks`` checks before using a list.
 """
 
 from __future__ import annotations
@@ -42,7 +44,7 @@ def check(task: str, config: str, first: int, last: int, out: str) -> None:
     bench = _benchmark(task, config)
     env = bench._create_env()
     with open(out, "w") as f:
-        f.write(json.dumps({"provenance": _provenance()}) + "\n")
+        f.write(json.dumps({"provenance": _provenance(), "fingerprint": bench.fingerprint()}) + "\n")
         for seed in range(first, last):
             info = bench._expert_check(env, seed, 0)
             row = {"task": task, "seed": seed, "ok": info is not None}
@@ -52,29 +54,44 @@ def check(task: str, config: str, first: int, last: int, out: str) -> None:
             f.flush()
 
 
+def _write(out: Path, provenance: list[dict], tasks: dict[str, dict]) -> None:
+    lines = ",\n".join(f"  {json.dumps(t)}: {json.dumps(v, ensure_ascii=False)}" for t, v in tasks.items())
+    out.write_text(f'{{"provenance": {json.dumps(provenance)},\n"tasks": {{\n{lines}\n}}}}\n')  # one line per task
+
+
 def assemble(config: str, n: int, out: str, parts: list[str]) -> None:
-    rows, provenance = {}, set()
+    rows, provenance, fingerprints = {}, set(), {}
     for part in parts:
         lines = [json.loads(line) for line in Path(part).read_text().splitlines()]
         provenance.add(json.dumps(lines[0]["provenance"], sort_keys=True))
         for r in lines[1:]:
             rows[(r["task"], r["seed"])] = r
-    tasks: dict[str, list[dict[str, object]]] = {}
+            fingerprints.setdefault(r["task"], set()).add(lines[0].get("fingerprint"))
+    tasks: dict[str, dict] = {}
     for task in sorted({t for t, _ in rows}):
         seeds = sorted(s for t, s in rows if t == task)
         if seeds != list(range(seeds[0], seeds[0] + len(seeds))):
             raise ValueError(f"{task}: checked seeds are not contiguous")
+        if len(fingerprints[task]) != 1:
+            raise ValueError(f"{task}: parts were checked with different configs or code")
         accepted = [rows[task, s] for s in seeds if rows[task, s]["ok"]][:n]
         if len(accepted) < n:
             raise ValueError(f"{task}: {len(accepted)} accepted seeds, need {n}")
-        tasks[task] = [{k: r[k] for k in ("seed", "seen", "unseen")} for r in accepted]
-    lines = ",\n".join(f"  {json.dumps(t)}: {json.dumps(v, ensure_ascii=False)}" for t, v in tasks.items())
-    prov = json.dumps([json.loads(p) for p in sorted(provenance)])
-    Path(out).write_text(f'{{"provenance": {prov},\n"tasks": {{\n{lines}\n}}}}\n')  # one line per task
+        episodes = [{k: r[k] for k in ("seed", "seen", "unseen")} for r in accepted]
+        tasks[task] = {"fingerprint": fingerprints[task].pop(), "episodes": episodes}
+    _write(Path(out), [json.loads(p) for p in sorted(provenance)], tasks)
+
+
+def stamp(config: str) -> None:
+    path = EXPERT_SEEDS_DIR / f"{config}.json"
+    doc = json.loads(path.read_text())
+    for task, entry in doc["tasks"].items():
+        entry["fingerprint"] = _benchmark(task, config).fingerprint()
+    _write(path, doc["provenance"], doc["tasks"])
 
 
 def verify(config: str, task: str, k: int) -> None:
-    listed = json.loads((EXPERT_SEEDS_DIR / f"{config}.json").read_text())["tasks"][task][:k]
+    listed = json.loads((EXPERT_SEEDS_DIR / f"{config}.json").read_text())["tasks"][task]["episodes"][:k]
     bench = _benchmark(task, config)
     env = bench._create_env()
     rejected = [e["seed"] for e in listed if bench._expert_check(env, e["seed"], 0) is None]
@@ -87,6 +104,8 @@ if __name__ == "__main__":
         check(a[0], a[1], int(a[2]), int(a[3]), a[4])
     elif cmd == "assemble":
         assemble(a[0], int(a[1]), a[2], a[3:])
+    elif cmd == "stamp":
+        stamp(a[0])
     elif cmd == "verify":
         verify(a[0], a[1], int(a[2]))
     else:

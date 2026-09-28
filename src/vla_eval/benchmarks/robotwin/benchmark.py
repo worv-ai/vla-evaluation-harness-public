@@ -417,17 +417,34 @@ class RoboTwinBenchmark(StepBenchmark):
         rng = np.random.default_rng(seed)
         return {kind: str(rng.choice(results[kind])) for kind in ("seen", "unseen")}
 
+    def fingerprint(self) -> str:
+        """What the expert check depends on: the resolved configs, the task's code and the base task's code."""
+        import hashlib
+
+        assert self._args is not None
+        h = hashlib.sha256(json.dumps(self._args, sort_keys=True, default=str).encode())
+        for name in (self.task_name, "_base_task"):
+            h.update(Path(ROBOTWIN_ROOT, "envs", f"{name}.py").read_bytes())
+        return h.hexdigest()[:16]
+
     def _bundled_tasks(self, st_seed: int) -> list[Task] | None:
-        """Tasks from the shipped expert-check list (``expert_seeds/<task_config>.json``), when it covers this run."""
+        """Tasks from the shipped expert-check list (``expert_seeds/<task_config>.json``) when it covers this run and
+        was built from the same configs and task code; otherwise ``None`` (verify at startup)."""
         path = EXPERT_SEEDS_DIR / f"{self.task_config}.json"
         if st_seed != BUNDLED_SEED_BASE or not path.is_file():
             return None
-        episodes = json.loads(path.read_text())["tasks"].get(self.task_name, [])
-        if len(episodes) < self.test_num:
+        entry = json.loads(path.read_text())["tasks"].get(self.task_name)
+        if entry is None or len(entry["episodes"]) < self.test_num:
             return None
-        logger.info("Expert check from %s (%d of %d seeds)", path.name, self.test_num, len(episodes))
+        if entry["fingerprint"] != self.fingerprint():
+            logger.warning(
+                "%s: configs or task code differ from %s; running the expert check", self.task_name, path.name
+            )
+            return None
+        logger.info("Expert check from %s (%d of %d seeds)", path.name, self.test_num, len(entry["episodes"]))
         return [
-            self._task_entry(e["seed"], i, e[self.instruction_type]) for i, e in enumerate(episodes[: self.test_num])
+            self._task_entry(e["seed"], i, e[self.instruction_type])
+            for i, e in enumerate(entry["episodes"][: self.test_num])
         ]
 
     def reset(self, task: Task) -> Any:
