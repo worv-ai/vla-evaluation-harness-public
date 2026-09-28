@@ -785,3 +785,10 @@ def test_work_queue_claims(tmp_path: Path) -> None:
     for item in (4, 5):
         a.finish("ev", item)
     assert a.claim("ev", 0, 1, (0, 3)) is None and b.claim("ev", 1, 1, (3, 6)) is None
+
+
+def test_work_queue_empty_block_steals(tmp_path: Path) -> None:
+    """With fewer items than shards a shard's block can be empty; it then takes from the end of the others'."""
+    store = RecordingStore(tmp_path / "q.sqlite")
+    store.seed_queue("ev", [0, 1])
+    assert store.claim("ev", 2, None, (1, 1)) == 1
