@@ -117,6 +117,53 @@ def resolve_lavapipe_icd(override_env: str) -> str | None:
     return None
 
 
+_LAVAPIPE_SHM_DIR: Final = "/dev/shm"
+_LAVAPIPE_SHM_MIN_FREE: Final = 4 << 30  # Docker's default /dev/shm is 64 MiB: too small to hold a scene
+
+
+def _shm_usable() -> bool:
+    try:
+        st = os.statvfs(_LAVAPIPE_SHM_DIR)
+    except OSError:
+        return False
+    return st.f_bavail * st.f_frsize >= _LAVAPIPE_SHM_MIN_FREE
+
+
+def _lavapipe_fallback_dir() -> str:
+    """Where Mesa (util/anon_file.c) keeps its device-memory files when built without memfd_create, as the
+    conda-forge lavapipe is, and ``XDG_RUNTIME_DIR`` is unset. Mesa only stat()s it: a symlink to a directory
+    owned by this user is accepted."""
+    return f"/tmp/xdg-runtime-mesa-{os.getuid()}"
+
+
+def keep_lavapipe_memory_on_tmpfs() -> str | None:
+    """Make lavapipe's fallback directory a symlink into ``/dev/shm``.
+
+    Every rendered frame is written to those (unlinked) files, so on a disk-backed ``/tmp`` a few dozen shards
+    hit dirty-page throttling (SimplerEnv: 0.34 s/step at 16 shards, 6 s/step at 64). Only that directory is
+    touched; a user's own ``XDG_RUNTIME_DIR`` is left alone. Returns the tmpfs directory, or None when nothing
+    was linked (``XDG_RUNTIME_DIR`` set, ``/dev/shm`` missing or too small, a non-empty real directory in the way).
+    """
+    if os.environ.get("XDG_RUNTIME_DIR") or not _shm_usable():
+        return None
+    link = _lavapipe_fallback_dir()
+    target = os.path.join(_LAVAPIPE_SHM_DIR, os.path.basename(link))
+    os.makedirs(target, mode=0o700, exist_ok=True)
+    if os.path.islink(link):
+        return target if os.readlink(link) == target else None
+    if os.path.isdir(link):  # left by an earlier run on a shared /tmp; Mesa unlinks its files, so it is empty
+        try:
+            os.rmdir(link)
+        except OSError:
+            logger.warning("%s is not empty; lavapipe keeps its device memory there instead of tmpfs", link)
+            return None
+    try:
+        os.symlink(target, link)
+    except FileExistsError:  # another shard got there first
+        pass
+    return target
+
+
 def lavapipe_cpu_env(icd: str) -> dict[str, str]:
     """Software-Vulkan env for SAPIEN adapters, pointing Vulkan dispatch at *icd*.
 
@@ -168,6 +215,7 @@ def configure_sapien_render(mode: str, icd_override_env: str) -> dict[str, str]:
             f"Install mesa-vulkan-drivers (Mesa >= 24.3), or set {icd_override_env} to its JSON path."
         )
     env = lavapipe_cpu_env(icd)
+    keep_lavapipe_memory_on_tmpfs()
     # Vulkan loader 1.3.207 renamed this variable; set both for old images.
     env["VK_DRIVER_FILES"] = env["VK_ICD_FILENAMES"]
     _sapien_render_env = apply_env(env)
