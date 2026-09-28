@@ -211,7 +211,8 @@ class RoboTwinBenchmark(StepBenchmark):
         skip_expert_check: If ``True``, skip oracle planner verification in
             ``get_tasks()`` (useful for quick smoke tests). With ``seed=0`` the
             verified seeds and instructions come from ``expert_seeds/`` when it
-            covers ``test_num``; other runs verify at startup.
+            covers ``test_num`` and matches the configs and task code; otherwise
+            they are verified at startup.
         fast_init: If ``True``, skip CuRobo planner warmup for qpos evaluation
             episodes after task discovery. This preserves the eval path used by
             the harness while substantially reducing cold-start time.
@@ -412,8 +413,12 @@ class RoboTwinBenchmark(StepBenchmark):
 
         from generate_episode_instructions import generate_episode_descriptions
 
+        state = random.getstate()
         random.seed(seed)  # generate_episode_descriptions samples with the global ``random``
-        results = generate_episode_descriptions(self.task_name, [episode_info], 100)[0]  # 100: independent of test_num
+        try:
+            results = generate_episode_descriptions(self.task_name, [episode_info], 100)[0]  # independent of test_num
+        finally:
+            random.setstate(state)
         rng = np.random.default_rng(seed)
         return {kind: str(rng.choice(results[kind])) for kind in ("seen", "unseen")}
 

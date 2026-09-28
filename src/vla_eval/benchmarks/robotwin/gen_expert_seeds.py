@@ -18,7 +18,7 @@ import os
 import sys
 from pathlib import Path
 
-from vla_eval.benchmarks.robotwin.benchmark import EXPERT_SEEDS_DIR, RoboTwinBenchmark
+from vla_eval.benchmarks.robotwin.benchmark import BUNDLED_SEED_BASE, EXPERT_SEEDS_DIR, RoboTwinBenchmark
 
 
 def _benchmark(task: str, config: str) -> RoboTwinBenchmark:
@@ -70,8 +70,8 @@ def assemble(config: str, n: int, out: str, parts: list[str]) -> None:
     tasks: dict[str, dict] = {}
     for task in sorted({t for t, _ in rows}):
         seeds = sorted(s for t, s in rows if t == task)
-        if seeds != list(range(seeds[0], seeds[0] + len(seeds))):
-            raise ValueError(f"{task}: checked seeds are not contiguous")
+        if seeds != list(range(BUNDLED_SEED_BASE, BUNDLED_SEED_BASE + len(seeds))):
+            raise ValueError(f"{task}: checked seeds must run contiguously from {BUNDLED_SEED_BASE}")
         if len(fingerprints[task]) != 1:
             raise ValueError(f"{task}: parts were checked with different configs or code")
         accepted = [rows[task, s] for s in seeds if rows[task, s]["ok"]][:n]
