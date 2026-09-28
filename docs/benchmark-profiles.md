@@ -36,10 +36,11 @@ shared recording SQLite instead of a fixed round-robin split. Under the fixed sp
 3-minute spread. Worse, an entry with fewer items than shards left shards idle in every entry: LIBERO-Plus with 4
 entries × 48 items on 64 or 96 shards only ever used shards 0–47.
 
-**Open-loop action chunks.** A `PredictModelServer(open_loop_chunks=True)` (or `VLA_EVAL_OPEN_LOOP_CHUNKS=1`,
-or `GET /config?open_loop_chunks=1` at runtime) sends each predicted chunk whole; the sync runner executes it
-without fetching the intermediate observations, which are exactly the ones the server would have ignored while
-draining its buffer (`action_ensemble="newest"`). Benchmarks may skip rendering on those steps
+**Open-loop action chunks.** `open_loop: true` on a benchmark entry (or `--benchmark-field open_loop=true`)
+makes the sync runner ask the server for whole chunks and execute them without fetching the intermediate
+observations, which are exactly the ones the server would have ignored while draining its buffer. A
+`PredictModelServer` honours the request when that holds (`action_ensemble="newest"`, no `on_observation`
+override) and otherwise keeps buffering. Benchmarks may skip rendering on those steps
 (`Benchmark.observation_needed`); RoboTwin does. The actions are identical to the buffered path.
 
 ## LIBERO-Plus (tier 1)

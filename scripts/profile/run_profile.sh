@@ -8,7 +8,7 @@
 #   HOLD_KEY     observation key echoed as the action (RoboTwin: joint_state)
 #   OBS_PARAMS   JSON for the server's get_observation_params()
 #   CHUNK_SIZE   server chunk size (default 1: every env step asks the server)
-#   OPEN_LOOP=1  the server sends whole chunks; the client executes them without observing (VLA_EVAL_OPEN_LOOP_CHUNKS)
+#   OPEN_LOOP=1  the client executes whole chunks without observing in between (--benchmark-field open_loop=true)
 #   RUN_ARGS     extra `vla-eval run` args, e.g. "--benchmark-field episodes_per_task=2 --benchmark-field max_tasks=4"
 #   VLA          vla-eval executable (default: this checkout's .venv); DEV=1 mounts this checkout's src (--dev)
 #   SERVER_URL   use an already running server instead of the dummy one
@@ -46,7 +46,7 @@ echo "=== $EVAL_ID config=$CONFIG shards=$SHARDS chunk=${CHUNK_SIZE:-1} open_loo
 
 if [ -z "${SERVER_URL:-}" ]; then
   SERVER_URL=ws://127.0.0.1:$PORT
-  VLA_EVAL_OPEN_LOOP_CHUNKS=${OPEN_LOOP:-0} setsid "$PY" "$HERE/dummy_server.py" --action-dim "$ACTION_DIM" --port "$PORT" --chunk-size "${CHUNK_SIZE:-1}" \
+  setsid "$PY" "$HERE/dummy_server.py" --action-dim "$ACTION_DIM" --port "$PORT" --chunk-size "${CHUNK_SIZE:-1}" \
     ${HOLD_KEY:+--hold-key "$HOLD_KEY"} --obs-params "${OBS_PARAMS:-{\}}" > "$OUT/logs/server.log" 2>&1 &
   SPID=$!
   for _ in $(seq 60); do curl -sf "http://127.0.0.1:$PORT/health" >/dev/null && break; kill -0 $SPID 2>/dev/null || break; sleep 1; done
@@ -66,7 +66,7 @@ T0=$(date +%s); FAILED=0; pids=()
 for i in $(seq 0 $((SHARDS - 1))); do
   genv="CUDA_VISIBLE_DEVICES="; [ ${#GPUS[@]} -gt 0 ] && genv="CUDA_VISIBLE_DEVICES=${GPUS[$((i % ${#GPUS[@]}))]}"
   env $genv "$VLA" run --yes --server-url "$SERVER_URL" --output-dir "$OUT" --eval-id "$EVAL_ID" ${RENDER:+--render $RENDER} \
-    ${DEV:+--dev} ${RUN_ARGS:-} -c "$CONFIG" --shard-id "$i" --num-shards "$SHARDS" > "$OUT/logs/shard$i.log" 2>&1 &
+    ${DEV:+--dev} ${OPEN_LOOP:+--benchmark-field open_loop=true} ${RUN_ARGS:-} -c "$CONFIG" --shard-id "$i" --num-shards "$SHARDS" > "$OUT/logs/shard$i.log" 2>&1 &
   pids+=($!); sleep 0.3
 done
 for p in "${pids[@]}"; do wait "$p" || FAILED=$((FAILED + 1)); done
