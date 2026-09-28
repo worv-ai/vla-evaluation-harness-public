@@ -118,3 +118,21 @@ def test_committed_inputs_validate():
     assert rows
     assert not any("tier" in bm for bm in benchmarks.values())
     assert all(not benchmarks[row["benchmark"]].get("external_only") for row in rows)
+
+
+def test_asset_urls_change_only_when_content_changes(corpus):
+    root, _ = corpus
+    (root / "site/index.html").write_text('<script src="app.js"></script><link href="style.css">')
+    (root / "site/app.js").write_text("first")
+    (root / "site/style.css").write_text("body {}")
+    output = root / ".cache/site"
+    build.build(output, root)
+    first = (output / "index.html").read_text()
+    assert "app.js?v=" in first and "style.css?v=" in first
+    build.build(output, root)
+    assert (output / "index.html").read_text() == first
+    (root / "site/app.js").write_text("second")
+    build.build(output, root)
+    second = (output / "index.html").read_text()
+    assert second != first
+    assert second.split("<link")[1] == first.split("<link")[1]

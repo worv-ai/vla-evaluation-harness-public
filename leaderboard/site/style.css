@@ -531,3 +531,184 @@ dialog::backdrop {
     overflow-wrap: anywhere;
   }
 }
+
+.insight-summary {
+  display: grid;
+  grid-template-columns: 1.3fr 1fr 1fr;
+  gap: 16px;
+  margin: 20px 0;
+}
+.stat-card {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  text-align: left;
+  padding: 18px 22px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: white;
+  color: var(--ink);
+  min-width: 0;
+}
+.stat-card span {
+  font-size: 0.8rem;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+.stat-card strong {
+  font-size: 1.8rem;
+  letter-spacing: -0.04em;
+  font-variant-numeric: tabular-nums;
+}
+.stat-card small {
+  font-size: 0.85rem;
+  font-weight: 400;
+  letter-spacing: 0;
+}
+button.stat-card:hover {
+  border-color: var(--accent);
+  background: var(--wash);
+}
+.insight-tools {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 20px;
+  font-size: 0.78rem;
+  color: var(--muted);
+  margin-bottom: 18px;
+}
+.methodology {
+  max-width: 470px;
+}
+.methodology summary {
+  cursor: pointer;
+  color: var(--accent);
+}
+.methodology p {
+  font-size: 0.8rem;
+}
+.plot {
+  position: relative;
+}
+.chart-target {
+  fill: transparent;
+  cursor: pointer;
+  outline: none;
+}
+.chart-target.active,
+.chart-target:focus-visible {
+  fill: #13695e12;
+  stroke: var(--accent);
+  stroke-width: 1;
+  stroke-dasharray: 3 3;
+}
+.chart-tooltip {
+  position: absolute;
+  z-index: 5;
+  pointer-events: none;
+  width: max-content;
+  max-width: min(280px, 100%);
+  padding: 12px 15px;
+  background: #173b36;
+  color: white;
+  border-radius: 7px;
+  box-shadow: 0 5px 18px #12352e30;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  font-size: 0.83rem;
+  line-height: 1.35;
+}
+.chart-tooltip strong {
+  font-size: 1.2rem;
+  font-variant-numeric: tabular-nums;
+}
+.chart-tooltip small {
+  color: #c2dcd5;
+  font-size: 0.72rem;
+  margin-top: 4px;
+}
+.data-point,
+.back-link {
+  border: 0;
+  background: none;
+  padding: 0;
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  text-align: left;
+}
+.back-link {
+  margin-bottom: 20px;
+  font-size: 0.8rem;
+}
+.empty-state {
+  grid-column: 1/-1;
+  text-align: center;
+  background: white;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 45px 20px;
+}
+.empty-state h3 {
+  margin: 0;
+}
+.empty-state p {
+  color: var(--muted);
+}
+.empty-state button {
+  padding: 9px 14px;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  background: white;
+  color: var(--accent);
+}
+#detail-body ul {
+  padding-left: 20px;
+  font-size: 0.88rem;
+  line-height: 1.65;
+}
+#detail-body li {
+  margin: 9px 0;
+}
+#detail-body code {
+  font-size: 0.83em;
+  background: var(--wash);
+  padding: 2px 4px;
+  overflow-wrap: anywhere;
+}
+#detail-body .group-context {
+  font-size: 0.8rem;
+  color: var(--muted);
+  margin-bottom: 20px;
+}
+#detail-body .group-results th {
+  padding: 9px 5px;
+}
+#detail-body .group-results td:first-child {
+  padding-right: 16px;
+}
+@media (max-width: 700px) {
+  .insight-summary {
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+  }
+  .stat-card:first-child {
+    grid-column: 1/-1;
+  }
+  .stat-card {
+    padding: 14px 16px;
+  }
+  .stat-card strong {
+    font-size: 1.5rem;
+  }
+  .insight-tools {
+    flex-direction: column;
+    gap: 10px;
+  }
+  .chart-tooltip {
+    font-size: 0.78rem;
+    max-width: 240px;
+  }
+}

@@ -1,6 +1,7 @@
 """Validate curated result files and build the standalone leaderboard site."""
 
 import argparse
+import hashlib
 import json
 import math
 import shutil
@@ -124,6 +125,14 @@ def build(output, root=ROOT):
     for path in (root / "site").iterdir():
         if path.is_file():
             shutil.copyfile(path, output / path.name)
+    index = output / "index.html"
+    html = index.read_text()
+    for name in ("app.js", "style.css"):
+        asset = output / name
+        if asset.exists():
+            version = hashlib.sha256(asset.read_bytes()).hexdigest()[:12]
+            html = html.replace(f'"{name}"', f'"{name}?v={version}"')
+    index.write_text(html)
     shutil.copytree(root / "benchmarks", output / "protocols", dirs_exist_ok=True)
     payload = {
         "last_updated": max((r.get("updated", r["date_added"]) for r in results), default=None),

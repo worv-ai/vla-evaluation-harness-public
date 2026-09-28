@@ -109,3 +109,38 @@ test("metric labels distinguish percentages from success rates", () => {
     "Chain success rate (%)",
   );
 });
+
+test("chart drilldowns preserve source identities and bin boundaries", () => {
+  const a = row("A", 50),
+    b = row("B", 100, "https://arxiv.org/abs/2502.12345"),
+    c = row("C", 40, "https://arxiv.org/abs/2503.12345");
+  const stats = statistics(ranked([a, b, c], "overall_score"), [0, 100]);
+  assert.equal(stats.history[2].rows[0], b);
+  assert.deepEqual(stats.histogram[5].rows, [a]);
+  assert.deepEqual(stats.histogram[9].rows, [b]);
+  assert.equal(stats.years[0].rows.length, 3);
+  assert.equal(stats.years[0].value, 3);
+});
+test("protocol formatting supports headings and lists without executing HTML", () => {
+  const { protocolHTML } = require("../site/app.js");
+  const result = protocolHTML(
+    "## Scoring\n- **Mean** of `a`\n- <img src=x onerror=alert(1)>\n\n[Source](https://example.com)",
+  );
+  assert.ok(result.includes("<h3>Scoring</h3>"));
+  assert.ok(result.includes("<ul>"));
+  assert.ok(result.includes("<code>a</code>"));
+  assert.ok(!result.includes("<img"));
+  assert.ok(result.includes('href="https://example.com"'));
+});
+test("zero-count bins remain focusable and selectable", () => {
+  const plot = svgPlot(
+    [
+      { label: "0–10", value: 0 },
+      { label: "10–20", value: 1 },
+    ],
+    { unit: "entries" },
+  );
+  assert.ok(plot.includes('data-point="0"'));
+  assert.ok(plot.includes('tabindex="0" role="button"'));
+  assert.ok(plot.includes("0 entries"));
+});

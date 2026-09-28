@@ -9,6 +9,10 @@ distributions, best scores over paper dates, and reporting-paper counts. They do
 not estimate field-wide activity or establish historical SOTA. Official boards
 are linked directly rather than duplicated.
 
+Hover or focus a chart to inspect values; click a point or bar to open its source
+results. Arrow keys navigate chart points. Filters persist in the page URL, and
+searching for a method preserves its rank within the selected comparison.
+
 ## Files
 
 | Path | Responsibility |

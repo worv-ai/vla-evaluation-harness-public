@@ -46,7 +46,7 @@
             <h2 id="board-title"></h2>
             <p id="metric"></p>
           </div>
-          <a id="protocol" href="#">Comparison definition ↗</a>
+          <a id="protocol" href="#">Comparison definition</a>
         </div>
         <div class="toolbar">
           <div class="tabs" role="group" aria-label="View">
@@ -64,7 +64,12 @@
             <table>
               <thead>
                 <tr>
-                  <th scope="col">Rank</th>
+                  <th
+                    scope="col"
+                    title="Rank in this comparison and first-party selection; method search does not change ranks"
+                  >
+                    Rank
+                  </th>
                   <th scope="col">Method</th>
                   <th scope="col">Parameters</th>
                   <th scope="col">Weights</th>
@@ -85,11 +90,25 @@
           </div>
         </section>
         <section id="insights-view" aria-label="Statistics" hidden>
-          <p class="chart-note">
-            These plots describe the collected reports under the current
-            filters, not all published research. Method variants count as
-            separate entries.
-          </p>
+          <div id="insight-summary" class="insight-summary"></div>
+          <div class="insight-tools">
+            <span
+              >Hover to inspect · click or tap to explore · arrow keys to
+              navigate</span
+            >
+            <details class="methodology">
+              <summary>About these statistics</summary>
+              <p>
+                Collected reports under the current filters; method variants
+                count as separate entries. Dates use the reporting paper's first
+                arXiv month, so later revisions can make this differ from
+                historical SOTA. Paper counts reflect collection coverage, not
+                field-wide activity. Histogram bins include the lower bound; the
+                final bin includes the maximum.
+              </p>
+              <p id="date-note"></p>
+            </details>
+          </div>
           <div id="charts" class="charts"></div>
         </section>
       </section>
