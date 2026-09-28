@@ -498,11 +498,15 @@ class RoboTwinBenchmark(StepBenchmark):
         assert act.shape[-1] == 14, f"Action dimension mismatch: got {act.shape[-1]}, expected 14"
 
         self._env.take_action(act, action_type="qpos")
-        raw_obs = self._env.get_obs()
         success = bool(self._env.eval_success)
         done = success or (self._env.take_action_cnt >= self._env.step_lim)
         self._env_done = done
-        self._recorder.record_video(self._extract_frame(raw_obs))
+        # Rendering (get_obs) dominates a step; skip it inside an open-loop chunk unless a video wants the frame.
+        if self.observation_needed or done or self._recorder.record_video_enabled:
+            raw_obs = self._env.get_obs()
+            self._recorder.record_video(self._extract_frame(raw_obs))
+        else:
+            raw_obs = self._last_result.obs
         self._recorder.record_step(reward=1.0 if success else 0.0, done=done, success=success)
         return StepResult(obs=raw_obs, reward=1.0 if success else 0.0, done=done, info={"success": success})
 

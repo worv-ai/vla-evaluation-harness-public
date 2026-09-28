@@ -452,6 +452,11 @@ class EpisodeRecorder:
         """Host-resolvable SQLite path (translated when orchestrator is in docker)."""
         return str(_host_translate(self._store.db_path))
 
+    @property
+    def record_video_enabled(self) -> bool:
+        """True when frames are wanted: a benchmark that can skip rendering must still render for a video."""
+        return self._video is not None
+
     # -- Capture API -------------------------------------------------------
 
     def record_video(self, frame: "np.ndarray | None") -> None:

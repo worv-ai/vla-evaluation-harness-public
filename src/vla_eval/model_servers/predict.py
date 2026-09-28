@@ -142,6 +142,7 @@ class PredictModelServer(ModelServer):
     ) -> None:
         self.chunk_size = chunk_size
         self.action_ensemble = action_ensemble
+        self._open_loop_refused = False  # warn once per server
         self.ema_alpha = ema_alpha
         self.max_batch_size = max_batch_size
         self.max_wait_time = max_wait_time
@@ -219,6 +220,22 @@ class PredictModelServer(ModelServer):
         """Return the effective chunk_size for a session."""
         return self._session_chunk_sizes.get(ctx.session_id, self.chunk_size)
 
+    def _open_loop_safe(self) -> bool:
+        """Whole chunks equal the buffered path's actions only when nothing looks at the skipped observations:
+        no ensemble blending and no on_observation override (VLANeXt keeps a per-step history)."""
+        overridden = type(self).on_observation is not PredictModelServer.on_observation
+        if self.action_ensemble == "newest" and not overridden:
+            return True
+        if not self._open_loop_refused:
+            self._open_loop_refused = True
+            logger.warning(
+                "%s cannot serve whole chunks open-loop (action_ensemble=%r%s); buffering as usual",
+                type(self).__name__,
+                self.action_ensemble,
+                ", on_observation overridden" if overridden else "",
+            )
+        return False
+
     def _try_serve_from_buffer(self, ctx: SessionContext) -> np.ndarray | None:
         """Return a buffered action if available, else ``None``."""
         cs = self._get_chunk_size(ctx)
@@ -255,8 +272,8 @@ class PredictModelServer(ModelServer):
             actions = np.asarray(actions)
 
         cs = self._get_chunk_size(ctx)
-        if cs is None or actions.ndim == 1:
-            await ctx.send_action(result)
+        if cs is None or actions.ndim == 1 or (ctx.open_loop and self._open_loop_safe()):
+            await ctx.send_action(result)  # a whole chunk: the client executes it without observing in between
             return
 
         # Push chunk and pop first action

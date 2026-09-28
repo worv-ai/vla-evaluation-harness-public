@@ -41,6 +41,8 @@ class SessionContext:
             observation (i.e. 0 on the first call).
         mode: Evaluation mode (currently always ``"sync"``).
         is_first: True when ``step == 0`` (first observation of the episode).
+        open_loop: The client asked (``EPISODE_START.open_loop``) to receive whole action chunks and execute
+            them itself, so the server should not buffer them.
     """
 
     def __init__(
@@ -58,6 +60,7 @@ class SessionContext:
         self._recording_db_path = recording_db_path
         self._step = 0
         self._send_action_fn: SendActionFn | None = None  # set by framework
+        self.open_loop: bool = False  # set by the framework from EPISODE_START
 
     @property
     def session_id(self) -> str:

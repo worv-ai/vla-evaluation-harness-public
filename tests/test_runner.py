@@ -16,12 +16,12 @@ from vla_eval.benchmarks.base import repeat_last_hold
 from vla_eval.connection import Connection
 from vla_eval.runners.action_buffer import ActionBuffer
 from vla_eval.runners.live_runner import LiveEpisodeRunner
-from vla_eval.runners.sync_runner import SyncEpisodeRunner
+from vla_eval.runners.sync_runner import SyncEpisodeRunner, split_action_chunk
 from vla_eval.model_servers.predict import PredictModelServer
 from vla_eval.model_servers.base import SessionContext
 from vla_eval.model_servers.serve import serve_async
 
-from tests.conftest import StubBenchmark, wait_for_server, stop_server
+from tests.conftest import ChunkModelServer, StubBenchmark, start_server, stop_server, wait_for_server
 
 
 @pytest.mark.anyio
@@ -78,6 +78,96 @@ async def test_chunk_server_completes(chunk_server):
 
     assert result["metrics"]["success"] is True
     assert result["steps"] == 3
+
+
+class CountingChunkBenchmark(StubBenchmark):
+    """Counts observation fetches and records ``observation_needed`` per step."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.observations = 0
+        self.needed: list[bool] = []
+
+    def make_obs(self, raw_obs, task):
+        self.observations += 1
+        return super().make_obs(raw_obs, task)
+
+    def step(self, action):
+        self.needed.append(self.observation_needed)
+        return super().step(action)
+
+
+class HistoryChunkServer(ChunkModelServer):
+    """A server whose on_observation override must see every step (e.g. VLANeXt) cannot go open-loop."""
+
+    async def on_observation(self, obs, ctx):
+        await super().on_observation(obs, ctx)
+
+
+@pytest.mark.anyio
+async def test_open_loop_executes_whole_chunks(free_port):
+    """Open-loop: one inference per chunk, no observation between chunk steps, none after the last step."""
+    server = ChunkModelServer()
+    task = await start_server(server, free_port)
+    try:
+        benchmark = CountingChunkBenchmark(done_at_step=6)
+        async with Connection(f"ws://127.0.0.1:{free_port}") as conn:
+            result = await SyncEpisodeRunner(open_loop=True).run_episode(benchmark, {"name": "t"}, conn, max_steps=50)
+    finally:
+        await stop_server(task)
+    assert result["metrics"]["success"] is True
+    assert result["steps"] == 6
+    assert benchmark.observations == 2  # reset + one between the two chunks of 4
+    assert benchmark.needed == [False, False, False, True, False, False]
+
+
+@pytest.mark.anyio
+async def test_open_loop_respects_max_steps_mid_chunk(free_port):
+    server = ChunkModelServer()
+    task = await start_server(server, free_port)
+    try:
+        benchmark = CountingChunkBenchmark(done_at_step=100)
+        async with Connection(f"ws://127.0.0.1:{free_port}") as conn:
+            result = await SyncEpisodeRunner(open_loop=True).run_episode(benchmark, {"name": "t"}, conn, max_steps=6)
+    finally:
+        await stop_server(task)
+    assert result["steps"] == 6
+    assert benchmark.observations == 2
+
+
+@pytest.mark.anyio
+async def test_open_loop_request_ignored_when_server_cannot(free_port):
+    """A server that must see every observation keeps buffering: one action per request."""
+    task = await start_server(HistoryChunkServer(), free_port)
+    try:
+        benchmark = CountingChunkBenchmark(done_at_step=6)
+        async with Connection(f"ws://127.0.0.1:{free_port}") as conn:
+            result = await SyncEpisodeRunner(open_loop=True).run_episode(benchmark, {"name": "t"}, conn, max_steps=50)
+    finally:
+        await stop_server(task)
+    assert result["steps"] == 6
+    assert benchmark.observations == 6  # reset + 5 between steps
+    assert all(benchmark.needed)
+
+
+@pytest.mark.anyio
+async def test_closed_loop_default_keeps_buffering(chunk_server):
+    benchmark = CountingChunkBenchmark(done_at_step=6)
+    async with Connection(chunk_server) as conn:
+        result = await SyncEpisodeRunner().run_episode(benchmark, {"name": "t"}, conn, max_steps=50)
+    assert result["steps"] == 6
+    assert benchmark.observations == 6
+
+
+def test_split_action_chunk():
+    single = {"actions": np.arange(7)}
+    assert split_action_chunk(single) is not None and len(split_action_chunk(single)) == 1
+    rows = split_action_chunk({"actions": np.arange(6).reshape(3, 2), "extra": "x"})
+    assert [r["actions"].tolist() for r in rows] == [[0, 1], [2, 3], [4, 5]]
+    assert all(r["extra"] == "x" for r in rows)
+    assert split_action_chunk({"other": 1}) == [{"other": 1}]
+    with pytest.raises(ValueError):
+        split_action_chunk({"actions": np.zeros((0, 7))})
 
 
 # ---------------------------------------------------------------------------

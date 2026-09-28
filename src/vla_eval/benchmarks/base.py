@@ -76,6 +76,10 @@ class Benchmark(ABC):
     #: at startup instead of crashing mid-run.
     render_backends: ClassVar[frozenset[str]] = frozenset({"gpu"})
 
+    #: Set by the runner before ``apply_action``: False while it executes an action chunk open-loop, when the
+    #: step's observation is never fetched. Render-bound simulators may then skip rendering (RoboTwin does).
+    observation_needed: bool = True
+
     @classmethod
     def configure_render(cls, mode: str) -> dict[str, str]:
         """Set process env for *mode* before any simulator import; return the applied env.

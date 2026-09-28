@@ -307,7 +307,7 @@ class Orchestrator:
                 wait_first_action=cfg.wait_first_action,
             )
         else:
-            runner = SyncEpisodeRunner()
+            runner = SyncEpisodeRunner(open_loop=cfg.open_loop)
 
         tasks = benchmark.get_tasks()
         if cfg.tasks:
