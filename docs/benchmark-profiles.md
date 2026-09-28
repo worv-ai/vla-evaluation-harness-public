@@ -17,7 +17,7 @@ Columns: `render` is the backend (`gpu` = the image's native path, `cpu` = softw
 | Benchmark | Tier | Simulator / renderer | GPU-free? | Recommended setup | step/s (agg.) | Protocol size | Est. wall on the unit | Notes |
 |---|:-:|---|:-:|---|--:|--:|--:|---|
 | LIBERO-Plus | 1 | MuJoCo / OSMesa (cpu) or EGL (gpu) | **yes** | cpu, 48–96 shards | 143 @ N=48 (see text) | 10,030 ep × ~300 = 3.0 M | ~3 h cpu-only (128 cores); ~1 h with EGL on 2 GPUs (est.) | Sensor-noise variants 2–3× slower (CPU image corruption) |
-| RoboTwin 2.0 | 1 | SAPIEN 3 ray tracer (32 spp + OIDN) | cpu path exists, 60× slower | gpu, 4 GPUs, open-loop chunks | see text | 10,000 ep × ≤1,700 (worst 6.2 M; typical ~2.5 M) | 6–14 h with open-loop chunks on 4 GPUs; 60+ h cpu-only | Expert check skipped; `--render cpu` frames are undenoised |
+| RoboTwin 2.0 | 1 | SAPIEN 3 ray tracer (32 spp + OIDN) | cpu path exists (#83), 60× slower | gpu, 8 shards/GPU, open-loop chunk 25 (#80) | ~80 per H100 (161 @ 2 GPUs) | 10,000 ep × ≤1,700 (worst 6.2 M; typical ~2.5 M) | ~5.4 h worst / ~2 h typical on 4 GPUs; closed-loop ≈ 4 days | Expert check skipped; `--render cpu` frames are undenoised |
 | RoboCasa365 | 2 | MuJoCo / OSMesa or EGL | yes | cpu, 32–48 shards | 103 @ N=64 (peak ~110 @ N=32) | 50 tasks × 50 ep × registry horizon (mean ~1,800, up to 3,600) ≈ 4.5 M | ~12 h cpu-only; est. ~5 h with 2 EGL GPUs | 0.29–0.40 s/step/shard, 5–7 GB/shard; episodes 500–1,300 s, so the queue matters most here |
 | RoboDojo | 2 | Isaac Lab RTX | no (A100 only, one lane per GPU) | | ~0.5–0.8 /lane | 42 tasks × 50 ep | ~12–20 GPU-h per task | H100 crashes upstream's renderer ([reproductions/robodojo.md](reproductions/robodojo.md)); not re-measured here |
 | LIBERO | ref | MuJoCo / OSMesa or EGL | yes | cpu, 64 shards | 158 @ N=64 | 2,000 ep × ~330 = 0.66 M | ~1.2 h cpu-only | 0.27–0.34 s/step/shard; EGL 2.7× faster per shard |
@@ -98,15 +98,27 @@ A 32-shard CPU sweep (50 tasks × 1 episode, open-loop chunk 25, `LP_NUM_THREADS
 ran at 1.6 s/step per shard, 8 steps/s for the node: the rendering budget of ~110 core-seconds per frame
 divided by 64 cores gives at most ~0.6 frames/s, i.e. ~15 steps/s with chunk 25 even without contention.
 
-End-to-end on 4 H100s (`vla-eval run`, instant server, open-loop chunk 25, 50 tasks × 4 seeds): one shard per
-GPU runs 0.046 s/step in-episode (physics-bound: 25 × 0.03 s physics per 0.21 s frame, GPU idle), two shards
-per GPU 0.064 s/step; the 4th GPU of that allocation was unusable, so aggregate numbers from that run are
-being re-measured on the three good ones (see below when filled).
+End-to-end on H100s (`vla-eval run`, instant server, 50 tasks × 4 seeds, one node):
+
+| mode | shards / GPU | s/step per shard | GPU util | node steps/s | note |
+|---|--:|--:|--:|--:|---|
+| closed-loop (frame every step) | 1 | 0.31 | 77 % | 12.9 on 3 GPUs (4.3 per GPU) | one shard already saturates a GPU |
+| closed-loop | 2 | — | — | 12.9 | no gain: GPU-bound at ~4 frames/s per GPU |
+| open-loop chunk 25 | 1 | 0.046 | ~0 % | — | physics-bound: 25 × 0.03 s physics per 0.21 s frame |
+| open-loop chunk 25 | 2 | 0.056–0.064 | ~0 % | 92 on 4 GPUs (one dead) | |
+| open-loop chunk 25 | 4 | 0.080 | 6 % | 123 on 2 healthy GPUs | |
+| open-loop chunk 25 | 8 | 0.13 | 67 % | 161 on 2 healthy GPUs | GPU nearly saturated: ~80 steps/s per H100 |
+
+(One GPU of each allocation on that node was intermittently unreachable — `Failed to find a supported physical
+device "cuda:0"` on the shards mapped to it — which is what #78's consecutive-error stop now handles: the last
+run's dead shards stopped after 5 errors and handed their items back, 17 errors instead of 100+. The aggregate
+columns count only healthy GPUs.)
 
 Full protocol (50 tasks × 2 configs × 100 episodes; step limits sum to 31,000 per 100-episode sweep, so the
-worst case is 6.2 M steps, a typical run with early successes ~2.5 M): with open-loop chunk 25 each shard
-does ~16–22 steps/s and a GPU renders ~4 frames/s = ~100 steps/s, so **4 GPUs ≈ 300–400 steps/s ≈ 4–6 h worst
-case**, 2–3 h typical; closed-loop (render every step) ≈ 13 steps/s ≈ 5 days. CPU-only on 64 cores: ≈ 8–15
+worst case is 6.2 M steps, a typical run with early successes ~2.5 M): with open-loop chunk 25 a GPU renders
+~4 frames/s ≈ 80 steps/s at 8 shards per GPU (measured 161 steps/s on two), so **4 GPUs ≈ 320 steps/s ≈ 5.4 h
+worst case**, ~2 h typical, with ~32 shards, 1 core and 4.5 GB each; closed-loop (render every step) ≈ 4.3
+steps/s per GPU ≈ 17 steps/s on four ≈ 4 days. CPU-only on 64 cores: ≈ 8–15
 steps/s, i.e. 5–9 days worst case — a fallback, not a plan. The CuRobo expert check is skipped
 (`skip_expert_check`); note that unverified seeds include a few unstable scenes (`UnStableError` at reset),
 which the expert check would have filtered.
