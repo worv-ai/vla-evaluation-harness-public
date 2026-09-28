@@ -379,11 +379,8 @@ class Orchestrator:
                 return
             assert self._store is not None and self.shard_id is not None and self.num_shards is not None
             self._store.seed_queue(bench_eval_id, [t for t, _, _ in work_items])
-            # a contiguous block of the task-sorted items per shard keeps env rebuilds rare; idle shards then steal
-            n, k = len(work_items), self.shard_id
-            block = (k * n // self.num_shards, (k + 1) * n // self.num_shards)
             task_idx = None
-            while (item := self._store.claim(bench_eval_id, self.shard_id, task_idx, block)) is not None:
+            while (item := self._store.claim(bench_eval_id, self.shard_id, task_idx, self.num_shards)) is not None:
                 yield work_items[item]
                 self._store.finish(bench_eval_id, item)  # not reached when the loop aborts: a rerun redoes it
                 task_idx = work_items[item][0]
