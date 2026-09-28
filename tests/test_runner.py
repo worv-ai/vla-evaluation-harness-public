@@ -170,18 +170,26 @@ class PassthroughChunkServer(ChunkModelServer):
         return {"actions": np.ones((4, 7), dtype=np.float32)}
 
 
+class ShapeRecordingBenchmark(CountingChunkBenchmark):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.shapes: list[tuple[int, ...]] = []
+
+    def step(self, action):
+        self.shapes.append(np.shape(action["actions"]))
+        return super().step(action)
+
+
 @pytest.mark.anyio
 async def test_closed_loop_leaves_a_2d_action_to_the_benchmark(free_port):
     task = await start_server(PassthroughChunkServer(), free_port)
     try:
-        benchmark = CountingChunkBenchmark(done_at_step=3)
-        shapes = []
-        benchmark.step = lambda a, _s=benchmark.step: (shapes.append(np.shape(a["actions"])), _s(a))[1]
+        benchmark = ShapeRecordingBenchmark(done_at_step=3)
         async with Connection(f"ws://127.0.0.1:{free_port}") as conn:
             result = await SyncEpisodeRunner().run_episode(benchmark, {"name": "t"}, conn, max_steps=50)
     finally:
         await stop_server(task)
-    assert result["steps"] == 3 and shapes == [(4, 7)] * 3  # one request per step, chunk untouched
+    assert result["steps"] == 3 and benchmark.shapes == [(4, 7)] * 3  # one request per step, chunk untouched
 
 
 def test_split_action_chunk():
