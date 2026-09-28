@@ -28,7 +28,8 @@ ACTION_DIM=${ACTION_DIM:-$("$PY" -c "import yaml,sys; print(yaml.safe_load(open(
 
 if [ "${LOCAL_IMAGE:-0}" = 1 ]; then
   IMG=$("$PY" -c "import yaml,sys; print(yaml.safe_load(open(sys.argv[1]))['docker']['image'])" "$CONFIG")
-  KEY=$(echo "$IMG" | tr '/:' '%+'); [ "${RENDER:-gpu}" = gpu ] && KEY="$KEY+nvidia-$(cat /sys/module/nvidia/version)"
+  MODE=${RENDER:-$("$PY" -c "import yaml,sys; print(yaml.safe_load(open(sys.argv[1])).get('render') or 'gpu')" "$CONFIG")}
+  KEY=$(echo "$IMG" | tr '/:' '%+'); [ "$MODE" = gpu ] && KEY="$KEY+nvidia-$(cat /sys/module/nvidia/version)"
   LOCAL_HOME=/tmp/vla-eval-$USER; mkdir -p "$LOCAL_HOME/charliecloud/.squashfs"
   if [ ! -f "$LOCAL_HOME/charliecloud/.squashfs/$KEY.sqfs" ]; then
     echo "staging $KEY.sqfs on $LOCAL_HOME $(date -Is)"
