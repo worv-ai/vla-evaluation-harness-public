@@ -76,8 +76,7 @@ class Benchmark(ABC):
     #: at startup instead of crashing mid-run.
     render_backends: ClassVar[frozenset[str]] = frozenset({"gpu"})
 
-    #: Set by the runner before ``apply_action``: False while it executes an action chunk open-loop, when the
-    #: step's observation is never fetched. Render-bound simulators may then skip rendering (RoboTwin does).
+    #: False while the runner executes a chunk open-loop and will not fetch this step's observation.
     observation_needed: bool = True
 
     @classmethod

@@ -27,9 +27,8 @@ def split_action_chunk(action: Action) -> list[Action]:
 class SyncEpisodeRunner(EpisodeRunner):
     """Synchronous episode runner: one observation → one action per step.
 
-    With ``open_loop=True`` the runner asks the server (``EPISODE_START.open_loop``) for whole action chunks and
-    executes them without fetching the observations in between, which the buffered path never looked at
-    anyway; ``benchmark.observation_needed`` is False on those steps so a render-bound simulator can skip them.
+    ``open_loop=True``: ask the server for whole action chunks and execute them without observing in between
+    (``benchmark.observation_needed`` is False on those steps, so a render-bound simulator may skip rendering).
 
     Episode flow:
         1. ``benchmark.start_episode(task, recorder=...)``

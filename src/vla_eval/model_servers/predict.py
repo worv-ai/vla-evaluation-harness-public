@@ -221,8 +221,7 @@ class PredictModelServer(ModelServer):
         return self._session_chunk_sizes.get(ctx.session_id, self.chunk_size)
 
     def _open_loop_safe(self) -> bool:
-        """Whole chunks equal the buffered path's actions only when nothing looks at the skipped observations:
-        no ensemble blending and no on_observation override (VLANeXt keeps a per-step history)."""
+        """Whole chunks match the buffered path only if nothing reads the skipped observations."""
         overridden = type(self).on_observation is not PredictModelServer.on_observation
         if self.action_ensemble == "newest" and not overridden:
             return True
