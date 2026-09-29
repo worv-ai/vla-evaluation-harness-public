@@ -118,7 +118,7 @@ def resolve_lavapipe_icd(override_env: str) -> str | None:
 
 
 _LAVAPIPE_SHM_DIR: Final = "/dev/shm"
-_LAVAPIPE_SHM_MIN_FREE: Final = 4 << 30  # Docker's default /dev/shm is 64 MiB: too small to hold a scene
+_LAVAPIPE_SHM_MIN_FREE: Final = 4 << 30  # Docker's default /dev/shm is 64 MiB
 
 
 def _shm_usable() -> bool:
@@ -130,43 +130,35 @@ def _shm_usable() -> bool:
 
 
 def _lavapipe_fallback_dir() -> str:
-    """Where Mesa (util/anon_file.c) keeps its device-memory files when built without memfd_create, as the
-    conda-forge lavapipe is, and ``XDG_RUNTIME_DIR`` is unset. Mesa only stat()s it: a symlink to a directory
-    owned by this user is accepted."""
     return f"/tmp/xdg-runtime-mesa-{os.getuid()}"
 
 
 def keep_lavapipe_memory_on_tmpfs() -> str | None:
-    """Make lavapipe's fallback directory a symlink into ``/dev/shm``.
+    """Symlink lavapipe's device-memory directory into /dev/shm; returns the target, or None if left alone.
 
-    Every rendered frame is written to those (unlinked) files, so on a disk-backed ``/tmp`` a few dozen shards
-    hit dirty-page throttling (SimplerEnv: 0.34 s/step at 16 shards, 6 s/step at 64). Only that directory is
-    touched; a user's own ``XDG_RUNTIME_DIR`` is left alone. Returns the tmpfs directory, or None when nothing
-    was linked (``XDG_RUNTIME_DIR`` set, ``/dev/shm`` missing or too small, a non-empty real directory in the way).
+    The conda-forge lavapipe lacks memfd_create, so Mesa backs every frame with files under $XDG_RUNTIME_DIR
+    or /tmp/xdg-runtime-mesa-<uid> (stat-checked only, so a symlink passes). On a disk that throttles at ~32 shards.
     """
     if os.environ.get("XDG_RUNTIME_DIR"):
         return None
     link = _lavapipe_fallback_dir()
     target = os.path.join(_LAVAPIPE_SHM_DIR, os.path.basename(link))
-    ours = os.path.islink(link) and os.readlink(link) == target
     if not _shm_usable():
-        if ours:  # a link from an earlier run on a shared /tmp must not keep pointing at a full tmpfs
-            os.unlink(link)
+        if os.path.islink(link) and os.readlink(link) == target:
+            os.unlink(link)  # a link from an earlier run must not point at a full tmpfs
         return None
     os.makedirs(target, mode=0o700, exist_ok=True)
-    if os.path.islink(link):
-        return target if ours else None
-    if os.path.isdir(link):  # left by an earlier run on a shared /tmp; Mesa unlinks its files, so it is empty
+    if os.path.isdir(link) and not os.path.islink(link):
         try:
-            os.rmdir(link)
+            os.rmdir(link)  # Mesa unlinks its files, so an earlier run's directory is empty
         except OSError:
-            logger.warning("%s is not empty; lavapipe keeps its device memory there instead of tmpfs", link)
+            logger.warning("%s is not empty; lavapipe keeps its device memory there", link)
             return None
     try:
         os.symlink(target, link)
-    except FileExistsError:  # another shard got there first
-        pass
-    return target
+    except FileExistsError:
+        pass  # another shard, or an earlier run
+    return target if os.path.realpath(link) == os.path.realpath(target) else None
 
 
 def lavapipe_cpu_env(icd: str) -> dict[str, str]:
