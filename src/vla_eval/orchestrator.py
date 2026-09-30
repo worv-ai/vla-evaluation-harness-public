@@ -42,7 +42,7 @@ from vla_eval.tracking import Tracker, call_each, get_reporting_trackers
 
 logger = logging.getLogger(__name__)
 
-UNHEALTHY_AFTER = 3  # a shard whose first episodes all error, this many in a row, is unhealthy and exits
+UNHEALTHY_AFTER = 3  # errors from a shard's first episode on, with no success in between
 
 
 class UnhealthyShardError(RuntimeError):
@@ -153,11 +153,11 @@ class Orchestrator:
         self.shard_id = shard_id
         self.num_shards = num_shards
         self.no_save = no_save
-        self.requeue_unhealthy = requeue_unhealthy  # an unhealthy shard's failed items go back to the queue
+        self.requeue_unhealthy = requeue_unhealthy
         self._episodes_ok = 0
         self._errors_from_start = 0
-        self._failed_items: list[tuple[str, int]] = []  # (entry eval_id, queue item) of errored episodes
-        self._episode_errored = False  # set by record_failure, read after each item
+        self._failed_items: list[tuple[str, int]] = []  # (entry eval_id, queue item)
+        self._episode_errored = False
         self._eval_id = eval_id or str(uuid.uuid4())
         self._sid = str(uuid.uuid4())  # one per shard process
         self._progress_path: Path | None = None
@@ -217,7 +217,7 @@ class Orchestrator:
         return all_results
 
     def _check_health(self, bench_eval_id: str | None, item: int) -> None:
-        """A sharded run's shard whose first UNHEALTHY_AFTER episodes all errored (a dead GPU) exits."""
+        """Exit a sharded run's shard whose first UNHEALTHY_AFTER episodes all errored (a dead GPU)."""
         if self.num_shards is None or self._episodes_ok or not self._episode_errored:
             return
         self._errors_from_start += 1
@@ -405,7 +405,6 @@ class Orchestrator:
                 call_each(self._trackers, "on_episode_end", name, task_name, ep_dict, status)
 
         def my_items() -> Iterator[tuple[int, tuple[int, Any, int]]]:
-            """``(progress, work item)``; progress is entry-wide with a shared queue."""
             if not dynamic:
                 for i, w in enumerate(work_items):
                     yield i, w

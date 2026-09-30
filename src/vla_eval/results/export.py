@@ -205,8 +205,7 @@ def _build_aggregate(
             expected = max(s["num_shards"] for s in shards)
             queue = _queue_counts(conn, eval_id)
             if queue is not None:
-                # Shards shared a queue: the entry is complete when every item is done, whichever shard did it
-                # (a shard that stopped after consecutive errors handed its items back).
+                # Shared queue: complete when every item is done, whichever shard did it.
                 if queue[0] < queue[1]:
                     body["partial"] = True
             elif len(shards) < expected or not all(s["complete"] for s in shards):

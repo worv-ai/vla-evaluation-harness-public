@@ -161,7 +161,7 @@ wait
 vla-eval export "results/recording-$EVAL_ID.sqlite"
 ```
 
-Shards take work items from a queue in the shared recording DB as they free up, preferring the task whose environment they already have loaded, so an entry with few items or long episodes no longer leaves shards idle. A shard whose first three episodes all error (a dead GPU) is unhealthy and exits with code 3; with `--requeue-unhealthy` its items go back to the queue for the other shards, otherwise the errors stand. Each episode's `failure_reason` names the phase that raised (`env_start`, `env_step`, `model_act`). Re-running a shard with the same eval ID resumes its unfinished items; export selects the last committed attempt per work item and lists items nobody finished. With `--no-save` (no DB) the items are shuffled with a fixed seed and split round-robin.
+Shards claim work items from a queue in the shared recording DB (`--no-save`: fixed round-robin split). A shard whose first three episodes all error exits with code 3; `--requeue-unhealthy` gives its items to the other shards. Re-run a shard with the same eval ID to resume its unfinished items; export keeps the last committed attempt per item and lists unfinished ones.
 
 Benchmark containers run as root by default, so `output_dir` ends up root-owned and the host-side `vla-eval export` fails with `Permission denied`. Set `docker.user: host` in the eval YAML (or an explicit `"<uid>:<gid>"`) to run the containers as the invoking user.
 

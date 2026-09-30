@@ -685,7 +685,7 @@ execution flow:
     run_parser.add_argument(
         "--requeue-unhealthy",
         action="store_true",
-        help="When a shard exits unhealthy (its first 3 episodes all errored), put its items back for other shards.",
+        help="Give an unhealthy shard's items (its first 3 episodes all errored) to the other shards.",
     )
     run_parser.add_argument(
         "--gpus",

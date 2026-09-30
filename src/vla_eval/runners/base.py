@@ -15,13 +15,13 @@ from vla_eval.types import EpisodeResult, Task
 
 
 class EpisodeError(RuntimeError):
-    """An episode failed; the subclass says in which phase (recorded as the episode's ``failure_reason``)."""
+    """The subclass names the phase that raised; it becomes the episode's ``failure_reason``."""
 
     phase: ClassVar[str]
 
 
 class EnvStartError(EpisodeError):
-    phase = "env_start"  # benchmark.start_episode / first observation: scene, renderer, robot placement
+    phase = "env_start"  # start_episode + first observation
 
 
 class EnvStepError(EpisodeError):
@@ -29,7 +29,7 @@ class EnvStepError(EpisodeError):
 
 
 class ModelActError(EpisodeError):
-    phase = "model_act"  # conn.act raised inside the server (transport errors keep their own handling)
+    phase = "model_act"  # conn.act (transport errors keep their own handling)
 
 
 @contextmanager
