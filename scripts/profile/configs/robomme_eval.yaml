@@ -1,0 +1,51 @@
+# RoboMME full evaluation (4 suites × 4 tasks × 50 episodes = 800 total)
+server:
+  url: "ws://localhost:8000"
+
+# Lavapipe by default: the native NVIDIA path hangs on some hosts (issue #112).
+# On a known-good host, pass --render gpu for a ~5-10x faster simulator.
+render: cpu
+
+docker:
+  image: ghcr.io/allenai/vla-evaluation-harness/robomme:0.7.0
+  env:
+    - "NVIDIA_DRIVER_CAPABILITIES=all"
+  # If --render gpu cannot enumerate the NVIDIA driver, mount the host ICDs
+  # (shadows the image's lavapipe ICD, so keep it off the cpu default):
+  #   volumes:
+  #     - "/usr/share/vulkan/icd.d:/usr/share/vulkan/icd.d:ro"
+
+output_dir: "./results"
+
+benchmarks:
+  - benchmark: "vla_eval.benchmarks.robomme.benchmark:RoboMMEBenchmark"
+    subname: counting
+    episodes_per_task: 50
+    params:
+      tasks: [BinFill, PickXtimes, SwingXtimes, StopCube]
+      action_space: joint_angle
+      max_steps: 1300
+
+  - benchmark: "vla_eval.benchmarks.robomme.benchmark:RoboMMEBenchmark"
+    subname: permanence
+    episodes_per_task: 50
+    params:
+      tasks: [VideoUnmask, VideoUnmaskSwap, ButtonUnmask, ButtonUnmaskSwap]
+      action_space: joint_angle
+      max_steps: 1300
+
+  - benchmark: "vla_eval.benchmarks.robomme.benchmark:RoboMMEBenchmark"
+    subname: reference
+    episodes_per_task: 50
+    params:
+      tasks: [PickHighlight, VideoRepick, VideoPlaceButton, VideoPlaceOrder]
+      action_space: joint_angle
+      max_steps: 1300
+
+  - benchmark: "vla_eval.benchmarks.robomme.benchmark:RoboMMEBenchmark"
+    subname: imitation
+    episodes_per_task: 50
+    params:
+      tasks: [MoveCube, InsertPeg, PatternLock, RouteStick]
+      action_space: joint_angle
+      max_steps: 1300

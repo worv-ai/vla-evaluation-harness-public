@@ -1,0 +1,23 @@
+# RoboCasa evaluation: the 24 atomic tasks x 50 episodes, each running to its
+# own registry horizon (300-1000 steps) or to first success.
+#
+# Requires ~10GB of kitchen assets from HuggingFace (baked into the image).
+server:
+  url: "ws://localhost:8000"
+
+docker:
+  image: ghcr.io/allenai/vla-evaluation-harness/robocasa:0.7.0
+
+output_dir: "./results"
+
+benchmarks:
+  - benchmark: "vla_eval.benchmarks.robocasa.benchmark:RoboCasaBenchmark"
+    episodes_per_task: 50
+    params:
+      robot: PandaOmron
+      # 128 is the resolution of the released human demonstrations and of
+      # robocasa's own evaluation environment.
+      camera_size: 128
+      obj_instance_split: B
+      eval_scenes: true
+      seed: null
