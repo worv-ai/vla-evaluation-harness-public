@@ -218,6 +218,7 @@ class EvalConfig:
     throughput_mode: bool = False
     # Whether to pace the step loop to real-time (True=real-time, False=max speed)
     paced: bool = True
+    open_loop: bool = False
     # Wait for first action before starting step loop (sanity check: should match sync)
     wait_first_action: bool = False
 
@@ -244,6 +245,7 @@ class EvalConfig:
             hz=data.get("hz", 10.0),
             throughput_mode=data.get("throughput_mode", False),
             paced=_parse_paced(data),
+            open_loop=bool(data.get("open_loop", False)),
             wait_first_action=data.get("wait_first_action", False),
         )
 

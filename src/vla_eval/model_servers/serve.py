@@ -142,6 +142,7 @@ async def _handle_connection(
                     recording_db_path=rec.get("db_path") or "",
                 )
                 ctx._send_action_fn = send_action
+                ctx.open_loop = bool(msg.payload.get("open_loop"))
                 logger.info("EPISODE_START session=%s episode=%s", effective_sid[:8], episode_id[:8])
                 try:
                     await model_server.on_episode_start(msg.payload, ctx)

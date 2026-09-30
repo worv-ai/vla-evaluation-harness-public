@@ -76,6 +76,9 @@ class Benchmark(ABC):
     #: at startup instead of crashing mid-run.
     render_backends: ClassVar[frozenset[str]] = frozenset({"gpu"})
 
+    #: False while the runner executes a chunk open-loop and will not fetch this step's observation.
+    observation_needed: bool = True
+
     @classmethod
     def configure_render(cls, mode: str) -> dict[str, str]:
         """Set process env for *mode* before any simulator import; return the applied env.
