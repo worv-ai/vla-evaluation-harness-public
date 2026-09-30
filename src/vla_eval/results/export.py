@@ -176,6 +176,10 @@ def _build_aggregate(
                 body["partial"] = True
             if len(shards) == 1 and expected > 1:
                 body["shard"] = {"id": shards[0]["shard_id"], "total": expected}
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='work_queue'").fetchone():
+        # Queue mode: shards that stopped on errors report complete; episodes nobody ran are what is missing.
+        if conn.execute("SELECT 1 FROM work_queue WHERE eval_id = ? AND done = 0", (eval_id,)).fetchone():
+            body["partial"] = True
     seed = _extract_seed(config)
     if seed is not None:
         body["seed"] = seed

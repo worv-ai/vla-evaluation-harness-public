@@ -53,6 +53,9 @@ def _effective_recording_config(raw: dict[str, Any] | None, *, no_save: bool) ->
 
 
 _SHARD_SHUFFLE_SEED = 42
+_MAX_ERRORS_IN_A_ROW = (
+    3  # queue mode: a shard takes no more episodes, in any entry, after this many exceptions in a row
+)
 
 
 def _shard_work_items(work_items: list[Any], num_shards: int, shard_id: int) -> list[Any]:
@@ -148,6 +151,7 @@ class Orchestrator:
         self._sid = str(uuid.uuid4())  # one per shard process
         self._progress_path: Path | None = None
         self._progress_last: tuple[int, int, int] | None = None
+        self._errors_in_a_row = 0  # episodes that raised, across entries; see _MAX_ERRORS_IN_A_ROW
         self._store: RecordingStore | None = None
 
         # Trackers are instantiated on every shard so config errors surface
@@ -380,7 +384,14 @@ class Orchestrator:
             assert self._store is not None and self.shard_id is not None and self.num_shards is not None
             self._store.seed_queue(bench_eval_id, [t for t, _, _ in work_items])
             task_idx = None
-            while (item := self._store.claim(bench_eval_id, self.shard_id, task_idx, self.num_shards)) is not None:
+            while True:
+                if self._errors_in_a_row >= _MAX_ERRORS_IN_A_ROW:
+                    # A shard whose simulator broke fails each episode at once and would drain the shared queue.
+                    logger.error("%d episodes in a row raised; this shard takes no more work", self._errors_in_a_row)
+                    return
+                item = self._store.claim(bench_eval_id, self.shard_id, task_idx, self.num_shards)
+                if item is None:
+                    return
                 yield work_items[item]
                 self._store.finish(bench_eval_id, item)  # not reached when the loop aborts: a rerun redoes it
                 task_idx = work_items[item][0]
@@ -415,6 +426,7 @@ class Orchestrator:
                     )
                     self._update_progress(item_idx + 1, total_items, collector.error_count)
                     close_recorder(ep_dict, "success" if success else "fail")
+                    self._errors_in_a_row = 0
                     continue
                 except RecordingError:
                     raise
@@ -482,6 +494,7 @@ class Orchestrator:
                     )
                     fail = record_failure("exception", traceback.format_exc())
                     close_recorder(fail, "error")
+                    self._errors_in_a_row += 1
                     continue
         finally:
             watchdog.pet(f"{safe_name} cleanup")
