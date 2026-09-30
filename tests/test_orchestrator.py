@@ -290,16 +290,19 @@ async def test_broken_shard_stops_taking_queue_work(echo_server, tmp_path):
             for i in range(2)
         ],
     }
+    from vla_eval.results.export import export_eval
+
     with patch("vla_eval.orchestrator.resolve_import_string", return_value=_BrokenStub):
         broken = Orchestrator(config, shard_id=0, num_shards=2, eval_id="ev-b", no_save=False)
         results = await broken.run()
     ran = [ep for r in results for t in r["tasks"] for ep in t["episodes"]]
     assert len(ran) == 3  # across both entries
-    assert all(r["partial"] for r in results)
+    assert all(e.get("partial") for e in export_eval(tmp_path, "ev-b"))  # queued episodes nobody ran
     with patch("vla_eval.orchestrator.resolve_import_string", return_value=StubBenchmark):
         healthy = Orchestrator(config, shard_id=1, num_shards=2, eval_id="ev-b", no_save=False)
         results = await healthy.run()
     assert sum(len(t["episodes"]) for r in results for t in r["tasks"]) == 2 * 10 - 3
+    assert not any(e.get("partial") for e in export_eval(tmp_path, "ev-b"))  # the healthy shard ran the rest
 
 
 @pytest.mark.anyio

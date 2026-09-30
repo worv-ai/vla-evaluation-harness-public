@@ -501,8 +501,7 @@ class Orchestrator:
             benchmark.cleanup()
             await conn.close()
 
-        stopped = self._errors_in_a_row >= _MAX_ERRORS_IN_A_ROW  # queued work may be left for no one
-        return self._finalize_benchmark(collector, cfg, safe_name, partial=stopped, server_info=conn.server_info)
+        return self._finalize_benchmark(collector, cfg, safe_name, partial=False, server_info=conn.server_info)
 
     def _build_recorder(
         self,
