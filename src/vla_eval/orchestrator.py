@@ -155,6 +155,7 @@ class Orchestrator:
         self.no_save = no_save
         self.requeue_unhealthy = requeue_unhealthy  # an unhealthy shard's failed items go back to the queue
         self._episodes_ok = 0
+        self._errors_from_start = 0
         self._failed_items: list[tuple[str, int]] = []  # (entry eval_id, queue item) of errored episodes
         self._episode_errored = False  # set by record_failure, read after each item
         self._eval_id = eval_id or str(uuid.uuid4())
@@ -219,9 +220,10 @@ class Orchestrator:
         """A sharded run's shard whose first UNHEALTHY_AFTER episodes all errored (a dead GPU) exits."""
         if self.num_shards is None or self._episodes_ok or not self._episode_errored:
             return
+        self._errors_from_start += 1
         if bench_eval_id is not None:
             self._failed_items.append((bench_eval_id, item))
-        if len(self._failed_items) < UNHEALTHY_AFTER and not (bench_eval_id is None and item + 1 >= UNHEALTHY_AFTER):
+        if self._errors_from_start < UNHEALTHY_AFTER:
             return
         if self.requeue_unhealthy and self._store is not None and self._failed_items:
             self._store.release(self._failed_items)
