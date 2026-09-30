@@ -17,7 +17,7 @@ Columns: `render` is the backend (`gpu` = the image's native path, `cpu` = softw
 | Benchmark | Tier | Simulator / renderer | GPU-free? | Recommended setup | step/s (agg.) | Protocol size | Est. wall on the unit | Notes |
 |---|:-:|---|:-:|---|--:|--:|--:|---|
 | LIBERO-Plus | 1 | MuJoCo / OSMesa (cpu) or EGL (gpu) | **yes** | cpu, 48–96 shards | 143 @ N=48 (see text) | 10,030 ep × ~300 = 3.0 M | ~3 h cpu-only (128 cores); ~1 h with EGL on 2 GPUs (est.) | Sensor-noise variants 2–3× slower (CPU image corruption) |
-| RoboTwin 2.0 | 1 | SAPIEN 3 ray tracer (32 spp + OIDN) | cpu path exists (#83), 60× slower | gpu, 8 shards/GPU, open-loop chunk 25 (#80) | ~80 per H100 (161 @ 2 GPUs) | 10,000 ep × ≤1,700 (worst 6.2 M; typical ~2.5 M) | ~5.4 h worst / ~2 h typical on 4 GPUs; closed-loop ≈ 4 days | Expert check skipped; `--render cpu` frames are undenoised |
+| RoboTwin 2.0 | 1 | SAPIEN 3 ray tracer (32 spp + OIDN) | cpu path tried (#83, closed), 60× slower | gpu, 8 shards/GPU, `render_every: 25` (#89) | ~80 per H100 (161 @ 2 GPUs) | 10,000 ep × ≤1,700 (worst 6.2 M; typical ~2.5 M) | ~5.4 h worst / ~2 h typical on 4 GPUs; closed-loop ≈ 4 days | Expert check skipped; `--render cpu` frames are undenoised |
 | RoboCasa365 | 2 | MuJoCo / OSMesa or EGL | yes | cpu, 32–48 shards | 103 @ N=64 (peak ~110 @ N=32) | 50 tasks × 50 ep × registry horizon (mean ~1,800, up to 3,600) ≈ 4.5 M | ~12 h cpu-only; est. ~5 h with 2 EGL GPUs | 0.29–0.40 s/step/shard, 5–7 GB/shard; episodes 500–1,300 s, so the queue matters most here |
 | RoboDojo | 2 | Isaac Lab RTX | no (A100 only, one lane per GPU) | | ~0.5–0.8 /lane | 42 tasks × 50 ep | ~12–20 GPU-h per task | H100 crashes upstream's renderer ([reproductions/robodojo.md](reproductions/robodojo.md)); not re-measured here |
 | LIBERO | ref | MuJoCo / OSMesa or EGL | yes | cpu, 64 shards | 158 @ N=64 | 2,000 ep × ~330 = 0.66 M | ~1.2 h cpu-only | 0.27–0.34 s/step/shard; EGL 2.7× faster per shard |
@@ -36,12 +36,9 @@ shared recording SQLite instead of a fixed round-robin split. Under the fixed sp
 3-minute spread. Worse, an entry with fewer items than shards left shards idle in every entry: LIBERO-Plus with 4
 entries × 48 items on 64 or 96 shards only ever used shards 0–47.
 
-**Open-loop action chunks.** `open_loop: true` on a benchmark entry (or `--benchmark-field open_loop=true`)
-makes the sync runner ask the server for whole chunks and execute them without fetching the intermediate
-observations, which are exactly the ones the server would have ignored while draining its buffer. A
-`PredictModelServer` honours the request when that holds (`action_ensemble="newest"`, no `on_observation`
-override) and otherwise keeps buffering. Benchmarks may skip rendering on those steps
-(`Benchmark.observation_needed`); RoboTwin does. The actions are identical to the buffered path.
+**RoboTwin `render_every` (#89).** `params.render_every: N` renders the cameras only every N steps and at the
+episode's end. With a chunk-25 server the skipped frames are exactly the ones the server never looks at while
+draining its buffer, so the actions are unchanged; a model that wants a fresh frame per step keeps N=1.
 
 ## LIBERO-Plus (tier 1)
 
@@ -87,15 +84,15 @@ Per-step components inside the image (`scripts/profile/robotwin_step_timing.py`,
 | CPU lavapipe, rt 16 / 8 / 4 spp (8 threads) | 6.8 / 3.5 / 1.8 s | | linear in spp |
 
 Rendering is 90 % of a closed-loop step on the GPU, and one H100 saturates at roughly 3–4 frames/s across
-processes (earlier measurement: ~3.2 env steps/s per H100 with 1, 2 or 4 processes). With open-loop chunks of
-25 (a common RoboTwin chunk), only 1 step in 25 renders, so a step costs ~0.04 s and one GPU serves ~80 steps/s.
+processes (earlier measurement: ~3.2 env steps/s per H100 with 1, 2 or 4 processes). With `render_every: 25`
+(a common RoboTwin chunk), only 1 step in 25 renders, so a step costs ~0.04 s and one GPU serves ~80 steps/s.
 
-End-to-end via `vla-eval run --render cpu`, open-loop chunk 25, 8 lavapipe threads: a 400-step episode takes
+End-to-end via `vla-eval run --render cpu`, render_every 25, 8 lavapipe threads: a 400-step episode takes
 288 s (0.72 s/step). Frames are the same ray tracer without OIDN denoising, so visibly noisier
 (mean |Δ| 3.9/255 against the GPU frame): a policy trained on denoised frames may react differently; treat the
 CPU path as a fallback for hosts without a GPU, not as the protocol.
 
-A 32-shard CPU sweep (50 tasks × 1 episode, open-loop chunk 25, `LP_NUM_THREADS=4` on 64 cores, before #84)
+A 32-shard CPU sweep (50 tasks × 1 episode, render_every 25, `LP_NUM_THREADS=4` on 64 cores, before #84)
 ran at 1.6 s/step per shard, 8 steps/s for the node: the rendering budget of ~110 core-seconds per frame
 divided by 64 cores gives at most ~0.6 frames/s, i.e. ~15 steps/s with chunk 25 even without contention.
 
@@ -105,10 +102,10 @@ End-to-end on H100s (`vla-eval run`, instant server, 50 tasks × 4 seeds, one no
 |---|--:|--:|--:|--:|---|
 | closed-loop (frame every step) | 1 | 0.31 | 77 % | 12.9 on 3 GPUs (4.3 per GPU) | one shard already saturates a GPU |
 | closed-loop | 2 | — | — | 12.9 | no gain: GPU-bound at ~4 frames/s per GPU |
-| open-loop chunk 25 | 1 | 0.046 | ~0 % | — | physics-bound: 25 × 0.03 s physics per 0.21 s frame |
-| open-loop chunk 25 | 2 | 0.056–0.064 | ~0 % | 92 on 4 GPUs (one dead) | |
-| open-loop chunk 25 | 4 | 0.080 | 6 % | 123 on 2 healthy GPUs | |
-| open-loop chunk 25 | 8 | 0.13 | 67 % | 161 on 2 healthy GPUs | GPU nearly saturated: ~80 steps/s per H100 |
+| render_every 25 | 1 | 0.046 | ~0 % | — | physics-bound: 25 × 0.03 s physics per 0.21 s frame |
+| render_every 25 | 2 | 0.056–0.064 | ~0 % | 92 on 4 GPUs (one dead) | |
+| render_every 25 | 4 | 0.080 | 6 % | 123 on 2 healthy GPUs | |
+| render_every 25 | 8 | 0.13 | 67 % | 161 on 2 healthy GPUs | GPU nearly saturated: ~80 steps/s per H100 |
 
 (One GPU of each allocation on that node was intermittently unreachable — `Failed to find a supported physical
 device "cuda:0"` on the shards mapped to it — which is what #78's consecutive-error stop now handles: the last
@@ -116,7 +113,7 @@ run's dead shards stopped after 5 errors and handed their items back, 17 errors 
 columns count only healthy GPUs.)
 
 Full protocol (50 tasks × 2 configs × 100 episodes; step limits sum to 31,000 per 100-episode sweep, so the
-worst case is 6.2 M steps, a typical run with early successes ~2.5 M): with open-loop chunk 25 a GPU renders
+worst case is 6.2 M steps, a typical run with early successes ~2.5 M): with render_every 25 a GPU renders
 ~4 frames/s ≈ 80 steps/s at 8 shards per GPU (measured 161 steps/s on two), so **4 GPUs ≈ 320 steps/s ≈ 5.4 h
 worst case**, ~2 h typical, with ~32 shards, 1 core and 4.5 GB each; closed-loop (render every step) ≈ 4.3
 steps/s per GPU ≈ 17 steps/s on four ≈ 4 days. CPU-only on 64 cores: ≈ 8–15

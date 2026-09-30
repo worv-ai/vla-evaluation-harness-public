@@ -20,7 +20,7 @@ def main() -> None:
     p.add_argument("--render", default="?")
     p.add_argument("--gpus", type=int, default=0)
     p.add_argument("--chunk", type=int, default=1)
-    p.add_argument("--open-loop", type=int, default=0)
+    p.add_argument("--render-every", type=int, default=1)
     a = p.parse_args()
     out = Path(a.out)
 

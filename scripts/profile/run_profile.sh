@@ -8,7 +8,7 @@
 #   HOLD_KEY     observation key echoed as the action (RoboTwin: joint_state)
 #   OBS_PARAMS   JSON for the server's get_observation_params()
 #   CHUNK_SIZE   server chunk size (default 1: every env step asks the server)
-#   OPEN_LOOP=1  the client executes whole chunks without observing in between (--benchmark-field open_loop=true)
+#   RENDER_EVERY=N  RoboTwin renders only every N steps (--param render_every=N)
 #   RUN_ARGS     extra `vla-eval run` args, e.g. "--benchmark-field episodes_per_task=2 --benchmark-field max_tasks=4"
 #   VLA          vla-eval executable (default: this checkout's .venv); DEV=1 mounts this checkout's src (--dev)
 #   SERVER_URL   use an already running server instead of the dummy one
@@ -42,7 +42,7 @@ fi
 SPID=; MON=
 cleanup() { kill -TERM $(jobs -p) 2>/dev/null; [ -n "$SPID" ] && kill -TERM -- -$SPID 2>/dev/null; true; }
 trap cleanup EXIT INT TERM
-echo "=== $EVAL_ID config=$CONFIG shards=$SHARDS chunk=${CHUNK_SIZE:-1} open_loop=${OPEN_LOOP:-0} render=${RENDER:-config} gpus=[${GPUS[*]:-}] node=$(hostname) cpus=${SLURM_CPUS_ON_NODE:-?} $(date -Is)"
+echo "=== $EVAL_ID config=$CONFIG shards=$SHARDS chunk=${CHUNK_SIZE:-1} render_every=${RENDER_EVERY:-1} render=${RENDER:-config} gpus=[${GPUS[*]:-}] node=$(hostname) cpus=${SLURM_CPUS_ON_NODE:-?} $(date -Is)"
 
 if [ -z "${SERVER_URL:-}" ]; then
   SERVER_URL=ws://127.0.0.1:$PORT
@@ -66,12 +66,12 @@ T0=$(date +%s); FAILED=0; pids=()
 for i in $(seq 0 $((SHARDS - 1))); do
   genv="CUDA_VISIBLE_DEVICES="; [ ${#GPUS[@]} -gt 0 ] && genv="CUDA_VISIBLE_DEVICES=${GPUS[$((i % ${#GPUS[@]}))]}"
   env $genv "$VLA" run --yes --server-url "$SERVER_URL" --output-dir "$OUT" --eval-id "$EVAL_ID" ${RENDER:+--render $RENDER} \
-    ${DEV:+--dev} ${OPEN_LOOP:+--benchmark-field open_loop=true} ${RUN_ARGS:-} -c "$CONFIG" --shard-id "$i" --num-shards "$SHARDS" > "$OUT/logs/shard$i.log" 2>&1 &
+    ${DEV:+--dev} ${RENDER_EVERY:+--param render_every=$RENDER_EVERY} ${RUN_ARGS:-} -c "$CONFIG" --shard-id "$i" --num-shards "$SHARDS" > "$OUT/logs/shard$i.log" 2>&1 &
   pids+=($!); sleep 0.3
 done
 for p in "${pids[@]}"; do wait "$p" || FAILED=$((FAILED + 1)); done
 T1=$(date +%s)
 echo "shards done in $((T1 - T0)) s, failed processes: $FAILED  $(date -Is)"
 grep -h "^profile " "$OUT/logs/server.log" 2>/dev/null | tail -1 || true
-"$PY" "$HERE/summarize.py" "$OUT" "$EVAL_ID" --shards "$SHARDS" --wall $((T1 - T0)) --render "${RENDER:-config}" --gpus "${#GPUS[@]}" --chunk "${CHUNK_SIZE:-1}" --open-loop "${OPEN_LOOP:-0}" | tee "$OUT/summary.txt"
+"$PY" "$HERE/summarize.py" "$OUT" "$EVAL_ID" --shards "$SHARDS" --wall $((T1 - T0)) --render "${RENDER:-config}" --gpus "${#GPUS[@]}" --chunk "${CHUNK_SIZE:-1}" --render-every "${RENDER_EVERY:-1}" | tee "$OUT/summary.txt"
 [ "$FAILED" = 0 ]
