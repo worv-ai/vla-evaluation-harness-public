@@ -140,7 +140,8 @@ class LiveEpisodeRunner(EpisodeRunner):
                 await clock.wait_until(step_start + step_period)
 
         elapsed = clock.time()
-        bench_metrics = await benchmark.get_result()
+        with phase(EnvStepError):
+            bench_metrics = await benchmark.get_result()
         episode_result: dict = {"metrics": bench_metrics, "steps": step_count, "elapsed_sec": round(elapsed, 3)}
 
         # Real-time metrics
