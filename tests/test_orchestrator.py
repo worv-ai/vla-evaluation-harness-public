@@ -266,6 +266,41 @@ async def test_orchestrator_shards_share_a_work_queue(echo_server, tmp_path):
     assert sorted(keys) == sorted({(f"task_{t}", e) for t in range(2) for e in range(3)})
 
 
+class _BrokenStub(StubBenchmark):
+    """Every reset raises, as a simulator whose renderer died does."""
+
+    def reset(self, task):
+        raise RuntimeError("renderer gone")
+
+
+@pytest.mark.anyio
+async def test_broken_shard_stops_taking_queue_work(echo_server, tmp_path):
+    """A shard whose episodes keep raising stops claiming, so it cannot drain the queue shared with healthy ones."""
+    config = {
+        "server": {"url": echo_server},
+        "output_dir": str(tmp_path),
+        "benchmarks": [
+            {
+                "benchmark": "tests.conftest:StubBenchmark",
+                "name": f"entry{i}",
+                "episodes_per_task": 5,
+                "max_steps": 50,
+                "params": {"done_at_step": 2, "num_tasks": 2},
+            }
+            for i in range(2)
+        ],
+    }
+    with patch("vla_eval.orchestrator.resolve_import_string", return_value=_BrokenStub):
+        broken = Orchestrator(config, shard_id=0, num_shards=2, eval_id="ev-b", no_save=False)
+        results = await broken.run()
+    ran = [ep for r in results for t in r["tasks"] for ep in t["episodes"]]
+    assert len(ran) == 3  # across both entries
+    with patch("vla_eval.orchestrator.resolve_import_string", return_value=StubBenchmark):
+        healthy = Orchestrator(config, shard_id=1, num_shards=2, eval_id="ev-b", no_save=False)
+        results = await healthy.run()
+    assert sum(len(t["episodes"]) for r in results for t in r["tasks"]) == 2 * 10 - 3
+
+
 @pytest.mark.anyio
 async def test_orchestrator_records_by_default_without_recording_block(echo_server, tmp_path):
     """Absent ``recording:`` still records episode results + step rows, with video off."""
