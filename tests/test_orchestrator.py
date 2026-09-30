@@ -295,6 +295,7 @@ async def test_broken_shard_stops_taking_queue_work(echo_server, tmp_path):
         results = await broken.run()
     ran = [ep for r in results for t in r["tasks"] for ep in t["episodes"]]
     assert len(ran) == 3  # across both entries
+    assert all(r["partial"] for r in results)
     with patch("vla_eval.orchestrator.resolve_import_string", return_value=StubBenchmark):
         healthy = Orchestrator(config, shard_id=1, num_shards=2, eval_id="ev-b", no_save=False)
         results = await healthy.run()
