@@ -1,0 +1,28 @@
+# FAITHFUL cat-balanced cross-emb eval for checkpoint-4000.
+# Per the SeeTraceAct paper, each split is evaluated with a SEPARATELY-TRAINED model that holds
+# out only its own 5 tasks. Our checkpoint-4000 held out exactly the 5 category-balanced tasks
+# (robocasa_dc_val_tasks), so this is its ONE valid unseen split — compare to paper cat-bal
+# cross-emb 11.6%. (The 5 precision-sensitive tasks are SEEN by this model; scoring them as
+# "unseen" needs a second model that holds them out.)
+# max_steps=1000 matches eval.py's RestoredEvaluationConfig default (was wrongly 300 = 3.3x short).
+server:
+  url: "ws://localhost:8000"
+  timeout: 300
+
+output_dir: "./gating_cat"
+
+benchmarks:
+  - benchmark: "vla_eval.benchmarks.robocasa_dc.benchmark:RoboCasaDCBenchmark"
+    mode: sync
+    episodes_per_task: 50
+    recording:
+      record_video: false
+      record_step: false
+    params:
+      predefined_envs_root: "${oc.env:ROBOCASA_DC_EVAL_ENVS,data/robocasa_dc/eval_envs}"
+      robocasa_eval_py: "${oc.env:ROBOCASA_DC_EVAL_PY,/path/to/SeeTraceAct/src/robocasa/eval.py}"
+      robots: PandaOmron
+      controllers: OSC_POSE
+      camera_size: 128
+      max_steps: 1000
+      tasks: ["CloseDrawer", "TurnOffSinkFaucet", "OpenDoubleDoor", "CoffeeServeMug", "PnPCounterToMicrowave"]
