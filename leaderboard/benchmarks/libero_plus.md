@@ -17,7 +17,6 @@ suites:
 - background
 - noise
 - layout
-detail_notes: "LIBERO-Plus (<a href='https://arxiv.org/abs/2510.13626'>2510.13626</a>). Robustness benchmark applying 7 perturbation dimensions (Camera, Robot, Language, Light, Background, Noise, Layout) to LIBERO tasks. Models are trained on standard LIBERO and evaluated zero-shot under perturbations. <strong>overall_score = arithmetic mean of the 7 perturbation dimensions</strong>. Entries reporting fewer than 7 dimensions have overall_score = null."
 aggregation:
   container: suite_scores
   keys:

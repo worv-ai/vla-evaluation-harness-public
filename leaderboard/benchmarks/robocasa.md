@@ -41,7 +41,6 @@ score_key_suffixes:
 - panda
 - gr1
 aggregation: forbidden
-detail_notes: "Two embodiments share a single benchmark: <strong>Panda</strong> (Mobile Franka in RoboCasa kitchens, <a href='https://arxiv.org/abs/2406.02523'>2406.02523</a>, 24 atomic tasks) and <strong>GR1</strong> (Fourier GR1 humanoid tabletop pick-and-place, <a href='https://arxiv.org/abs/2503.14734'>2503.14734</a>, 24 PnP tasks). Scores across embodiments are not directly comparable; <code>overall_score</code> is always <code>null</code>. Each embodiment's 24-task mean goes in <code>suite_scores.&lt;panda|gr1&gt;</code>; per-task scores take the <code>_panda</code> or <code>_gr1</code> suffix to disambiguate. The same team's successor benchmark <strong>RoboCasa365</strong> (<a href='https://arxiv.org/abs/2603.04356'>2603.04356</a>, different 50-task protocol) maintains its own <a href='https://robocasa.ai/leaderboard.html'>official leaderboard</a>."
 ---
 
 **Standard**: two independent embodiments, each with its own 24-task protocol:

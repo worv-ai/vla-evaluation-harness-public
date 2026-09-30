@@ -15,7 +15,6 @@ tasks:
 - RememberColor5
 - RememberColor9
 - ShellGameTouch
-detail_notes: "Standard protocol: 5-task VLA evaluation (ShellGameTouch, InterceptMedium, RememberColor3/5/9) from the MIKASA paper, endorsed by MemoryVLA (ICLR 2026). <code>overall_score</code> = arithmetic mean of 5 tasks. Entries using non-standard task sets (e.g., ELMUR 4-task) have <code>overall_score</code> = null."
 aggregation:
   container: task_scores
   keys:

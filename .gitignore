@@ -46,5 +46,7 @@ src/vla_eval/_version.py
 
 .claude/scheduled_tasks.lock
 
-# Leaderboard local cache (extract.py / refine.py working files)
+# Leaderboard preview and review scratch files
 leaderboard/.cache/
+
+_site/

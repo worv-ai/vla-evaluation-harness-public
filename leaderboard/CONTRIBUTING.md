@@ -1,90 +1,32 @@
-# Contributing to the VLA Leaderboard
+# Updating results
 
-> **Note on evaluation protocols:** Benchmark evaluation protocols are not fully standardized across the VLA community. Different papers may use the same benchmark name but differ in training regimes, task subsets, or evaluation conditions, so scores are not always directly comparable. This leaderboard records all available results transparently and documents known protocol differences, but gaps remain. We actively welcome contributions: score corrections, missing results, protocol clarifications, and proposals for standardization.
+1. Read [shared rules](benchmarks/_global.md) and the relevant benchmark definition.
+2. Read the primary source with Paperstack. Add or correct rows in
+   `results/<benchmark>.jsonl`; [the schema](results.schema.json) lists fields.
+3. Preserve existing row identity and `date_added` on corrections; set `updated`.
+   A row is identified by `(benchmark, model, weight_type)`. Distinguish genuinely
+   different method variants in `model`, not by silently overwriting them.
+4. Validate and inspect the preview, including the changed comparison and source
+   details. Describe source checks and unresolved cases in the PR.
 
-## Local Setup
-
-`leaderboard/data/{leaderboard,extractions,scan_results}.json` are stored in **Git LFS** (see `leaderboard/data/.gitattributes`). Without LFS smudging, scripts will read pointer files and fail. Once per machine:
-
-```
-git lfs install                 # install the LFS hooks
-git lfs pull                    # smudge any pointer files in the current checkout
-```
-
-CI workflows (`pages.yml`, `update-data.yml`, `leaderboard-validate.yml`) already pass `lfs: true` to `actions/checkout`.
-
-## Data Structure
-
-Data is split into focused files under `leaderboard/data/`:
-
-| File | Contents |
-|------|----------|
-| `leaderboard.json` | Curated entries (`last_updated` + `results[]`) |
-| `benchmarks.json` | Benchmark registry (build artifact; see below) |
-| `citations.json` | Per-paper citation counts from Semantic Scholar |
-| `coverage.json` | Per-benchmark coverage stats |
-| `extractions.json` | Packed per-paper extractions (optional, for reproducibility) |
-
-### Schemas (single source of truth)
-
-Every field in the data files is defined in a JSON Schema with inline descriptions. Consult the schema before writing code, prompts, or docs; do not re-describe field semantics elsewhere.
-
-| Schema | Covers |
-|--------|--------|
-| `leaderboard.schema.json` | `leaderboard.json`: final curated entries |
-| `benchmarks.schema.json` | `benchmarks.json`: registry shape |
-| `extraction.schema.json` | One paper's extract.py output. `extractions.json` is an array of these. |
-| `candidates.schema.json` | `.cache/refine_candidates.json`: refine-stage input |
-
-Per-benchmark protocol (Standard / Scoring / Checks / Methodology) lives in `leaderboard/benchmarks/{key}.md`. Frontmatter compiles into `benchmarks.json`; the markdown body is the LLM-facing protocol prose consumed by `extract.py` and `refine.py`.
-
-**`benchmarks.json` is a build artifact; never edit it directly.** After editing any frontmatter, rebuild:
-
-```
-python leaderboard/scripts/build_benchmarks_json.py
+```bash
+uv sync --only-group leaderboard --only-group dev
+uv run --no-sync python leaderboard/scripts/build.py --check
+uv run --no-sync pytest leaderboard/tests
+node --test leaderboard/tests/test_site.cjs
+uv run --no-sync python leaderboard/scripts/build.py
 ```
 
-CI runs `build_benchmarks_json.py --check` on every PR. If the committed `benchmarks.json` diverges from the md sources, the PR fails. Per-benchmark coverage (reviewed-paper counts) is derived from extraction records by `scan.py`, not stored in `benchmarks.json`.
+New rows should include a versioned `reported_paper`, `reported_table` (or page /
+figure), a short literal `evidence` excerpt, the actual `curated_by` identity, and
+`score_basis` for aggregates. Use `model_paper` for the method's origin; the
+reporting source may be different. Unknown weights remain `unknown`.
 
-## How to Add Results
+Do not fill missing scores with zero. A missing aggregate can coexist with
+comparable components. Document computed aggregates in `notes` and include all
+components required by the benchmark's declared aggregation rule. Validation
+catches structural errors; it does not verify that a paper supports a number.
 
-1. **Add entries** to the `results` array (sorted by `benchmark, model`). Field shape and provenance rules are in `leaderboard.schema.json`; attribution cases (first-party vs third-party) are in `candidates.schema.json`'s `row_type` field description.
-
-2. **Update `last_updated`**: Set `last_updated` in `leaderboard.json` to today's date (`YYYY-MM-DD`) when adding or modifying result data.
-
-3. **Validate**: `python leaderboard/scripts/validate.py`
-   - Auto-fix sort order and formatting: `python leaderboard/scripts/validate.py --fix`
-
-4. **Update coverage** (optional): `python leaderboard/scripts/scan.py [--check]`  (default refreshes pools via S2; `--check` re-derives coverage only)
-
-5. **Test locally**: `cd leaderboard/site && python -m http.server`
-
-## Automated Extraction Pipeline
-
-Paper-sourced entries are produced by:
-
-```
-scan.py                      # S2 /citations → data/scan_results.json + data/coverage.json
-extract.py run --from-scan   # per-paper LLM extraction → .cache/extractions/
-refine.py main               # protocol gate + per-benchmark LLM refinement → leaderboard.json
-```
-
-Field semantics live in the schema files above. `extract.py` and `refine.py` both load their respective schemas at runtime; the prompts reference the schema, not duplicate its field rules.
-
-## External Leaderboard Policy
-
-Benchmarks whose authors maintain their own leaderboard (RoboArena, RoboChallenge, RoboCasa365, RoboDojo, MolmoSpaces-Bench, RoboTwin 2.0) are **link-out only**:
-
-- Set `external_only: true` and `official_leaderboard: <url>` in the benchmark's `.md` frontmatter. The site renders these as link cards; results stay on the official board.
-- `leaderboard.json` must contain **zero** rows for these benchmarks. `validate.py` enforces this. Do not build scrapers or API mirrors: mirrored rows go stale between syncs, need manual model-to-paper mapping, and diverge from the authoritative source (the previous RoboChallenge/RoboArena API sync was retired for these reasons in 2026-07).
-- If papers start reporting a protocol's numbers routinely, paper extraction can be enabled by removing `external_only` and defining the full protocol in the `.md` (keep `official_leaderboard`, which then renders as a "may be outdated" notice instead).
-
-## CI/CD
-
-- **`leaderboard-validate.yml`**: Runs `validate.py` on every PR touching `leaderboard.json` or `citations.json`
-- **`pages.yml`**: Deploys to GitHub Pages on push to main; regenerates `coverage.json` and `citations.json`
-- **`update-data.yml`**: Refreshes citation counts and coverage stats bi-weekly (1st and 15th, 06:00 UTC) and opens a PR with updates. Can also be triggered manually via `workflow_dispatch`.
-
-## Benchmark Protocols
-
-Per-benchmark Standard, Scoring, Checks, and Methodology axes live in `leaderboard/benchmarks/{key}.md`. That file is the single source; this document does not mirror it.
+To add a comparison, update its benchmark Markdown and schema if necessary.
+Do not combine different task sets or protocols just to produce an overall rank.
+To add an external board, edit `external.json`; it has no local result rows.

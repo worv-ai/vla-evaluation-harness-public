@@ -2,22 +2,19 @@ name: Leaderboard Validate
 on:
   pull_request:
     paths:
-      - 'leaderboard/data/**.json'
-      - 'leaderboard/scripts/*.py'
-      - 'leaderboard/benchmarks/*.md'
+      - 'leaderboard/**'
+      - 'skills/update-leaderboard/**'
+      - '.github/workflows/leaderboard-validate.yml'
+      - 'pyproject.toml'
 
 jobs:
   validate:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-        with:
-          # leaderboard/data/{extractions,leaderboard,scan_results}.json
-          # live in LFS; validate.py reads them, so pull the real blobs.
-          lfs: true
-      - uses: actions/setup-python@v7
-        with:
-          python-version: '3.11'
-      - run: pip install jsonschema pyyaml
-      - run: python leaderboard/scripts/build_benchmarks_json.py --check
-      - run: python leaderboard/scripts/validate.py
+      - uses: astral-sh/setup-uv@v7
+      - run: uv sync --python 3.11 --only-group leaderboard --only-group dev
+      - run: uv run --no-sync python leaderboard/scripts/build.py --check
+      - run: uv run --no-sync pytest leaderboard/tests
+      - run: node --test leaderboard/tests/test_site.cjs
+      - run: uv run --no-sync python leaderboard/scripts/build.py --output _site/leaderboard
