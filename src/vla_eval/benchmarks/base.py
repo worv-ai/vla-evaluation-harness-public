@@ -1,12 +1,14 @@
 """Benchmark ABCs: the environment interface for evaluation.
 
-Two classes:
-
-* :class:`Benchmark` — async, universal contract.  Runners depend only on
-  this.  Suitable for both simulation and real-robot environments.
+* :class:`BenchmarkCommon` — what every benchmark declares: tasks, render backends,
+  action/observation specs, metrics, metadata, the real-time hold, cleanup.
+* :class:`Benchmark` — async, universal contract for one environment.  Runners depend
+  only on this.  Suitable for both simulation and real-robot environments.
 * :class:`StepBenchmark` — sync convenience subclass.  Users implement
   ``reset`` / ``step`` / ``make_obs`` and the class auto-bridges to the
   async parent methods.
+* :class:`VectorStepBenchmark` — sync, ``num_envs`` environments stepped together
+  (GPU-parallel simulators).  The harness runs up to ``num_envs`` episodes at once.
 """
 
 from __future__ import annotations
@@ -47,29 +49,13 @@ class StepResult:
 
 
 # ---------------------------------------------------------------------------
-# Async Benchmark ABC (parent)
+# Benchmark ABCs
 # ---------------------------------------------------------------------------
 
 
-class Benchmark(ABC):
-    """Universal async benchmark contract.
-
-    Runners call these methods — they never touch sync helpers directly.
-
-    Command methods (mutate state):
-        - ``start_episode(task)`` → None (stores env internally).
-        - ``apply_action(action)`` → None (actuate only).
-
-    Query methods (read state):
-        - ``get_observation()`` → observation dict for the model server.
-        - ``is_done()`` → bool.
-        - ``get_time()`` → environment time in seconds.
-
-    Data methods:
-        - ``get_tasks()`` → list of task dicts.
-        - ``get_result()`` → episode result dict.
-        - ``get_metadata()`` → benchmark defaults / metadata.
-    """
+class BenchmarkCommon(ABC):
+    """What every benchmark declares, whatever it steps: its tasks, render backends,
+    action/observation specs, aggregated metrics, metadata, real-time hold and cleanup."""
 
     #: Render backends this benchmark can run on (see ``render: gpu|cpu`` / ``--render``).
     #: Default is GPU-only, so a benchmark that has not been verified on CPU fails fast
@@ -100,35 +86,6 @@ class Benchmark(ABC):
     @abstractmethod
     def get_tasks(self) -> list[Task]:
         """Return the list of tasks this benchmark provides."""
-
-    # -- abstract: commands -----------------------------------------------
-
-    @abstractmethod
-    async def start_episode(self, task: Task, recorder: EpisodeRecorder | None = None) -> None:
-        """Initialise an episode. ``recorder`` is always non-None (Null when recording is off),
-        so subclasses can call ``recorder.record_*`` unconditionally."""
-
-    @abstractmethod
-    async def apply_action(self, action: Action) -> None:
-        """Execute *action* in the environment (fire-and-forget)."""
-
-    # -- abstract: queries ------------------------------------------------
-
-    @abstractmethod
-    async def get_observation(self) -> Observation:
-        """Read the current observation from the environment."""
-
-    @abstractmethod
-    async def is_done(self) -> bool:
-        """Return ``True`` when the episode should end."""
-
-    @abstractmethod
-    async def get_time(self) -> float:
-        """Return the current environment time (seconds since episode start)."""
-
-    @abstractmethod
-    async def get_result(self) -> EpisodeResult:
-        """Return the episode result (at least ``{"success": bool}``)."""
 
     # -- optional overrides -----------------------------------------------
 
@@ -199,6 +156,56 @@ class Benchmark(ABC):
     def render(self) -> np.ndarray | None:
         """Render current env state as image. Optional override."""
         return None
+
+
+class Benchmark(BenchmarkCommon):
+    """Universal async benchmark contract.
+
+    Runners call these methods — they never touch sync helpers directly.
+
+    Command methods (mutate state):
+        - ``start_episode(task)`` → None (stores env internally).
+        - ``apply_action(action)`` → None (actuate only).
+
+    Query methods (read state):
+        - ``get_observation()`` → observation dict for the model server.
+        - ``is_done()`` → bool.
+        - ``get_time()`` → environment time in seconds.
+
+    Data methods:
+        - ``get_tasks()`` → list of task dicts.
+        - ``get_result()`` → episode result dict.
+        - ``get_metadata()`` → benchmark defaults / metadata.
+    """
+
+    # -- abstract: commands -----------------------------------------------
+
+    @abstractmethod
+    async def start_episode(self, task: Task, recorder: EpisodeRecorder | None = None) -> None:
+        """Initialise an episode. ``recorder`` is always non-None (Null when recording is off),
+        so subclasses can call ``recorder.record_*`` unconditionally."""
+
+    @abstractmethod
+    async def apply_action(self, action: Action) -> None:
+        """Execute *action* in the environment (fire-and-forget)."""
+
+    # -- abstract: queries ------------------------------------------------
+
+    @abstractmethod
+    async def get_observation(self) -> Observation:
+        """Read the current observation from the environment."""
+
+    @abstractmethod
+    async def is_done(self) -> bool:
+        """Return ``True`` when the episode should end."""
+
+    @abstractmethod
+    async def get_time(self) -> float:
+        """Return the current environment time (seconds since episode start)."""
+
+    @abstractmethod
+    async def get_result(self) -> EpisodeResult:
+        """Return the episode result (at least ``{"success": bool}``)."""
 
 
 # ---------------------------------------------------------------------------
@@ -277,3 +284,70 @@ class StepBenchmark(Benchmark, ABC):
 
     async def get_result(self) -> EpisodeResult:
         return self.get_step_result(self._last_result)
+
+
+# ---------------------------------------------------------------------------
+# Vectorized (several environments stepped together)
+# ---------------------------------------------------------------------------
+
+
+class VectorStepBenchmark(BenchmarkCommon):
+    """Sync benchmark over ``num_envs`` environments stepped together.
+
+    For simulators that step many environments per call (MuJoCo Warp / mjlab, ManiSkill3
+    on the GPU, Isaac Lab): one process holds them all, and the harness runs up to
+    ``num_envs`` episodes at once.  Each running episode has its own model-server
+    session (its own connection), and their observations go out concurrently, so a
+    batching model server (``PredictModelServer``) infers them in one batch.  Sync mode
+    only: the environments step when every running episode has its action.
+
+    Slots are the environment indices ``0 .. num_envs - 1``.  Subclasses implement:
+
+        - ``reset(slots, tasks, recorders)`` → the first raw observation of each slot:
+          start the episode ``tasks[i]`` in environment ``slots[i]``, recording through
+          ``recorders[i]`` (never None; Null when recording is off).
+        - ``step(actions)`` → ``{slot: StepResult}``: advance every environment one step.
+          ``actions`` maps each running slot to its action and the result holds those
+          slots.  A slot missing from ``actions`` is idle: keep it inert (hold its targets,
+          or ignore it); its state does not matter until it is reset.
+        - ``make_obs(raw_obs, slot, task)`` → observation dict for the model server.
+        - ``get_step_result(slot, step_result)`` → EpisodeResult (at least ``success``).
+        - ``check_done(step_result)`` → bool (default: ``step_result.done``).
+
+    ``partial_reset``: ``True`` when ``reset`` may start some slots while others are
+    mid-episode (per-environment resets), so a finished slot takes the next episode at
+    once.  ``False`` (the default) when the environments start together: the harness
+    resets only when no slot is running and runs the episodes in waves of up to
+    ``num_envs``; a slot that finishes early idles until its wave ends.
+
+    The harness counts steps and ``max_steps`` per episode, and measures each episode's
+    ``elapsed_sec`` as wall time from its reset.
+    """
+
+    partial_reset: ClassVar[bool] = False
+
+    def __init__(self, num_envs: int = 1) -> None:
+        super().__init__()
+        if num_envs < 1:
+            raise ValueError(f"num_envs must be >= 1, got {num_envs}")
+        self.num_envs = num_envs
+
+    @abstractmethod
+    def reset(self, slots: list[int], tasks: list[Task], recorders: list[EpisodeRecorder]) -> list[Any]:
+        """Start ``tasks[i]`` in environment ``slots[i]``; return the first raw observation of each."""
+
+    @abstractmethod
+    def step(self, actions: dict[int, Action]) -> dict[int, StepResult]:
+        """Advance every environment one step; return a result for each slot in ``actions``."""
+
+    @abstractmethod
+    def make_obs(self, raw_obs: Any, slot: int, task: Task) -> Observation:
+        """Convert slot ``slot``'s raw observation to the model server's :class:`Observation` format."""
+
+    @abstractmethod
+    def get_step_result(self, slot: int, step_result: StepResult) -> EpisodeResult:
+        """Extract the episode result of slot ``slot`` from its final :class:`StepResult`."""
+
+    def check_done(self, step_result: StepResult) -> bool:
+        """Check if a slot's episode should terminate. Default: ``step_result.done``."""
+        return step_result.done

@@ -8,7 +8,14 @@ from typing import Any
 from vla_eval import watchdog
 from vla_eval.benchmarks.base import Benchmark
 from vla_eval.recording import EpisodeRecorder
-from vla_eval.runners.base import EnvStartError, EnvStepError, EpisodeRunner, ModelActError, phase
+from vla_eval.runners.base import (
+    EnvStartError,
+    EnvStepError,
+    EpisodeRunner,
+    ModelActError,
+    episode_start_payload,
+    phase,
+)
 from vla_eval.types import EpisodeResult, Task
 
 
@@ -41,16 +48,7 @@ class SyncEpisodeRunner(EpisodeRunner):
             await benchmark.start_episode(task, recorder=recorder)
             obs_dict = await benchmark.get_observation()
 
-        task_info = {k: v for k, v in task.items() if isinstance(v, (str, int, float, bool, list))}
-        ep_payload: dict[str, Any] = {"task": task_info}
-        if recorder is not None and recorder.is_active:
-            ep_payload["recording"] = {
-                "sid": recorder.sid,
-                "eid": recorder.eid,
-                "eval_id": recorder.eval_id,
-                "db_path": recorder.db_path,
-            }
-        await conn.start_episode(ep_payload)
+        await conn.start_episode(episode_start_payload(task, recorder))
 
         steps = range(max_steps) if max_steps is not None else itertools.count()
         for step in steps:

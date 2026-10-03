@@ -24,7 +24,7 @@ from vla_eval import watchdog
 from vla_eval.benchmarks.base import Benchmark
 from vla_eval.recording import EpisodeRecorder
 from vla_eval.runners.action_buffer import ActionBuffer
-from vla_eval.runners.base import EnvStartError, EnvStepError, EpisodeRunner, phase
+from vla_eval.runners.base import EnvStartError, EnvStepError, EpisodeRunner, episode_start_payload, phase
 from vla_eval.runners.clock import Clock
 from vla_eval.types import EpisodeResult, Task
 
@@ -77,16 +77,7 @@ class LiveEpisodeRunner(EpisodeRunner):
             await benchmark.start_episode(task, recorder=recorder)
             obs_dict = await benchmark.get_observation()
 
-        task_info = {k: v for k, v in task.items() if isinstance(v, (str, int, float, bool, list))}
-        ep_payload: dict[str, Any] = {"task": task_info, "mode": "live"}
-        if recorder is not None and recorder.is_active:
-            ep_payload["recording"] = {
-                "sid": recorder.sid,
-                "eid": recorder.eid,
-                "eval_id": recorder.eval_id,
-                "db_path": recorder.db_path,
-            }
-        await conn.start_episode(ep_payload)
+        await conn.start_episode(episode_start_payload(task, recorder, mode="live"))
 
         # Stale-tick hold is embodiment-owned; get_hold_action(None) also covers
         # the pre-first-action fallback. Raises if the benchmark hasn't declared it.
