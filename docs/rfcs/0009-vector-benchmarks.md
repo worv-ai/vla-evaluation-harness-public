@@ -22,8 +22,9 @@ hundreds of environments in one kernel launch; one environment per process leave
 device nearly idle and pays the per-step launch and synchronisation cost once per
 environment.  Episode sharding (RFC-0006) parallelises across processes, each with its
 own GPU context and a single environment, which is the expensive end of the trade.  On
-an mjlab benchmark the harness ran an episode in about 40 s with one environment; the
-same simulator rolls out 64 environments together at under 2 s per episode.
+an mjlab benchmark (430 steps per episode, three rendered cameras, one A100, a model
+server that answers at once), one environment ran an episode in about 40 s; with this
+runner, 32 environments ran 32 episodes in 3 min 11 s, 6.0 s per episode.
 
 ## Design
 

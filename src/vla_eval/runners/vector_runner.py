@@ -53,8 +53,10 @@ class VectorEpisodeRunner:
 
     Each step sends every running slot's observation concurrently, so a batching model
     server infers them together, then steps all environments once.  Free slots take the
-    next episode from ``next_episode(slot)`` (``None`` when there are no more): at once
-    when the benchmark has ``partial_reset``, else when the whole wave has finished.
+    next episode from ``next_episode(slot)`` (``None`` when there is none now): at once
+    when the benchmark has ``partial_reset``, else when the whole wave has finished.  After
+    a ``None`` it asks again once an episode ends (a shared queue can get work back from
+    another shard), and returns when no episode runs and none comes.
 
     Failures stay with their episode, as in the sync runner: an environment error
     (``reset`` fails every episode it starts, ``step`` every running one), a model error,
@@ -95,9 +97,12 @@ class VectorEpisodeRunner:
                     if exhausted:
                         return
                     continue
+                before = len(running)
                 actions = await self._act(conns, running, on_end)
                 if actions:
                     await self._step(benchmark, conns, actions, running, on_end, max_steps)
+                if len(running) < before:
+                    exhausted = False
         except ConnectionError as exc:
             for r in running.values():
                 on_end(r.episode, None, exc, aborted=True)

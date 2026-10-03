@@ -349,6 +349,41 @@ async def test_a_failed_recording_leaves_its_item_reclaimable(echo_server, tmp_p
     store.close()
 
 
+@pytest.mark.anyio
+async def test_the_runner_asks_again_for_work_after_an_episode_ends():
+    """A queue that is empty mid-wave and gets an item back later (another shard released it): the item runs."""
+    from vla_eval.recording import NullEpisodeRecorder
+    from vla_eval.runners.vector_runner import VectorEpisode, VectorEpisodeRunner
+
+    class Echo:
+        async def start_episode(self, cfg):
+            pass
+
+        async def end_episode(self, result):
+            pass
+
+        async def act(self, obs):
+            return {"actions": obs["value"] * np.ones(7, dtype=np.float32)}
+
+    supply = [0, 1, None, 2]  # the third item appears only after the first wave
+    ended = []
+
+    def next_episode(slot):
+        item = supply.pop(0) if supply else None
+        return (
+            None
+            if item is None
+            else VectorEpisode({"name": "task_0", "length": 2, "episode_idx": 0}, NullEpisodeRecorder(), item)
+        )
+
+    def on_end(episode, result, error, *, aborted=False):
+        ended.append((episode.ref, error))
+
+    bench = StubVectorBenchmark(num_envs=3)
+    await VectorEpisodeRunner().run(bench, [Echo() for _ in range(3)], next_episode, on_end, max_steps=10)
+    assert ended == [(0, None), (1, None), (2, None)] and supply == []
+
+
 def test_claim_skips_items_in_flight(tmp_path):
     store = RecordingStore(tmp_path / "q.sqlite")
     store.seed_queue("e", [0, 0, 1, 1])
