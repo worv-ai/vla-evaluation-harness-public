@@ -28,8 +28,8 @@ Status markers: ✅ implemented, 🚧 partial, 🔜 planned.
 | **Protocol** | WebSocket + msgpack serialization, message schema, numpy codec | ✅ |
 | **Model Server** | Runs model inference. User implements `predict()`. | ✅ |
 | **Connection** | Client library for benchmark→server communication. Framework-provided. | ✅ |
-| **Benchmark** | Async environment interface; StepBenchmark supplies synchronous reset/step helpers. | ✅ |
-| **EpisodeRunner** | Episode execution strategy. Combines Benchmark + Connection. | ✅ Sync, ✅ Live |
+| **Benchmark** | Async environment interface; StepBenchmark supplies synchronous reset/step helpers; VectorStepBenchmark steps `num_envs` environments together. | ✅ |
+| **EpisodeRunner** | Episode execution strategy. Combines Benchmark + Connection. | ✅ Sync, ✅ Live, ✅ Vector |
 | **Orchestrator** | Coordinates evaluation: config parsing, benchmark creation, episode iteration, result saving. | ✅ |
 | **ResultCollector** | Aggregates episode→task→benchmark metrics. JSON output + summary table. | ✅ |
 | **Import Resolution** | Resolves `"module:Class"` import strings from config to actual classes. | ✅ |
@@ -77,6 +77,23 @@ Orchestrator          SyncEpisodeRunner        Connection         Model Server
     │                       │                      │                    │
     │                       │── end_episode() ────►│── episode_end ───►│
     │◄─ episode_result ─────│                      │                    │
+```
+
+## Vectorized Benchmarks
+
+A `VectorStepBenchmark` holds `num_envs` environments in one process (GPU-parallel
+simulators such as MuJoCo Warp or ManiSkill3).  `VectorEpisodeRunner` runs up to
+`num_envs` episodes at once, slot `i` with its own connection, model-server session and
+recording `sid`; each step it sends all running slots' observations concurrently, so a
+batching model server infers them together, then calls `step()` once.  Sync mode only.
+See [RFC-0009](rfcs/0009-vector-benchmarks.md).
+
+```
+Orchestrator ── VectorEpisodeRunner ──┬── Connection 0 ──┐
+                 │ reset(slots, ...)  ├── Connection 1 ──┼──► Model Server
+                 │ step({slot: act})  └── Connection N-1 ┘   (one session per slot,
+                 ▼                                             batched predict)
+          VectorStepBenchmark (num_envs environments)
 ```
 
 ## Communication Protocol

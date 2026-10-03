@@ -72,7 +72,7 @@ src/vla_eval/
 ├── cli/              # CLI entry point (argparse)
 ├── benchmarks/       # Benchmark adapters (LIBERO + LIBERO-Pro/Plus/Mem, CALVIN, ManiSkill2, SimplerEnv, RoboCasa, RoboCasa365, VLABench, MIKASA-Robo, RoboTwin, RLBench, RoboCerebra, RoboMME, MolmoSpaces, Kinetix, BEHAVIOR-1K)
 ├── model_servers/    # Model server ABCs, utilities, and implementations
-├── runners/          # Episode execution loops (sync, live)
+├── runners/          # Episode execution loops (sync, live, vector)
 ├── results/          # Result collection and shard merging
 ├── protocol/         # msgpack message definitions
 ├── orchestrator.py   # Top-level evaluation orchestrator
@@ -94,6 +94,17 @@ src/vla_eval/
 9. Smoke-test: `vla-eval test -c configs/<name>.yaml` (runs 1 episode with an EchoModelServer; no real model or GPU needed, but requires Docker + the benchmark image)
 
 See `benchmarks/libero/` for a complete reference implementation.
+
+### Vectorized Benchmarks
+
+When the simulator steps many environments per call (MuJoCo Warp / mjlab, ManiSkill3 on
+the GPU), subclass `VectorStepBenchmark` instead: `reset(slots, tasks, recorders)`,
+`step({slot: action}) -> {slot: StepResult}`, `make_obs(raw_obs, slot, task)` and
+`get_step_result(slot, step_result)`, with `num_envs` as a constructor parameter.  Set
+`partial_reset = True` when environments can be reset individually while others run.
+The harness runs up to `num_envs` episodes at once, one model-server session each, so
+pair it with a model server whose `max_batch_size` covers `num_envs`.  Sync mode only; see
+[RFC-0009](docs/rfcs/0009-vector-benchmarks.md).
 
 ### Render Backends
 

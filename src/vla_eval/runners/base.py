@@ -42,6 +42,22 @@ def phase(error: type[EpisodeError]) -> Iterator[None]:
         raise error(f"{type(exc).__name__}: {exc}") from exc
 
 
+def episode_start_payload(task: Task, recorder: EpisodeRecorder | None, **extra: Any) -> dict[str, Any]:
+    """``EPISODE_START`` payload: the task's plain fields, plus the recording handle when one is active."""
+    payload: dict[str, Any] = {
+        "task": {k: v for k, v in task.items() if isinstance(v, (str, int, float, bool, list))},
+        **extra,
+    }
+    if recorder is not None and recorder.is_active:
+        payload["recording"] = {
+            "sid": recorder.sid,
+            "eid": recorder.eid,
+            "eval_id": recorder.eval_id,
+            "db_path": recorder.db_path,
+        }
+    return payload
+
+
 class EpisodeRunner(ABC):
     """Abstract base class for episode execution strategies."""
 

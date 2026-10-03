@@ -10,13 +10,14 @@ import random
 import re
 import traceback
 import uuid
-from collections.abc import Iterator, Mapping
+from collections.abc import Collection, Iterator, Mapping
 from pathlib import Path
 from typing import Any, cast
 
 import websockets
 
 from vla_eval import __version__, watchdog
+from vla_eval.benchmarks.base import VectorStepBenchmark
 from vla_eval.config import EvalConfig, ServerConfig
 from vla_eval.connection import Connection
 from vla_eval.recording import (
@@ -38,6 +39,7 @@ from vla_eval.runners.base import EpisodeError
 from vla_eval.runners.live_runner import LiveEpisodeRunner
 from vla_eval.runners.clock import Clock
 from vla_eval.runners.sync_runner import SyncEpisodeRunner
+from vla_eval.runners.vector_runner import VectorEpisode, VectorEpisodeRunner
 from vla_eval.tracking import Tracker, call_each, get_reporting_trackers
 
 logger = logging.getLogger(__name__)
@@ -127,7 +129,9 @@ class Orchestrator:
            shard's round-robin slice (``item_index % num_shards == shard_id``),
            and re-sort it by task so env rebuilds stay rare.
         6. Run each work item via the runner. Recording goes through SQLite.
-           Failures are isolated per episode.
+           Failures are isolated per episode.  A :class:`VectorStepBenchmark`
+           runs up to ``num_envs`` items at once, one server connection (and
+           recording ``sid``) per environment slot.
 
     Error recovery:
         - ``ConnectionError`` (server unreachable after retries): abort the
@@ -216,8 +220,10 @@ class Orchestrator:
 
         return all_results
 
-    def _check_health(self, bench_eval_id: str | None, item: int) -> None:
-        """Exit a sharded run's shard whose first UNHEALTHY_AFTER episodes all errored (a dead GPU)."""
+    def _check_health(self, bench_eval_id: str | None, item: int, in_flight: Collection[int] = ()) -> None:
+        """Exit a sharded run's shard whose first UNHEALTHY_AFTER episodes all errored (a dead GPU).
+
+        ``in_flight``: queue items this shard still runs (vector benchmarks); requeued with the failed ones."""
         if self.num_shards is None or self._episodes_ok or not self._episode_errored:
             return
         self._errors_from_start += 1
@@ -225,11 +231,12 @@ class Orchestrator:
             self._failed_items.append((bench_eval_id, item))
         if self._errors_from_start < UNHEALTHY_AFTER:
             return
-        if self.requeue_unhealthy and self._store is not None and self._failed_items:
-            self._store.release(self._failed_items)
+        release = self._failed_items + ([(bench_eval_id, i) for i in in_flight] if bench_eval_id is not None else [])
+        if self.requeue_unhealthy and self._store is not None and release:
+            self._store.release(release)
         raise UnhealthyShardError(
             f"shard {self.shard_id}: its first {UNHEALTHY_AFTER} episodes all errored"
-            + ("; the items went back to the queue" if self.requeue_unhealthy and self._failed_items else "")
+            + ("; the items went back to the queue" if self.requeue_unhealthy and release else "")
         )
 
     def _update_progress(self, completed: int, total: int, errors: int) -> None:
@@ -319,7 +326,13 @@ class Orchestrator:
         metadata = benchmark.get_metadata()
         max_steps = cfg.max_steps if cfg.max_steps is not None else metadata.get("max_steps", 300)
 
-        if cfg.mode.startswith("live"):
+        runner: SyncEpisodeRunner | LiveEpisodeRunner | None = None
+        if isinstance(benchmark, VectorStepBenchmark):
+            if cfg.mode.startswith("live"):
+                benchmark.cleanup()
+                await conn.close()
+                raise ValueError(f"{name}: a VectorStepBenchmark runs in sync mode only (mode={cfg.mode!r})")
+        elif cfg.mode.startswith("live"):
             # Fail fast before any episode: a real-time benchmark must declare its
             # stale-tick hold, else every episode would raise mid-run and the
             # per-episode error isolation would flood logs while wasting resources.
@@ -376,6 +389,23 @@ class Orchestrator:
                 task_idx, first_task, ep = work_items[0]
                 self._validate_filename_stem(rec_cfg, first_task, safe_name, task_idx, ep)
 
+        if isinstance(benchmark, VectorStepBenchmark):
+            return await self._run_vector(
+                benchmark,
+                conn,
+                cfg,
+                name,
+                safe_name,
+                bench_eval_id,
+                work_items,
+                dynamic,
+                collector,
+                rec_cfg,
+                metadata,
+                max_steps,
+            )
+        assert runner is not None
+
         def record_failure(reason: str, detail: str) -> dict[str, Any]:
             fail: dict[str, Any] = {
                 "episode_id": ep,
@@ -389,20 +419,7 @@ class Orchestrator:
             return fail
 
         def close_recorder(ep_dict: dict[str, Any], status: EpisodeStatus) -> None:
-            recorder.close(
-                status=status,
-                metrics=ep_dict.get("metrics") or {},
-                task_name=task_name,
-                episode_id=int(ep_dict.get("episode_id", ep)),
-                steps=int(ep_dict.get("steps", 0)),
-                elapsed_sec=float(ep_dict.get("elapsed_sec", 0.0)),
-                failure_reason=ep_dict.get("failure_reason"),
-                failure_detail=ep_dict.get("failure_detail"),
-            )
-            # Fire from this site so error terminations (status != "success") reach
-            # trackers too — collector.record() above misses the reconnect paths.
-            if self._live_tracking:
-                call_each(self._trackers, "on_episode_end", name, task_name, ep_dict, status)
+            self._close_recorder(recorder, ep_dict, status, name, task_name, ep)
 
         def my_items() -> Iterator[tuple[int, tuple[int, Any, int]]]:
             if not dynamic:
@@ -528,6 +545,168 @@ class Orchestrator:
 
         return self._finalize_benchmark(collector, cfg, safe_name, partial=False, server_info=conn.server_info)
 
+    async def _run_vector(
+        self,
+        benchmark: VectorStepBenchmark,
+        conn: Connection,
+        cfg: EvalConfig,
+        name: str,
+        safe_name: str,
+        bench_eval_id: str,
+        work_items: list[tuple[int, Any, int]],
+        dynamic: bool,
+        collector: ResultCollector,
+        rec_cfg: dict[str, Any] | None,
+        metadata: dict[str, Any],
+        max_steps: int,
+    ) -> dict[str, Any]:
+        """Run the entry's items on a :class:`VectorStepBenchmark`, up to ``num_envs`` at once.
+
+        Slot ``i`` has its own connection and recording ``sid`` (slot 0 keeps the shard's),
+        so the model server keeps one session per running episode.  Per-item bookkeeping
+        matches the one-at-a-time loop: results, recorders, queue, progress, health."""
+        total_items = len(work_items)
+        sids = [self._sid] + [str(uuid.uuid4()) for _ in range(benchmark.num_envs - 1)]
+        conns = [conn]
+        claimed: set[int] = set()  # queue items in flight
+        last_task: int | None = None
+        static_items = iter(work_items)
+        ended = 0
+        if dynamic:
+            self._queue().seed_queue(bench_eval_id, [t for t, _, _ in work_items])
+
+        def end(episode: VectorEpisode, result: dict[str, Any] | None, error: BaseException | None) -> None:
+            nonlocal ended
+            item, task_idx, ep = episode.ref
+            task_name = episode.task.get("name", str(episode.task))
+            status: EpisodeStatus
+            if error is None:
+                assert result is not None
+                ep_dict: dict[str, Any] = {**result, "episode_id": ep}
+                metrics = ep_dict.get("metrics")
+                status = "success" if isinstance(metrics, dict) and metrics.get("success") else "fail"
+            else:
+                reason, detail = self._failure(error)
+                ep_dict = {"episode_id": ep, "metrics": {"success": False}}
+                ep_dict.update(failure_reason=reason, failure_detail=detail)
+                status = "error"
+            collector.record(task_name, cast(EpisodeResult, ep_dict))
+            ended += 1
+            if item is not None:
+                claimed.discard(item)
+                if not isinstance(error, ConnectionError):  # an aborted run's item is redone on rerun
+                    self._queue().finish(bench_eval_id, item)
+            done = self._queue().queue_progress(bench_eval_id)[0] if dynamic else ended
+            if error is None:
+                logger.info(
+                    "  [%d/%d] %s ep%d: %s (steps=%d)",
+                    done,
+                    total_items,
+                    task_name,
+                    ep,
+                    "SUCCESS" if status == "success" else "FAIL",
+                    ep_dict.get("steps", 0),
+                )
+            else:
+                logger.warning("  [%d/%d] %s ep%d: %s", done, total_items, task_name, ep, ep_dict["failure_reason"])
+            self._update_progress(done, total_items, collector.error_count)
+            self._close_recorder(episode.recorder, ep_dict, status, name, task_name, ep)
+            if error is None:
+                self._episodes_ok += 1
+            self._episode_errored = error is not None
+            self._check_health(bench_eval_id if dynamic else None, item if dynamic else ended - 1, claimed)
+
+        def next_episode(slot: int) -> VectorEpisode | None:
+            nonlocal last_task
+            while True:
+                item: int | None = None
+                if dynamic:
+                    assert self.shard_id is not None and self.num_shards is not None
+                    item = self._queue().claim(
+                        bench_eval_id, self.shard_id, last_task, self.num_shards, exclude=claimed
+                    )
+                    if item is None:
+                        return None
+                    claimed.add(item)
+                    task_idx, task, ep = work_items[item]
+                    last_task = task_idx
+                else:
+                    nxt = next(static_items, None)
+                    if nxt is None:
+                        return None
+                    task_idx, task, ep = nxt
+                max_ep = metadata.get("max_episodes_per_task")
+                episode_idx = ep % max_ep if cfg.throughput_mode and max_ep is not None else ep
+                task = {**task, "episode_idx": episode_idx}
+                watchdog.pet(f"{safe_name} {task.get('name', task)} ep{ep}")
+                try:
+                    recorder = self._build_recorder(
+                        rec_cfg, task, bench_eval_id, safe_name, task_idx, ep, benchmark, sid=sids[slot]
+                    )
+                except RecordingError:
+                    raise
+                except Exception as exc:
+                    end(VectorEpisode(task, NullEpisodeRecorder(), (item, task_idx, ep)), None, exc)
+                    continue
+                return VectorEpisode(task, recorder, (item, task_idx, ep))
+
+        try:
+            for _ in range(benchmark.num_envs - 1):
+                conns.append(Connection(self._server_cfg.url, timeout=self._server_cfg.timeout))
+                await conns[-1].connect(benchmark=cfg.benchmark)
+            logger.info("%s: %d environments, one server session each", name, benchmark.num_envs)
+            await VectorEpisodeRunner().run(benchmark, conns, next_episode, end, max_steps=max_steps)
+        except ConnectionError:
+            logger.error("%s: server unreachable, aborting benchmark", name)
+            return self._finalize_benchmark(collector, cfg, safe_name, partial=True, server_info=conn.server_info)
+        finally:
+            watchdog.pet(f"{safe_name} cleanup")
+            benchmark.cleanup()
+            for c in conns:
+                await c.close()
+
+        return self._finalize_benchmark(collector, cfg, safe_name, partial=False, server_info=conn.server_info)
+
+    def _queue(self) -> RecordingStore:
+        assert self._store is not None
+        return self._store
+
+    def _failure(self, error: BaseException) -> tuple[str, str]:
+        """``(failure_reason, failure_detail)`` of an episode that ended in ``error``."""
+        if isinstance(error, ConnectionError):
+            return "server_unreachable", str(error)
+        if isinstance(error, websockets.exceptions.ConnectionClosed):
+            rcvd = error.rcvd
+            return "connection_closed", f"code={rcvd.code if rcvd else None} reason={rcvd.reason if rcvd else None}"
+        if isinstance(error, TimeoutError):
+            return "timeout", f"timeout={self._server_cfg.timeout}s: {error}"
+        detail = "".join(traceback.format_exception(error))
+        return (error.phase if isinstance(error, EpisodeError) else "exception"), detail
+
+    def _close_recorder(
+        self,
+        recorder: EpisodeRecorder,
+        ep_dict: dict[str, Any],
+        status: EpisodeStatus,
+        name: str,
+        task_name: str,
+        ep: int,
+    ) -> None:
+        recorder.close(
+            status=status,
+            metrics=ep_dict.get("metrics") or {},
+            task_name=task_name,
+            episode_id=int(ep_dict.get("episode_id", ep)),
+            steps=int(ep_dict.get("steps", 0)),
+            elapsed_sec=float(ep_dict.get("elapsed_sec", 0.0)),
+            failure_reason=ep_dict.get("failure_reason"),
+            failure_detail=ep_dict.get("failure_detail"),
+        )
+        # Fire from this site so error terminations (status != "success") reach
+        # trackers too — collector.record() misses the reconnect paths.
+        if self._live_tracking:
+            call_each(self._trackers, "on_episode_end", name, task_name, ep_dict, status)
+
     def _build_recorder(
         self,
         rec_cfg: dict[str, Any] | None,
@@ -537,6 +716,7 @@ class Orchestrator:
         task_idx: int,
         episode_id: int,
         benchmark: Any,
+        sid: str | None = None,
     ) -> EpisodeRecorder:
         """Build per-episode recorder from YAML config + task dict, or Null if recording is off.
 
@@ -550,7 +730,7 @@ class Orchestrator:
         allowed = getattr(benchmark, "_ALL_RECORD_FIELDS", None)
         return EpisodeRecorder(
             store=self._store,
-            sid=self._sid,
+            sid=sid or self._sid,
             eid=eid,
             eval_id=bench_eval_id,
             output_dir=rec_cfg.get("output_dir") or str(self._output_dir / "episodes"),
