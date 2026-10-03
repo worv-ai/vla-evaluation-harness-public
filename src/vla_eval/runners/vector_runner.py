@@ -13,14 +13,7 @@ import websockets
 from vla_eval import watchdog
 from vla_eval.benchmarks.base import VectorStepBenchmark
 from vla_eval.recording import EpisodeRecorder, RecordingError
-from vla_eval.runners.base import (
-    EnvStartError,
-    EnvStepError,
-    EpisodeError,
-    ModelActError,
-    episode_start_payload,
-    phase,
-)
+from vla_eval.runners.base import EnvStartError, EnvStepError, ModelActError, episode_start_payload, phase
 from vla_eval.types import Action, EpisodeResult, Observation, Task
 
 
@@ -57,7 +50,8 @@ class VectorEpisodeRunner:
     (``reset`` fails every episode it starts, ``step`` every running one), a model error,
     a closed connection or an ``act`` timeout (that slot reconnects) end that episode
     through ``on_end`` and the rest go on.  ``ConnectionError`` (the server is unreachable,
-    or a reconnect failed) ends every running episode and is re-raised.
+    or a reconnect failed) ends every episode the runner holds and is re-raised.
+    ``RecordingError`` and exceptions raised by ``on_end`` propagate at once.
     """
 
     async def run(
@@ -115,9 +109,10 @@ class VectorEpisodeRunner:
                 raws = benchmark.reset(slots, [e.task for e in episodes], [e.recorder for e in episodes])
                 if len(raws) != len(slots):
                     raise ValueError(f"reset() returned {len(raws)} observations for {len(slots)} slots")
-        except EpisodeError as exc:
-            for episode in episodes:
-                on_end(episode, None, exc)
+        except RecordingError:
+            raise
+        except Exception as exc:  # an EpisodeError, or a transport-type error phase() lets through
+            self._end_all(episodes, exc, on_end)
             return
         pending = list(zip(slots, episodes, raws))
         while pending:
@@ -172,9 +167,10 @@ class VectorEpisodeRunner:
         try:
             with phase(EnvStepError):
                 results = benchmark.step(actions)
-        except EpisodeError as exc:
-            for slot in actions:
-                on_end(running.pop(slot).episode, None, exc)
+        except RecordingError:
+            raise
+        except Exception as exc:
+            self._end_all([running.pop(slot).episode for slot in actions], exc, on_end)
             return
         watchdog.pet()  # a slow simulator's episode can outlast the stall timeout
         for slot in actions:
@@ -205,9 +201,21 @@ class VectorEpisodeRunner:
             on_end(r.episode, result, None)
 
     @staticmethod
+    def _end_all(episodes: list[VectorEpisode], exc: Exception, on_end: OnEnd) -> None:
+        for episode in episodes:
+            on_end(episode, None, exc)
+        if isinstance(exc, ConnectionError):
+            raise exc
+
+    @staticmethod
     async def _fail(conn: Any, episode: VectorEpisode, exc: Exception, on_end: OnEnd) -> None:
         on_end(episode, None, exc)
         if isinstance(exc, ConnectionError):
             raise exc
         if isinstance(exc, (websockets.exceptions.ConnectionClosed, TimeoutError)):
-            await conn.reconnect()  # raises ConnectionError when the server stays away
+            try:
+                await conn.reconnect()
+            except ConnectionError:
+                raise
+            except Exception as err:  # e.g. a HELLO timeout: the server cannot take this slot's episodes
+                raise ConnectionError(f"reconnect failed: {type(err).__name__}: {err}") from err

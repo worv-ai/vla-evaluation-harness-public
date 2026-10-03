@@ -592,6 +592,7 @@ class Orchestrator:
                 status = "error"
             collector.record(task_name, cast(EpisodeResult, ep_dict))
             ended += 1
+            self._close_recorder(episode.recorder, ep_dict, status, name, task_name, ep)  # durable before finish
             if item is not None:
                 claimed.discard(item)
                 if not isinstance(error, ConnectionError):  # an aborted run's item is redone on rerun
@@ -610,7 +611,6 @@ class Orchestrator:
             else:
                 logger.warning("  [%d/%d] %s ep%d: %s", done, total_items, task_name, ep, ep_dict["failure_reason"])
             self._update_progress(done, total_items, collector.error_count)
-            self._close_recorder(episode.recorder, ep_dict, status, name, task_name, ep)
             if error is None:
                 self._episodes_ok += 1
             self._episode_errored = error is not None

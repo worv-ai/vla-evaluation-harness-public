@@ -267,7 +267,17 @@ async def test_unhealthy_shard_requeues_failed_and_in_flight_items(echo_server, 
 
 
 @pytest.mark.anyio
-async def test_unreachable_server_fails_running_episodes_and_returns_partial(tmp_path):
+@pytest.mark.parametrize(
+    ("act_error", "first_reason"),
+    [(websockets.exceptions.ConnectionClosed(None, None), "connection_closed"), (TimeoutError(), "timeout")],
+)
+@pytest.mark.parametrize(
+    "reconnect_error",
+    [ConnectionError("unreachable after retries"), TimeoutError("HELLO"), RuntimeError("Expected HELLO reply")],
+)
+async def test_a_failed_reconnect_ends_every_running_episode_and_returns_partial(
+    tmp_path, act_error, first_reason, reconnect_error
+):
     calls = 0
 
     class FlakyConnection:
@@ -290,21 +300,50 @@ async def test_unreachable_server_fails_running_episodes_and_returns_partial(tmp
             nonlocal calls
             calls += 1
             if calls == 8:  # first step of the second wave
-                raise websockets.exceptions.ConnectionClosed(None, None)
+                raise act_error
             return {"actions": obs["value"] * np.ones(7, dtype=np.float32)}
 
         async def reconnect(self):
-            raise ConnectionError("Server unreachable after retries")
+            raise reconnect_error
 
     config = _config("ws://fake:9999", tmp_path)
     with patch("vla_eval.orchestrator.Connection", FlakyConnection):
         result = await _run(StubVectorBenchmark, config, no_save=True)
     episodes = _episodes(result)
     assert result["partial"] is True
-    # wave 1 finished (3); wave 2's three episodes ended with the server: one closed, two unreachable
+    # wave 1 finished (3); wave 2's three episodes ended with the server: the one that failed, two unreachable
     assert len(episodes) == 6
     reasons = sorted(ep.get("failure_reason") or "" for _, ep in episodes)
-    assert reasons == ["", "", "", "connection_closed", "server_unreachable", "server_unreachable"]
+    assert reasons == sorted(["", "", "", first_reason, "server_unreachable", "server_unreachable"])
+
+
+class StepTimeoutOnceStub(StubVectorBenchmark):
+    def step(self, actions):
+        if not self.steps:
+            self.steps.append(sorted(actions))
+            raise TimeoutError("simulator stalled")
+        return super().step(actions)
+
+
+@pytest.mark.anyio
+async def test_an_environment_timeout_fails_its_wave_and_the_run_goes_on(echo_server, tmp_path):
+    result = await _run(StepTimeoutOnceStub, _config(echo_server, tmp_path), no_save=True)
+    episodes = _episodes(result)
+    assert len(episodes) == 8 and "partial" not in result
+    assert sorted(ep.get("failure_reason") or "" for _, ep in episodes) == [""] * 5 + ["timeout"] * 3
+
+
+@pytest.mark.anyio
+async def test_a_failed_recording_leaves_its_item_reclaimable(echo_server, tmp_path):
+    from vla_eval.recording import EpisodeRecorder, RecordingError
+
+    config = _config(echo_server, tmp_path, name="rf", episodes=2)
+    with patch.object(EpisodeRecorder, "close", side_effect=RecordingError("disk full")):
+        with pytest.raises(RecordingError):
+            await _run(StubVectorBenchmark, config, shard_id=0, num_shards=1, eval_id="ev-rf")
+    store = RecordingStore(tmp_path / "recording-ev-rf.sqlite")
+    assert store.queue_progress("ev-rf-rf") == (0, 4)
+    store.close()
 
 
 def test_claim_skips_items_in_flight(tmp_path):
