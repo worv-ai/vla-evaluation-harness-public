@@ -386,6 +386,17 @@ async def test_the_runner_asks_again_for_work_after_an_episode_ends():
     assert ended == [(0, None), (1, None), (2, None)] and supply == []
 
 
+class UnnamedTaskStub(StubVectorBenchmark):
+    def get_tasks(self):
+        return [{"length": 2, "suite": "s"}]
+
+
+@pytest.mark.anyio
+async def test_episodes_of_an_unnamed_task_stay_one_task(echo_server, tmp_path):
+    result = await _run(UnnamedTaskStub, _config(echo_server, tmp_path), no_save=True)
+    assert len(result["tasks"]) == 1 and len(result["tasks"][0]["episodes"]) == 4
+
+
 def test_claim_skips_items_in_flight(tmp_path):
     store = RecordingStore(tmp_path / "q.sqlite")
     store.seed_queue("e", [0, 0, 1, 1])

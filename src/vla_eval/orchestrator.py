@@ -583,8 +583,7 @@ class Orchestrator:
             aborted: bool = False,
         ) -> None:
             nonlocal ended
-            item, task_idx, ep = episode.ref
-            task_name = episode.task.get("name", str(episode.task))
+            item, task_idx, ep, task_name = episode.ref
             status: EpisodeStatus
             if error is None:
                 assert result is not None
@@ -642,10 +641,11 @@ class Orchestrator:
                     if nxt is None:
                         return None
                     task_idx, task, ep = nxt
+                task_name = task.get("name", str(task))  # before the episode's fields, as in the one-at-a-time loop
                 max_ep = metadata.get("max_episodes_per_task")
                 episode_idx = ep % max_ep if cfg.throughput_mode and max_ep is not None else ep
                 task = {**task, "episode_idx": episode_idx}
-                watchdog.pet(f"{safe_name} {task.get('name', task)} ep{ep}")
+                watchdog.pet(f"{safe_name} {task_name} ep{ep}")
                 try:
                     recorder = self._build_recorder(
                         rec_cfg, task, bench_eval_id, safe_name, task_idx, ep, benchmark, sid=sids[slot]
@@ -653,9 +653,9 @@ class Orchestrator:
                 except RecordingError:
                     raise
                 except Exception as exc:
-                    end(VectorEpisode(task, NullEpisodeRecorder(), (item, task_idx, ep)), None, exc)
+                    end(VectorEpisode(task, NullEpisodeRecorder(), (item, task_idx, ep, task_name)), None, exc)
                     continue
-                return VectorEpisode(task, recorder, (item, task_idx, ep))
+                return VectorEpisode(task, recorder, (item, task_idx, ep, task_name))
 
         try:
             for _ in range(benchmark.num_envs - 1):
