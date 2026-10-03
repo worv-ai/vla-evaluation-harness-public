@@ -575,7 +575,13 @@ class Orchestrator:
         if dynamic:
             self._queue().seed_queue(bench_eval_id, [t for t, _, _ in work_items])
 
-        def end(episode: VectorEpisode, result: dict[str, Any] | None, error: BaseException | None) -> None:
+        def end(
+            episode: VectorEpisode,
+            result: dict[str, Any] | None,
+            error: BaseException | None,
+            *,
+            aborted: bool = False,
+        ) -> None:
             nonlocal ended
             item, task_idx, ep = episode.ref
             task_name = episode.task.get("name", str(episode.task))
@@ -595,7 +601,7 @@ class Orchestrator:
             self._close_recorder(episode.recorder, ep_dict, status, name, task_name, ep)  # durable before finish
             if item is not None:
                 claimed.discard(item)
-                if not isinstance(error, ConnectionError):  # an aborted run's item is redone on rerun
+                if not aborted:  # an aborted run's item is redone on rerun
                     self._queue().finish(bench_eval_id, item)
             done = self._queue().queue_progress(bench_eval_id)[0] if dynamic else ended
             if error is None:

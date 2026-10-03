@@ -72,7 +72,8 @@ The orchestrator selects the vector path when the benchmark is a `VectorStepBenc
 and gives slot `i` its own recording `sid` (slot 0 keeps the shard's), because the server
 replaces its session id with `recording.sid` from `EPISODE_START`; a shared sid would merge
 the slots' sessions.  Work items, the shared work queue, recorders, results, progress and
-trackers are handled per episode as in the one-at-a-time loop.  `RecordingStore.claim`
+trackers are handled per episode as in the one-at-a-time loop, and an item is finished in the queue only after its
+episode is recorded.  `RecordingStore.claim`
 takes `exclude`, the shard's items still running, so a shard holding several claims is
 never handed one of them again; a rerun after a crash still resumes its unfinished items.
 
@@ -84,8 +85,8 @@ Failures stay with their episode:
 | `make_obs` / `start_episode` raises | that slot's | next items |
 | `step` raises | every running one (`env_step`) | next items |
 | server `ERROR` reply | that slot's (`model_act`) | continue |
-| connection closed / `act` timeout | that slot's | the slot reconnects |
-| server unreachable, failed reconnect | every running one (`server_unreachable`) | partial result |
+| connection closed / `act` timeout | that slot's | the slot reconnects; if that fails, as below |
+| server unreachable, failed reconnect | every one the runner holds | partial result; their items stay for a rerun |
 
 The unhealthy-shard check (RFC-0006) counts episodes as before; with
 `--requeue-unhealthy` it also releases the shard's in-flight items.

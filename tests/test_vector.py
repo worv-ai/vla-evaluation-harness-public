@@ -306,11 +306,14 @@ async def test_a_failed_reconnect_ends_every_running_episode_and_returns_partial
         async def reconnect(self):
             raise reconnect_error
 
-    config = _config("ws://fake:9999", tmp_path)
+    config = _config("ws://fake:9999", tmp_path, name="a")
     with patch("vla_eval.orchestrator.Connection", FlakyConnection):
-        result = await _run(StubVectorBenchmark, config, no_save=True)
+        result = await _run(StubVectorBenchmark, config, shard_id=0, num_shards=1, eval_id="ev-a")
     episodes = _episodes(result)
     assert result["partial"] is True
+    store = RecordingStore(tmp_path / "recording-ev-a.sqlite")
+    assert store.queue_progress("ev-a-a") == (3, 8)  # the aborted wave stays for a rerun
+    store.close()
     # wave 1 finished (3); wave 2's three episodes ended with the server: the one that failed, two unreachable
     assert len(episodes) == 6
     reasons = sorted(ep.get("failure_reason") or "" for _, ep in episodes)

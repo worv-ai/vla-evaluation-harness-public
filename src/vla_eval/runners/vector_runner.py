@@ -5,7 +5,7 @@ from __future__ import annotations
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol
 
 import anyio
 import websockets
@@ -26,8 +26,18 @@ class VectorEpisode:
     ref: Any = None
 
 
-#: ``on_end(episode, result, error)``: exactly one of ``result`` / ``error`` is set.
-OnEnd = Callable[[VectorEpisode, EpisodeResult | None, BaseException | None], None]
+class OnEnd(Protocol):
+    """``on_end(episode, result, error, aborted=...)``: exactly one of ``result`` / ``error`` is set.  ``aborted``:
+    the run stops with this episode (the server is unreachable), so the episode is to be redone on a rerun."""
+
+    def __call__(
+        self,
+        episode: VectorEpisode,
+        result: EpisodeResult | None,
+        error: BaseException | None,
+        *,
+        aborted: bool = False,
+    ) -> None: ...
 
 
 @dataclass
@@ -90,7 +100,7 @@ class VectorEpisodeRunner:
                     await self._step(benchmark, conns, actions, running, on_end, max_steps)
         except ConnectionError as exc:
             for r in running.values():
-                on_end(r.episode, None, exc)
+                on_end(r.episode, None, exc, aborted=True)
             raise
 
     async def _start(
@@ -128,7 +138,7 @@ class VectorEpisodeRunner:
                     await self._fail(conns[slot], episode, exc, on_end)
                 except ConnectionError as abort:
                     for _, rest, _ in pending:
-                        on_end(rest, None, abort)
+                        on_end(rest, None, abort, aborted=True)
                     raise
                 continue
             running[slot] = _Running(episode, obs, t0)
@@ -202,20 +212,26 @@ class VectorEpisodeRunner:
 
     @staticmethod
     def _end_all(episodes: list[VectorEpisode], exc: Exception, on_end: OnEnd) -> None:
+        aborted = isinstance(exc, ConnectionError)
         for episode in episodes:
-            on_end(episode, None, exc)
-        if isinstance(exc, ConnectionError):
+            on_end(episode, None, exc, aborted=aborted)
+        if aborted:
             raise exc
 
     @staticmethod
     async def _fail(conn: Any, episode: VectorEpisode, exc: Exception, on_end: OnEnd) -> None:
-        on_end(episode, None, exc)
-        if isinstance(exc, ConnectionError):
-            raise exc
+        """End ``episode`` with ``exc``; a closed connection or a timeout reconnects the slot first, and the
+        episode counts as aborted when that fails."""
         if isinstance(exc, (websockets.exceptions.ConnectionClosed, TimeoutError)):
             try:
                 await conn.reconnect()
-            except ConnectionError:
-                raise
-            except Exception as err:  # e.g. a HELLO timeout: the server cannot take this slot's episodes
+            except Exception as err:
+                on_end(episode, None, exc, aborted=True)
+                if isinstance(err, ConnectionError):
+                    raise
+                # e.g. a HELLO timeout: the server cannot take this slot's episodes
                 raise ConnectionError(f"reconnect failed: {type(err).__name__}: {err}") from err
+        aborted = isinstance(exc, ConnectionError)
+        on_end(episode, None, exc, aborted=aborted)
+        if aborted:
+            raise exc
