@@ -620,7 +620,8 @@ class Orchestrator:
             if error is None:
                 self._episodes_ok += 1
             self._episode_errored = error is not None
-            self._check_health(bench_eval_id if dynamic else None, item if dynamic else ended - 1, claimed)
+            if not aborted:  # the server went away: a partial result, as in the one-at-a-time loop
+                self._check_health(bench_eval_id if dynamic else None, item if dynamic else ended - 1, claimed)
 
         def next_episode(slot: int) -> VectorEpisode | None:
             nonlocal last_task

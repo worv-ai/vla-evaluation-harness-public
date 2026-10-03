@@ -275,8 +275,9 @@ async def test_unhealthy_shard_requeues_failed_and_in_flight_items(echo_server, 
     "reconnect_error",
     [ConnectionError("unreachable after retries"), TimeoutError("HELLO"), RuntimeError("Expected HELLO reply")],
 )
+@pytest.mark.parametrize("fail_at", [1, 8])  # the first act of the run (no episode succeeded yet), of the second wave
 async def test_a_failed_reconnect_ends_every_running_episode_and_returns_partial(
-    tmp_path, act_error, first_reason, reconnect_error
+    tmp_path, act_error, first_reason, reconnect_error, fail_at
 ):
     calls = 0
 
@@ -299,7 +300,7 @@ async def test_a_failed_reconnect_ends_every_running_episode_and_returns_partial
         async def act(self, obs):
             nonlocal calls
             calls += 1
-            if calls == 8:  # first step of the second wave
+            if calls == fail_at:
                 raise act_error
             return {"actions": obs["value"] * np.ones(7, dtype=np.float32)}
 
@@ -311,13 +312,14 @@ async def test_a_failed_reconnect_ends_every_running_episode_and_returns_partial
         result = await _run(StubVectorBenchmark, config, shard_id=0, num_shards=1, eval_id="ev-a")
     episodes = _episodes(result)
     assert result["partial"] is True
+    done = 3 if fail_at == 8 else 0  # wave 1 finished before the failure, or the failure was in it
     store = RecordingStore(tmp_path / "recording-ev-a.sqlite")
-    assert store.queue_progress("ev-a-a") == (3, 8)  # the aborted wave stays for a rerun
+    assert store.queue_progress("ev-a-a") == (done, 8)  # the aborted wave stays for a rerun
     store.close()
-    # wave 1 finished (3); wave 2's three episodes ended with the server: the one that failed, two unreachable
-    assert len(episodes) == 6
+    # the aborted wave's three episodes ended with the server: the one that failed, two unreachable
+    assert len(episodes) == done + 3
     reasons = sorted(ep.get("failure_reason") or "" for _, ep in episodes)
-    assert reasons == sorted(["", "", "", first_reason, "server_unreachable", "server_unreachable"])
+    assert reasons == sorted([""] * done + [first_reason, "server_unreachable", "server_unreachable"])
 
 
 class StepTimeoutOnceStub(StubVectorBenchmark):
