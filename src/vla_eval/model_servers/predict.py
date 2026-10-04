@@ -349,7 +349,7 @@ class PredictModelServer(ModelServer):
         With pipelining we overlap collection and inference:
             collect₀ → GPU₀ + collect₁ → GPU₁ + collect₂ → ...
         _collect continuously receives from the stream while _infer
-        processes batches.  After GPU finishes, if pending isn't full
+        processes batches.  Before each batch, if pending isn't full,
         we wait up to max_wait_time for more.
         """
         assert self._receive_stream is not None
@@ -384,6 +384,13 @@ class PredictModelServer(ModelServer):
                                 break
                             continue
 
+                        # Wait for a full batch, also when woken from idle by its first request:
+                        # concurrent clients (a vector benchmark's slots) send theirs together.
+                        if not stream_closed and len(pending) < self.max_batch_size:
+                            batch_full = anyio.Event()
+                            with anyio.move_on_after(self.max_wait_time):
+                                await batch_full.wait()
+
                         batch = pending[: self.max_batch_size]
                         pending = pending[self.max_batch_size :]
 
@@ -417,12 +424,6 @@ class PredictModelServer(ModelServer):
                             for req in batch:
                                 if not req.done:
                                     req.set_exception(exc)
-
-                        # Grace period AFTER GPU: accumulate items for next batch
-                        if not stream_closed and len(pending) < self.max_batch_size:
-                            batch_full = anyio.Event()
-                            with anyio.move_on_after(self.max_wait_time):
-                                await batch_full.wait()
 
                         if pending:
                             has_items.set()

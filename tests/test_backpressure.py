@@ -138,7 +138,7 @@ async def test_batch_queue_depth_warning(free_port, caplog):
                         await conn.start_episode({"task": f"test_{client_id}"})
                         await conn.act({"value": 1.0})
 
-                for i in range(8):
+                for i in range(10):  # the first batch waits to fill: 8 left queued > 2 x max_batch_size
                     tg.start_soon(send_obs, i)
 
             warning_messages = [

@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import logging
+import os
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Callable
 
 import anyio
+import anyio.to_thread
 import websockets
 from websockets.protocol import State as WebSocketState
 
@@ -14,6 +16,8 @@ from vla_eval.protocol.messages import Message, MessageType, make_hello_payload,
 from vla_eval.types import Action, Observation
 
 logger = logging.getLogger(__name__)
+
+_ENCODE_LIMITER = anyio.CapacityLimiter(max(8, os.cpu_count() or 8))
 
 
 class Connection:
@@ -106,7 +110,10 @@ class Connection:
         seq = self._next_seq()
         msg = Message(type=msg_type, payload=payload, seq=seq)
         await self._ensure_connected()
-        await self._ws.send(pack_message(msg))
+        # Encoding images (PNG by default) takes milliseconds: off the event loop, so the
+        # concurrent sends of a vector benchmark's slots encode in parallel.
+        data = await anyio.to_thread.run_sync(pack_message, msg, limiter=_ENCODE_LIMITER)
+        await self._ws.send(data)
         return seq
 
     async def recv(self, *, timeout: float | None = None) -> Message:

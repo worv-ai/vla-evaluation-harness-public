@@ -657,18 +657,19 @@ class Orchestrator:
                     continue
                 return VectorEpisode(task, recorder, (item, task_idx, ep, task_name))
 
+        runner = VectorEpisodeRunner()
         try:
             for _ in range(benchmark.num_envs - 1):
                 conns.append(Connection(self._server_cfg.url, timeout=self._server_cfg.timeout))
                 await conns[-1].connect(benchmark=cfg.benchmark)
             logger.info("%s: %d environments, one server session each", name, benchmark.num_envs)
-            await VectorEpisodeRunner().run(benchmark, conns, next_episode, end, max_steps=max_steps)
+            await runner.run(benchmark, conns, next_episode, end, max_steps=max_steps, refill_every=cfg.refill_every)
         except ConnectionError:
             logger.error("%s: server unreachable, aborting benchmark", name)
             return self._finalize_benchmark(collector, cfg, safe_name, partial=True, server_info=conn.server_info)
         finally:
             watchdog.pet(f"{safe_name} cleanup")
-            benchmark.cleanup()
+            await runner.cleanup(benchmark)
             for c in conns:
                 await c.close()
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
+import threading
 from typing import Any, ClassVar
 from unittest.mock import patch
 
@@ -37,19 +38,24 @@ class StubVectorBenchmark(VectorStepBenchmark):
         self.resets: list[tuple[list[int], list[int]]] = []  # (slots reset, slots running at the time)
         self.steps: list[list[int]] = []
         self.misrouted: list[tuple[int, float]] = []
+        self.reset_at: list[tuple[int, list[str]]] = []  # (env steps so far, task names started)
+        self.threads: set[int] = set()
         StubVectorBenchmark.last = self
 
     def get_tasks(self) -> list[dict[str, Any]]:
         return [{"name": f"task_{i}", "length": i + 2} for i in range(self.num_tasks)]
 
     def reset(self, slots, tasks, recorders):
+        self.threads.add(threading.get_ident())
         self.resets.append((list(slots), sorted(self.running)))
+        self.reset_at.append((len(self.steps), [t["name"] for t in tasks]))
         for slot, task in zip(slots, tasks):
             self.t[slot], self.length[slot] = 0, task["length"] + task["episode_idx"] % (self.jitter + 1)
             self.running.add(slot)
         return list(slots)
 
     def step(self, actions):
+        self.threads.add(threading.get_ident())
         self.steps.append(sorted(actions))
         out = {}
         for slot, action in actions.items():
@@ -63,6 +69,7 @@ class StubVectorBenchmark(VectorStepBenchmark):
         return out
 
     def make_obs(self, raw_obs, slot, task):
+        self.threads.add(threading.get_ident())
         return {"value": float(slot + 1), "task_description": task["name"]}
 
     def get_step_result(self, slot, step_result):
@@ -70,6 +77,18 @@ class StubVectorBenchmark(VectorStepBenchmark):
 
     def get_metadata(self) -> dict[str, Any]:
         return {"max_steps": 50}
+
+    def cleanup(self) -> None:
+        self.threads.add(threading.get_ident())
+
+
+class OneTaskPerWaveStub(StubVectorBenchmark):
+    def task_group(self, task):
+        return task["name"]
+
+
+class PartialOneTaskStub(OneTaskPerWaveStub):
+    partial_reset = True
 
 
 class PartialResetStub(StubVectorBenchmark):
@@ -412,3 +431,49 @@ def test_vector_benchmarks_validate_as_benchmarks():
     assert issubclass(StubVectorBenchmark, BenchmarkCommon)
     with pytest.raises(ValueError):
         StubVectorBenchmark(num_envs=0)
+
+
+@pytest.mark.anyio
+async def test_refill_every_starts_episodes_only_on_its_steps(echo_server, tmp_path):
+    config = _config(echo_server, tmp_path, jitter=3, episodes=6)
+    config["benchmarks"][0]["refill_every"] = 4
+    result = await _run(PartialResetStub, config, no_save=True)
+    bench = StubVectorBenchmark.last
+    assert len(_episodes(result)) == 12 and result["mean_success"] == pytest.approx(1.0)
+    refills = [at for (_, running), (at, _) in zip(bench.resets, bench.reset_at) if running]
+    assert refills and all(at % 4 == 0 for at in refills)  # chunks of 4 stay in phase across slots
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("cls", [OneTaskPerWaveStub, PartialOneTaskStub])
+async def test_task_group_never_mixes_groups(echo_server, tmp_path, cls):
+    result = await _run(cls, _config(echo_server, tmp_path, jitter=2), no_save=True)
+    bench = StubVectorBenchmark.last
+    assert len(_episodes(result)) == 8 and result["mean_success"] == pytest.approx(1.0)
+    running_task: dict[int, str] = {}
+    for (slots, running), (_, names) in zip(bench.resets, bench.reset_at):
+        live = {running_task[s] for s in running}
+        assert len(set(names) | live) == 1  # one task at a time, and a new one only on free slots
+        running_task.update(zip(slots, names))
+
+
+@pytest.mark.anyio
+async def test_benchmark_runs_on_one_thread_off_the_event_loop(echo_server, tmp_path):
+    await _run(StubVectorBenchmark, _config(echo_server, tmp_path), no_save=True)
+    threads = StubVectorBenchmark.last.threads
+    assert len(threads) == 1 and threading.get_ident() not in threads
+
+
+@pytest.mark.anyio
+async def test_a_lockstep_step_is_one_full_batch(free_port, tmp_path):
+    server = BatchLogServer()
+    task = await start_server(server, free_port)
+    try:
+        await _run(
+            StubVectorBenchmark,
+            _config(f"ws://127.0.0.1:{free_port}", tmp_path, num_tasks=1, episodes=6),
+            no_save=True,
+        )
+    finally:
+        await stop_server(task)
+    assert set(server.sizes) == {3}  # the first request waits for its slot-mates, not a batch of one

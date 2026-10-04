@@ -3,18 +3,41 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Callable, Sequence
+from concurrent.futures import ThreadPoolExecutor
+from collections.abc import Callable, Hashable, Sequence
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Protocol, TypeVar
 
 import anyio
+import anyio.to_thread
 import websockets
 
 from vla_eval import watchdog
 from vla_eval.benchmarks.base import VectorStepBenchmark
 from vla_eval.recording import EpisodeRecorder, RecordingError
-from vla_eval.runners.base import EnvStartError, EnvStepError, ModelActError, episode_start_payload, phase
+from vla_eval.runners.base import (
+    EnvStartError,
+    EnvStepError,
+    EpisodeError,
+    ModelActError,
+    episode_start_payload,
+    phase,
+)
 from vla_eval.types import Action, EpisodeResult, Observation, Task
+
+
+T = TypeVar("T")
+
+
+def _try(error: type[EpisodeError], fn: Callable[..., Any], *args: Any) -> Any:
+    """``fn(*args)``, or the exception it raised (tagged with ``error``'s phase); RecordingError propagates."""
+    try:
+        with phase(error):
+            return fn(*args)
+    except RecordingError:
+        raise
+    except Exception as exc:
+        return exc
 
 
 @dataclass
@@ -53,8 +76,10 @@ class VectorEpisodeRunner:
 
     Each step sends every running slot's observation concurrently, so a batching model
     server infers them together, then steps all environments once.  Free slots take the
-    next episode from ``next_episode(slot)`` (``None`` when there is none now): at once
-    when the benchmark has ``partial_reset``, else when the whole wave has finished.  After
+    next episode from ``next_episode(slot)`` (``None`` when there is none now): when the
+    benchmark has ``partial_reset``, at the next environment step that is a multiple of
+    ``refill_every`` (the model's chunk length keeps the slots' chunks in phase, so the
+    server infers them together), else when the whole wave has finished.  After
     a ``None`` it asks again once an episode ends (a shared queue can get work back from
     another shard), and returns when no episode runs and none comes.
 
@@ -66,6 +91,21 @@ class VectorEpisodeRunner:
     ``RecordingError`` and exceptions raised by ``on_end`` propagate at once.
     """
 
+    def __init__(self) -> None:
+        # Every call into the benchmark runs on this one thread: simulators keep thread-bound state
+        # (GL/Vulkan contexts, Isaac Sim's Kit loop), and the event loop stays free meanwhile.
+        self._sim = ThreadPoolExecutor(max_workers=1, thread_name_prefix="vla-eval-sim")
+
+    async def _call(self, fn: Callable[[], T]) -> T:
+        return await anyio.to_thread.run_sync(self._sim.submit(fn).result)
+
+    async def cleanup(self, benchmark: VectorStepBenchmark) -> None:
+        """``benchmark.cleanup()`` on the simulator's thread, then release the thread."""
+        try:
+            await self._call(benchmark.cleanup)
+        finally:
+            self._sim.shutdown(wait=False)
+
     async def run(
         self,
         benchmark: VectorStepBenchmark,
@@ -74,38 +114,59 @@ class VectorEpisodeRunner:
         on_end: OnEnd,
         *,
         max_steps: int | None = None,
+        refill_every: int = 1,
     ) -> None:
         if len(conns) < benchmark.num_envs:
             raise ValueError(f"{benchmark.num_envs} environments need as many connections, got {len(conns)}")
+        if refill_every < 1:
+            raise ValueError(f"refill_every must be >= 1, got {refill_every}")
         running: dict[int, _Running] = {}
+        tick = 0  # environment steps so far; partial refills wait for a multiple of refill_every
+        group: Hashable = None  # task_group of the running episodes
+        held: tuple[int, VectorEpisode] | None = None  # another group's episode, waiting for the slots to drain
         try:
             exhausted = False
             while True:
-                if not exhausted and (benchmark.partial_reset or not running):
+                if (held or not exhausted) and (
+                    not running or (benchmark.partial_reset and held is None and tick % refill_every == 0)
+                ):
                     new: list[tuple[int, VectorEpisode]] = []
+                    if not running:
+                        tick = 0  # a new phase: later refills keep in step with these episodes
+                        if held is not None:
+                            new.append(held)
+                            group, held = benchmark.task_group(held[1].task), None
                     for slot in range(benchmark.num_envs):
-                        if slot in running:
+                        if slot in running or any(slot == s for s, _ in new):
                             continue
                         episode = next_episode(slot)
                         if episode is None:
                             exhausted = True
                             break
+                        key = benchmark.task_group(episode.task)
+                        if (running or new) and key != group:
+                            held = (slot, episode)
+                            break
+                        group = key
                         new.append((slot, episode))
                     if new:
                         await self._start(benchmark, conns, new, running, on_end)
                 if not running:
-                    if exhausted:
+                    if exhausted and held is None:
                         return
                     continue
                 before = len(running)
                 actions = await self._act(conns, running, on_end)
                 if actions:
                     await self._step(benchmark, conns, actions, running, on_end, max_steps)
+                    tick += 1
                 if len(running) < before:
                     exhausted = False
         except ConnectionError as exc:
             for r in running.values():
                 on_end(r.episode, None, exc, aborted=True)
+            if held is not None:
+                on_end(held[1], None, exc, aborted=True)
             raise
 
     async def _start(
@@ -119,22 +180,30 @@ class VectorEpisodeRunner:
         slots = [slot for slot, _ in new]
         episodes = [episode for _, episode in new]
         t0 = time.monotonic()
-        try:
+
+        def reset() -> list[Observation | Exception]:
             with phase(EnvStartError):
                 raws = benchmark.reset(slots, [e.task for e in episodes], [e.recorder for e in episodes])
                 if len(raws) != len(slots):
                     raise ValueError(f"reset() returned {len(raws)} observations for {len(slots)} slots")
+            return [
+                _try(EnvStartError, benchmark.make_obs, raw, slot, e.task)
+                for raw, slot, e in zip(raws, slots, episodes)
+            ]
+
+        try:
+            observations = await self._call(reset)
         except RecordingError:
             raise
         except Exception as exc:  # an EpisodeError, or a transport-type error phase() lets through
             self._end_all(episodes, exc, on_end)
             return
-        pending = list(zip(slots, episodes, raws))
+        pending = list(zip(slots, episodes, observations))
         while pending:
-            slot, episode, raw = pending.pop(0)
+            slot, episode, obs = pending.pop(0)
             try:
-                with phase(EnvStartError):
-                    obs = benchmark.make_obs(raw, slot, episode.task)
+                if isinstance(obs, Exception):
+                    raise obs
                 await conns[slot].start_episode(episode_start_payload(episode.task, episode.recorder))
             except RecordingError:
                 raise
@@ -179,30 +248,48 @@ class VectorEpisodeRunner:
         on_end: OnEnd,
         max_steps: int | None,
     ) -> None:
-        try:
+        for slot in actions:
+            running[slot].steps += 1
+
+        def step() -> dict[int, tuple[bool, Any]]:
+            """Step, then per slot ``(False, observation)`` to go on, ``(True, metrics)`` at its end, or an error."""
             with phase(EnvStepError):
                 results = benchmark.step(actions)
+            out: dict[int, Any] = {}
+            for slot in actions:
+                r = running[slot]
+
+                def settle() -> tuple[bool, Any]:
+                    if slot not in results:
+                        raise KeyError(f"step() returned no result for slot {slot}")
+                    sr = results[slot]
+                    if not benchmark.check_done(sr) and (max_steps is None or r.steps < max_steps):
+                        return False, benchmark.make_obs(sr.obs, slot, r.episode.task)
+                    return True, benchmark.get_step_result(slot, sr)
+
+                out[slot] = _try(EnvStepError, settle)
+            return out
+
+        try:
+            outcomes = await self._call(step)
         except RecordingError:
             raise
         except Exception as exc:
             self._end_all([running.pop(slot).episode for slot in actions], exc, on_end)
             return
         watchdog.pet()  # a slow simulator's episode can outlast the stall timeout
-        for slot in actions:
+        for slot, outcome in outcomes.items():
             r = running[slot]
-            r.steps += 1
             try:
-                with phase(EnvStepError):
-                    if slot not in results:
-                        raise KeyError(f"step() returned no result for slot {slot}")
-                    sr = results[slot]
-                    if not benchmark.check_done(sr) and (max_steps is None or r.steps < max_steps):
-                        r.obs = benchmark.make_obs(sr.obs, slot, r.episode.task)
-                        continue
-                    metrics = benchmark.get_step_result(slot, sr)
+                if isinstance(outcome, Exception):
+                    raise outcome
+                ended, value = outcome
+                if not ended:
+                    r.obs = value
+                    continue
                 del running[slot]
                 result: EpisodeResult = {
-                    "metrics": metrics,
+                    "metrics": value,
                     "steps": r.steps,
                     "elapsed_sec": round(time.monotonic() - r.t0, 3),
                 }

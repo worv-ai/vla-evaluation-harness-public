@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Hashable
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -351,3 +352,9 @@ class VectorStepBenchmark(BenchmarkCommon):
     def check_done(self, step_result: StepResult) -> bool:
         """Check if a slot's episode should terminate. Default: ``step_result.done``."""
         return step_result.done
+
+    def task_group(self, task: Task) -> Hashable:
+        """Tasks whose episodes may run at once: the harness never runs two groups together, and starts
+        another group's episodes once every slot is free.  Default: one group.  Override when the
+        environments share one scene (Isaac Lab, a ManiSkill reconfigure), e.g. ``return task["name"]``."""
+        return None

@@ -189,6 +189,9 @@ class EvalConfig:
             multiple benchmarks in the same config share a class.
         episodes_per_task: Number of episodes to run per task.
         max_steps: Step limit per episode.  ``None`` → use benchmark metadata.
+        refill_every: Vector benchmarks with ``partial_reset``: start new episodes only every this many
+            environment steps.  Set it to the model's chunk length so the slots' chunks stay in phase and
+            the server infers them in one batch; ``1`` starts a freed slot's next episode at once.
         max_tasks: Cap on number of tasks.  ``None`` → run all tasks.
         tasks: Filter to specific task names/suites.  ``None`` → all tasks.
         params: Benchmark-specific kwargs passed to the constructor.
@@ -208,6 +211,7 @@ class EvalConfig:
     subname: str | None = None
     episodes_per_task: int = 1
     max_steps: int | None = None
+    refill_every: int = 1
     max_tasks: int | None = None
     tasks: list[str] | None = None
     params: dict[str, Any] = field(default_factory=dict)
@@ -237,6 +241,7 @@ class EvalConfig:
             subname=data.get("subname"),
             episodes_per_task=data.get("episodes_per_task", 1),
             max_steps=data.get("max_steps"),
+            refill_every=data.get("refill_every", 1),
             max_tasks=data.get("max_tasks"),
             tasks=data.get("tasks"),
             params=data.get("params", {}),
