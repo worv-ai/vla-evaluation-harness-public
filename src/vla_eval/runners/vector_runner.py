@@ -40,6 +40,10 @@ def _try(error: type[EpisodeError], fn: Callable[..., Any], *args: Any) -> Any:
         return exc
 
 
+def _raise(exc: Exception) -> None:
+    raise exc
+
+
 @dataclass
 class VectorEpisode:
     """One episode for the runner; ``ref`` is the caller's handle, returned in ``on_end``."""
@@ -187,7 +191,9 @@ class VectorEpisodeRunner:
                 if len(raws) != len(slots):
                     raise ValueError(f"reset() returned {len(raws)} observations for {len(slots)} slots")
             return [
-                _try(EnvStartError, benchmark.make_obs, raw, slot, e.task)
+                _try(EnvStartError, _raise, raw)  # the benchmark failed this slot alone
+                if isinstance(raw, Exception)
+                else _try(EnvStartError, benchmark.make_obs, raw, slot, e.task)
                 for raw, slot, e in zip(raws, slots, episodes)
             ]
 

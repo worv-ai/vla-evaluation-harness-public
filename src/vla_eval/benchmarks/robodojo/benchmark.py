@@ -36,7 +36,7 @@ from typing import Any
 import numpy as np
 from anyio.to_thread import run_sync as _run_in_thread
 
-from vla_eval.benchmarks.base import StepBenchmark, StepResult
+from vla_eval.benchmarks.base import StepBenchmark, StepResult, VectorStepBenchmark
 from vla_eval.recording import EpisodeRecorder, NullEpisodeRecorder
 from vla_eval.specs import IMAGE_RGB, LANGUAGE, STATE_JOINT, DimSpec
 from vla_eval.types import Action, EpisodeResult, Observation, Task
@@ -157,7 +157,7 @@ class RoboDojoBenchmark(StepBenchmark):
             setattr(signal, "signal", original_signal)
         self._app = launcher.app
 
-    def _build_env(self, task_name: str) -> Any:
+    def _build_env(self, task_name: str, num_envs: int = 1) -> Any:
         self._launch_app()
         from omegaconf import OmegaConf
 
@@ -172,9 +172,9 @@ class RoboDojoBenchmark(StepBenchmark):
         eval_cfg.update(
             {
                 "task_name": task_name,
-                "num_envs": 1,
+                "num_envs": num_envs,
                 "device_id": 0,
-                "eval_batch": False,
+                "eval_batch": num_envs > 1,
                 "policy_name": "vla_eval",
                 "additional_info": "vla_eval",
                 "seed": self._seed,
@@ -196,7 +196,7 @@ class RoboDojoBenchmark(StepBenchmark):
                 "eval_cfg": eval_cfg,
             }
         )
-        OmegaConf.update(cfg, "sim.scene.num_envs", 1, force_add=True)
+        OmegaConf.update(cfg, "sim.scene.num_envs", num_envs, force_add=True)
         cfg = process_randomization(cfg)
         cfg, eval_num = process_config(cfg, task_name=task_name)
         if not self._enable_planner:
@@ -208,7 +208,7 @@ class RoboDojoBenchmark(StepBenchmark):
             eval_cfg.get("observation", {}).get("collect_freq", 0),
             force_add=True,
         )
-        cfg.sim.seed = [0]
+        cfg.sim.seed = [0] * num_envs
 
         # Keep EvalEnv from opening its legacy policy connection while it is
         # being constructed; the harness connection is authoritative.
@@ -228,8 +228,9 @@ class RoboDojoBenchmark(StepBenchmark):
             self._bounded_close(env)
             raise RuntimeError(f"RoboDojo embodiment reports action dims {actual_dims}, expected {ACTION_DIMS}")
         logger.info(
-            "RoboDojo env built: task=%s step_lim=%s native_eval_num=%s layout_group=%s",
+            "RoboDojo env built: task=%s num_envs=%d step_lim=%s native_eval_num=%s layout_group=%s",
             task_name,
+            num_envs,
             getattr(env, "step_lim", "?"),
             eval_num,
             self._seed,
@@ -490,3 +491,118 @@ class RoboDojoBenchmark(StepBenchmark):
 
     async def apply_action(self, action: Action) -> None:
         self._last_result = await _run_in_thread(self.step, action)
+
+
+class RoboDojoVectorBenchmark(VectorStepBenchmark):
+    """RoboDojo with ``num_envs`` environments in one Isaac scene, as upstream's batched eval
+    (``eval_batch``): one render and one physics loop serve every slot.
+
+    Episodes run in waves (one ``EvalEnv.reset`` loads every environment's layout and settles
+    them together) of one task: Isaac builds the task into the scene, so a process holds one
+    task, as :class:`RoboDojoBenchmark`.  Episode ``episode_idx`` runs layout ``episode_idx``
+    of the group (``seed``); a layout that fails its stability check fails its episode
+    (``env_start``) instead of being skipped for the next one.  Params as
+    :class:`RoboDojoBenchmark`, plus ``num_envs``.
+    """
+
+    def __init__(self, num_envs: int = 4, **kwargs: Any) -> None:
+        super().__init__(num_envs)
+        self._base = RoboDojoBenchmark(**kwargs)
+        self._env: Any = None
+        self._task_name = ""
+        self._layouts = [-1] * num_envs
+        self._recorders: dict[int, EpisodeRecorder] = {}
+
+    def get_tasks(self) -> list[Task]:
+        return self._base.get_tasks()
+
+    def task_group(self, task: Task) -> Any:
+        return task["name"]
+
+    def reset(self, slots: list[int], tasks: list[Task], recorders: list[EpisodeRecorder]) -> list[Any]:
+        name = str(tasks[0]["name"])
+        if self._env is None:
+            self._env = self._base._build_env(name, num_envs=self.num_envs)
+            self._task_name = name
+        elif name != self._task_name:
+            raise RuntimeError("RoboDojo runs one task per process; give each task its own `vla-eval run`")
+        env = self._env
+        total = len(env.seed_manager.seed_list)
+        seeds: list[int | None] = [None] * self.num_envs
+        for slot, task in zip(slots, tasks):
+            seeds[slot] = int(task["episode_idx"])
+            if seeds[slot] >= total:
+                raise RuntimeError(f"RoboDojo {name}: layout {seeds[slot]} past the group's {total}")
+        self._layouts = [-1 if s is None else s for s in seeds]
+        self._recorders = dict(zip(slots, recorders))
+        env.reset(seed=seeds)  # every slot's layout unstable raises: all of them fail
+        env.run_reward()
+        if hasattr(env, "get_score"):
+            env.get_score()  # registers the process-score checks before the first step
+        live = [slot for slot in slots if not env.end_flag[slot]]
+        obs = dict(zip(live, env.get_obs_batch(env_idx_list=live))) if live else {}
+        out: list[Any] = []
+        for slot in slots:
+            if slot not in obs:
+                out.append(RuntimeError(f"RoboDojo {name}: layout {seeds[slot]} failed its stability check"))
+                continue
+            self._recorders[slot].record_video(self._base._extract_frame(obs[slot]))
+            out.append(obs[slot])
+        return out
+
+    def step(self, actions: dict[int, Action]) -> dict[int, StepResult]:
+        env = self._env
+        slots = [slot for slot in sorted(actions) if not env.end_flag[slot]]
+        if slots:  # take_action_batch ends the episodes that finished (is_episode_end)
+            unflatten = self._base._unflatten_action
+            env.take_action_batch(
+                [unflatten(actions[s].get("actions", actions[s].get("action"))) for s in slots], env_idx_list=slots
+            )
+        live = [slot for slot in slots if not env.end_flag[slot]]
+        obs = dict(zip(live, env.get_obs_batch(env_idx_list=live))) if live else {}
+        scores = None
+        out: dict[int, StepResult] = {}
+        for slot in actions:
+            done = bool(env.end_flag[slot])
+            success = bool(done and env.success[slot])
+            score = 0.0
+            if success:
+                score = 1.0
+            elif done and hasattr(env, "get_score"):
+                if scores is None:
+                    scores = env.reward_manager.get_score()
+                score = float(scores[slot]) / 100.0
+            recorder = self._recorders[slot]
+            recorder.record_video(self._base._extract_frame(obs.get(slot)))
+            recorder.record_step(reward=float(success), done=done, success=success, score=score)
+            out[slot] = StepResult(
+                obs=obs.get(slot), reward=float(success), done=done, info={"success": success, "score": score}
+            )
+        return out
+
+    def make_obs(self, raw_obs: Any, slot: int, task: Task) -> Observation:
+        return self._base.make_obs(raw_obs, task)
+
+    def get_step_result(self, slot: int, step_result: StepResult) -> EpisodeResult:
+        return {
+            "success": bool(step_result.info.get("success", False)),
+            "score": float(step_result.info.get("score", 0.0)),
+            "layout_id": self._layouts[slot],
+        }
+
+    def get_metric_keys(self) -> dict[str, str]:
+        return self._base.get_metric_keys()
+
+    def get_metadata(self) -> dict[str, Any]:
+        return {**self._base.get_metadata(), "num_envs": self.num_envs}
+
+    def get_action_spec(self) -> dict[str, DimSpec]:
+        return self._base.get_action_spec()
+
+    def get_observation_spec(self) -> dict[str, DimSpec]:
+        return self._base.get_observation_spec()
+
+    def cleanup(self) -> None:
+        if self._env is not None:
+            env, self._env = self._env, None
+            self._base._bounded_close(env)

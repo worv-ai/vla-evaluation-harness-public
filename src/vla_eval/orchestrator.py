@@ -20,6 +20,8 @@ from vla_eval import __version__, watchdog
 from vla_eval.benchmarks.base import VectorStepBenchmark
 from vla_eval.config import EvalConfig, ServerConfig
 from vla_eval.connection import Connection
+from vla_eval.protocol.image_codec import ImageFormat
+from vla_eval.protocol.numpy_codec import set_image_format
 from vla_eval.recording import (
     DEFAULT_FILENAME_STEM,
     EpisodeRecorder,
@@ -153,6 +155,7 @@ class Orchestrator:
     ) -> None:
         self.config = config
         self._server_cfg = ServerConfig.from_dict(config.get("server"))
+        set_image_format(cast(ImageFormat, self._server_cfg.image_format))
         self._render_mode = normalize_render_mode(config.get("render"))
         self.shard_id = shard_id
         self.num_shards = num_shards

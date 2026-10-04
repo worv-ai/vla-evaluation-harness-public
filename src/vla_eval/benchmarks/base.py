@@ -306,7 +306,8 @@ class VectorStepBenchmark(BenchmarkCommon):
 
         - ``reset(slots, tasks, recorders)`` → the first raw observation of each slot:
           start the episode ``tasks[i]`` in environment ``slots[i]``, recording through
-          ``recorders[i]`` (never None; Null when recording is off).
+          ``recorders[i]`` (never None; Null when recording is off).  An exception in place
+          of a slot's observation fails that episode alone (e.g. an unstable layout).
         - ``step(actions)`` → ``{slot: StepResult}``: advance every environment one step.
           ``actions`` maps each running slot to its action and the result holds those
           slots.  A slot missing from ``actions`` is idle: keep it inert (hold its targets,

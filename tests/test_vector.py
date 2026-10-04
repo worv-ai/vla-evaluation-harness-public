@@ -105,6 +105,14 @@ class BrokenResetStub(StubVectorBenchmark):
         raise RuntimeError("Failed to find a supported physical device")
 
 
+class UnstableSlotStub(StubVectorBenchmark):
+    """Slot 1's environment cannot start its episodes."""
+
+    def reset(self, slots, tasks, recorders):
+        raws = super().reset(slots, tasks, recorders)
+        return [RuntimeError("unstable layout") if s == 1 else raw for s, raw in zip(slots, raws)]
+
+
 class SlotTwoModelErrorStub(StubVectorBenchmark):
     """Slot 1 sends a value the error server rejects."""
 
@@ -477,3 +485,25 @@ async def test_a_lockstep_step_is_one_full_batch(free_port, tmp_path):
     finally:
         await stop_server(task)
     assert set(server.sizes) == {3}  # the first request waits for its slot-mates, not a batch of one
+
+
+@pytest.mark.anyio
+async def test_a_slot_reset_returns_as_an_exception_fails_alone(echo_server, tmp_path):
+    result = await _run(UnstableSlotStub, _config(echo_server, tmp_path, episodes=3), no_save=True)
+    episodes = [ep for _, ep in _episodes(result)]
+    failed = [ep for ep in episodes if ep.get("failure_reason")]
+    assert len(episodes) == 6 and len(failed) == 2  # slot 1 took one episode in each of the two waves
+    assert {ep["failure_reason"] for ep in failed} == {"env_start"}
+    assert all(ep["metrics"]["success"] for ep in episodes if not ep.get("failure_reason"))
+
+
+def test_server_image_format_sets_the_wire_encoding(tmp_path):
+    from vla_eval.protocol.numpy_codec import get_image_format, set_image_format
+
+    try:
+        Orchestrator(_config("ws://127.0.0.1:1", tmp_path) | {"server": {"image_format": "raw"}})
+        assert get_image_format() == "raw"
+        with pytest.raises(ValueError, match="image_format"):
+            Orchestrator(_config("ws://127.0.0.1:1", tmp_path) | {"server": {"image_format": "webp"}})
+    finally:
+        set_image_format("png")

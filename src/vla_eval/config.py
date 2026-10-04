@@ -41,6 +41,12 @@ def _parse_paced(data: dict[str, Any]) -> bool:
     return True  # default: real-time
 
 
+def _image_format(value: Any) -> str:
+    if value not in ("png", "raw", "jpeg"):
+        raise ValueError(f"server.image_format must be png, raw or jpeg, not {value!r}")
+    return value
+
+
 @dataclass
 class ServerConfig:
     """Model server connection settings.
@@ -48,10 +54,14 @@ class ServerConfig:
     Attributes:
         url: WebSocket URL of the model server.
         timeout: Seconds to wait for each server response in ``Connection.act()``.
+        image_format: How observation images travel: ``png`` (lossless, ~1.3-2x smaller, ~10 ms per
+            224x224 frame to encode), ``raw`` (lossless, no encoding: the choice on one host or a fast
+            network) or ``jpeg`` (lossy).
     """
 
     url: str = "ws://localhost:8000"
     timeout: float = 30.0
+    image_format: str = "png"
 
     @classmethod
     def from_dict(cls, data: dict[str, Any] | None) -> ServerConfig:
@@ -60,6 +70,7 @@ class ServerConfig:
         return cls(
             url=data.get("url", cls.url),
             timeout=float(data.get("timeout", cls.timeout)),
+            image_format=_image_format(data.get("image_format", cls.image_format)),
         )
 
     def to_dict(self) -> dict[str, Any]:
