@@ -529,22 +529,27 @@ class RoboDojoVectorBenchmark(VectorStepBenchmark):
         env = self._env
         total = len(env.seed_manager.seed_list)
         seeds: list[int | None] = [None] * self.num_envs
+        failed: dict[int, Exception] = {}
         for slot, task in zip(slots, tasks):
-            seeds[slot] = int(task["episode_idx"])
-            if seeds[slot] >= total:
-                raise RuntimeError(f"RoboDojo {name}: layout {seeds[slot]} past the group's {total}")
+            layout = int(task["episode_idx"])
+            if layout < total:
+                seeds[slot] = layout
+            else:
+                failed[slot] = RuntimeError(f"RoboDojo {name}: no layout {layout} in a group of {total}")
         self._layouts = [-1 if s is None else s for s in seeds]
         self._recorders = dict(zip(slots, recorders))
-        env.reset(seed=seeds)  # every slot's layout unstable raises: all of them fail
-        env.run_reward()
-        if hasattr(env, "get_score"):
-            env.get_score()  # registers the process-score checks before the first step
-        live = [slot for slot in slots if not env.end_flag[slot]]
-        obs = dict(zip(live, env.get_obs_batch(env_idx_list=live))) if live else {}
+        obs: dict[int, Any] = {}
+        if any(s is not None for s in seeds):
+            env.reset(seed=seeds)  # raises when every layout is unstable: all of them fail
+            env.run_reward()
+            if hasattr(env, "get_score"):
+                env.get_score()  # registers the process-score checks before the first step
+            live = [slot for slot in slots if slot not in failed and not env.end_flag[slot]]
+            obs = dict(zip(live, env.get_obs_batch(env_idx_list=live))) if live else {}
         out: list[Any] = []
         for slot in slots:
             if slot not in obs:
-                out.append(RuntimeError(f"RoboDojo {name}: layout {seeds[slot]} failed its stability check"))
+                out.append(failed.get(slot) or RuntimeError(f"RoboDojo {name}: layout {seeds[slot]} is unstable"))
                 continue
             self._recorders[slot].record_video(self._base._extract_frame(obs[slot]))
             out.append(obs[slot])
@@ -558,8 +563,8 @@ class RoboDojoVectorBenchmark(VectorStepBenchmark):
             env.take_action_batch(
                 [unflatten(actions[s].get("actions", actions[s].get("action"))) for s in slots], env_idx_list=slots
             )
-        live = [slot for slot in slots if not env.end_flag[slot]]
-        obs = dict(zip(live, env.get_obs_batch(env_idx_list=live))) if live else {}
+        # every stepped slot, so an ended episode's video gets its terminal frame
+        obs = dict(zip(slots, env.get_obs_batch(env_idx_list=slots))) if slots else {}
         scores = None
         out: dict[int, StepResult] = {}
         for slot in actions:

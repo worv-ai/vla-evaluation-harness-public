@@ -40,6 +40,7 @@ class VectorStepBenchmark(BenchmarkCommon):
     def make_obs(self, raw_obs: Any, slot: int, task: Task) -> Observation: ...
     def get_step_result(self, slot: int, step_result: StepResult) -> EpisodeResult: ...
     def check_done(self, step_result: StepResult) -> bool: ...  # default: step_result.done
+    def task_group(self, task: Task) -> Hashable: ...  # default: None, every task runs together
 ```
 
 A slot is an environment index.  `reset` starts `tasks[i]` in slot `slots[i]`; `step`
@@ -48,6 +49,19 @@ missing from `actions` is idle and the benchmark keeps it inert.  Everything a b
 declares besides stepping (tasks, specs, metric keys, metadata, render backends, the
 real-time hold, cleanup) moved to `BenchmarkCommon`, the shared parent of `Benchmark` and
 `VectorStepBenchmark`; `Benchmark`'s interface is unchanged.
+
+`reset` may put an exception in place of a slot's observation: that episode alone fails
+(`env_start`), as when one layout of a wave fails its stability check.
+
+An episode's outcome depends only on its task (seed, layout), never on the slot, on
+`num_envs`, or on the episodes that run beside it.  The native simulators break this by
+default: mjlab, ManiSkill3 and Isaac Lab draw reset randomisation from one global RNG in a
+batch, so an adapter seeds each slot itself (per-slot generators, or a published layout as in
+RoboDojo) and turns native auto-reset off.
+
+`task_group` names the tasks that may run at once.  Simulators that build one scene for all
+environments (Isaac Lab, a ManiSkill3 reconfigure) hold one task at a time; the harness never
+mixes groups and starts another group's episodes once every slot is free.
 
 `partial_reset` declares per-environment resets.  With it, a slot that finishes takes the
 next episode at once.  Without it, the runner resets only when no slot is running and runs
@@ -60,6 +74,16 @@ slot's observation concurrently (one anyio task per slot), steps the environment
 returned actions, and ends the episodes that are done or reached `max_steps`.  The step
 count, `max_steps` and `elapsed_sec` (wall time from the episode's reset) are per episode,
 as in `SyncEpisodeRunner`.
+
+Every call into the benchmark (`reset`, `step`, `make_obs`, `cleanup`, ...) runs on one
+dedicated thread: Isaac Sim's Kit loop, GL/Vulkan contexts and CUDA state are bound to the
+thread that created them, and the event loop stays free for the slots' connections.
+
+With `partial_reset`, `refill_every: N` (eval config) starts new episodes only on environment
+steps that are a multiple of N.  A chunking server answers most steps from its buffer and
+infers when a session's chunk runs out; refills at arbitrary steps put the slots' chunk
+boundaries out of phase, and the server then infers a few slots on almost every step instead
+of all of them every N steps.  Set N to the chunk length.
 
 One session per running episode keeps every per-session mechanism as it is: chunk buffers
 and `ctx.is_first` in `PredictModelServer`, model-side history keyed by `ctx.session_id`,
@@ -83,6 +107,7 @@ Failures stay with their episode:
 | Failure | Episodes that end | Then |
 |---------|-------------------|------|
 | `reset` raises | those it was starting (`env_start`) | next items |
+| `reset` returns an exception for a slot | that slot's (`env_start`) | next items |
 | `make_obs` / `start_episode` raises | that slot's | next items |
 | `step` raises | every running one (`env_step`) | next items |
 | server `ERROR` reply | that slot's (`model_act`) | continue |
@@ -91,6 +116,20 @@ Failures stay with their episode:
 
 The unhealthy-shard check (RFC-0006) counts episodes as before; with
 `--requeue-unhealthy` it also releases the shard's in-flight items.
+
+### Transport
+
+A lockstep step sends every running slot's observation at once, so three costs that hide
+behind one environment per process show up:
+
+- `PredictModelServer` waits up to `max_wait_time` for a full batch also when the first
+  request wakes it from idle; before, that first request went alone and the rest of the step
+  followed as a second batch.  Raise `max_wait_time` (e.g. 0.05 s) when the slots' images are
+  large enough to spread their arrival.
+- `Connection` encodes messages on worker threads: the default PNG encoding takes ~10 ms per
+  224×224 frame, which serialised on the event loop is slots × cameras per step.
+- `server.image_format: raw` sends images unencoded (lossless), the choice when the server is
+  on the same host or a fast network.
 
 ### Composition with sharding
 
