@@ -503,6 +503,11 @@ class RoboDojoVectorBenchmark(VectorStepBenchmark):
     of the group (``seed``); a layout that fails its stability check fails its episode
     (``env_start``) instead of being skipped for the next one.  Params as
     :class:`RoboDojoBenchmark`, plus ``num_envs``.
+
+    Not yet protocol-equivalent: on an A100 (no RT cores) Isaac Sim's tiled multi-env render
+    returns black wrist cameras (~79 % zero pixels) and a head camera off by 4-18/255 against
+    ``num_envs=1``, while joint states match.  Verify frames against ``num_envs=1`` on the GPU
+    you run before trusting scores (RFC-0009).
     """
 
     def __init__(self, num_envs: int = 4, **kwargs: Any) -> None:

@@ -120,10 +120,10 @@ mean. The four tasks that build average 9.6 / 8.3%.
 
 ## Known gaps / future work
 
-- **Batched evaluation.** RoboDojo's `EvalEnv` supports `num_envs > 1` with tiled rendering and
-  XPolicyLab exposes `update_obs_batch` / `get_action_batch`. Exploiting it needs a vectorized
-  benchmark interface in the harness (one benchmark instance driving N concurrent episodes).
-  That is the single biggest available speedup for this benchmark.
+- **Batched evaluation.** `RoboDojoVectorBenchmark` drives `EvalEnv` with `num_envs > 1`
+  (RFC-0009): ~10× the env steps per A100 at `num_envs=8`, but on an A100 the tiled render
+  returns black wrist cameras, so its frames are not yet equivalent to `num_envs=1`
+  (RFC-0009, Measured).
 - **Competition-task metric deviation.** The 3 `dual_x5_and_franka_competition` tasks
   (`imitate_sorting_sequence`, `make_kong`, `play_tic_tac_toe`) can mark an episode "unstable"
   when the scripted Franka move fails; upstream *excludes* those from the denominator, but
