@@ -106,3 +106,38 @@ async def test_listening_reraises_bare_exception(echo_server):
         with pytest.raises(TimeoutError):
             async with conn.listening():
                 raise TimeoutError("boom")
+
+
+@pytest.mark.anyio
+async def test_concurrent_sends_leave_in_sequence_order(monkeypatch):
+    """Encoding runs on worker threads; a slow first message must still reach the socket first."""
+    import time
+
+    import anyio
+    from websockets.protocol import State
+
+    import vla_eval.connection as connection_module
+    from vla_eval.protocol.messages import MessageType, pack_message, unpack_message
+
+    class FakeSocket:
+        state = State.OPEN
+
+        def __init__(self) -> None:
+            self.sent: list[int] = []
+
+        async def send(self, data: bytes) -> None:
+            self.sent.append(unpack_message(data).seq)
+
+    def slow_first(msg):
+        if msg.seq == 1:
+            time.sleep(0.2)
+        return pack_message(msg)
+
+    monkeypatch.setattr(connection_module, "pack_message", slow_first)
+    conn = Connection("ws://unused")
+    conn._ws = FakeSocket()
+    async with anyio.create_task_group() as tg:
+        for _ in range(4):
+            tg.start_soon(conn.send, MessageType.OBSERVATION, {"value": 1.0})
+            await anyio.sleep(0.01)
+    assert conn._ws.sent == [1, 2, 3, 4]

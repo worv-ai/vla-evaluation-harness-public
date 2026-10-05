@@ -68,6 +68,7 @@ class Connection:
         self.backoff_base = backoff_base
         self._ws: Any = None
         self._seq: int = 0
+        self._send_lock = anyio.Lock()
         self._action_callback: Callable[[Action], None] | None = None
         self._benchmark: str | None = None
         self.server_info: dict[str, Any] = {}
@@ -107,13 +108,14 @@ class Connection:
         Auto-reconnects if the connection was lost.
         Sequence numbers are managed internally — callers never set them.
         """
-        seq = self._next_seq()
-        msg = Message(type=msg_type, payload=payload, seq=seq)
-        await self._ensure_connected()
-        # Encoding images (PNG by default) takes milliseconds: off the event loop, so the
-        # concurrent sends of a vector benchmark's slots encode in parallel.
-        data = await anyio.to_thread.run_sync(pack_message, msg, limiter=_ENCODE_LIMITER)
-        await self._ws.send(data)
+        await self._ensure_connected()  # outside the lock: a reconnect sends HELLO through here
+        async with self._send_lock:  # one connection's messages leave in sequence order
+            seq = self._next_seq()
+            msg = Message(type=msg_type, payload=payload, seq=seq)
+            # Encoding images (PNG by default) takes milliseconds: off the event loop, so the
+            # concurrent sends of a vector benchmark's slots encode in parallel.
+            data = await anyio.to_thread.run_sync(pack_message, msg, limiter=_ENCODE_LIMITER)
+            await self._ws.send(data)
         return seq
 
     async def recv(self, *, timeout: float | None = None) -> Message:

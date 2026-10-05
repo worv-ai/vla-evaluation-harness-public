@@ -324,6 +324,11 @@ class VectorStepBenchmark(BenchmarkCommon):
 
     The harness counts steps and ``max_steps`` per episode, and measures each episode's
     ``elapsed_sec`` as wall time from its reset.
+
+    ``reset``, ``step``, ``make_obs``, ``get_step_result``, ``check_done`` and ``cleanup`` run on
+    one dedicated thread; the constructor, ``get_tasks``, ``get_metadata`` and ``task_group`` run
+    on the orchestrator's thread.  Build thread-bound state (a simulator, GL/Vulkan contexts, Isaac
+    Sim's Kit) lazily in the first ``reset``.
     """
 
     partial_reset: ClassVar[bool] = False

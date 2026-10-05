@@ -75,9 +75,11 @@ returned actions, and ends the episodes that are done or reached `max_steps`.  T
 count, `max_steps` and `elapsed_sec` (wall time from the episode's reset) are per episode,
 as in `SyncEpisodeRunner`.
 
-Every call into the benchmark (`reset`, `step`, `make_obs`, `cleanup`, ...) runs on one
-dedicated thread: Isaac Sim's Kit loop, GL/Vulkan contexts and CUDA state are bound to the
-thread that created them, and the event loop stays free for the slots' connections.
+The runner's calls into the benchmark (`reset`, `step`, `make_obs`, `get_step_result`,
+`check_done`, `cleanup`) run on one dedicated thread: Isaac Sim's Kit loop, GL/Vulkan contexts
+and CUDA state are bound to the thread that created them, and the event loop stays free for the
+slots' connections.  The constructor, `get_tasks`, `get_metadata` and `task_group` still run on
+the orchestrator's thread, so an adapter builds its simulator lazily in the first `reset`.
 
 With `partial_reset`, `refill_every: N` (eval config) starts new episodes only on environment
 steps that are a multiple of N.  A chunking server answers most steps from its buffer and
