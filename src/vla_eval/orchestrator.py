@@ -12,11 +12,9 @@ import traceback
 import uuid
 from collections.abc import Callable, Collection, Iterator, Mapping
 from dataclasses import dataclass
-from functools import partial
 from pathlib import Path
 from typing import Any, cast
 
-import anyio
 import websockets
 
 from vla_eval import __version__, watchdog
@@ -588,9 +586,8 @@ class Orchestrator:
 
         runner = VectorEpisodeRunner()
         try:
-            async with anyio.create_task_group() as tg:
-                for c in conns[1:]:
-                    tg.start_soon(partial(c.connect, benchmark=e.cfg.benchmark))
+            for c in conns[1:]:  # one after another: a task group would wrap a ConnectionError in a group
+                await c.connect(benchmark=e.cfg.benchmark)
             logger.info("%s: %d environments, one server session each", e.name, benchmark.num_envs)
             await runner.run(
                 benchmark, conns, next_episode, end, max_steps=e.max_steps, refill_every=e.cfg.refill_every
