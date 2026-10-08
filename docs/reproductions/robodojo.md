@@ -121,9 +121,9 @@ mean. The four tasks that build average 9.6 / 8.3%.
 ## Known gaps / future work
 
 - **Batched evaluation.** `RoboDojoVectorBenchmark` drives `EvalEnv` with `num_envs > 1`
-  (RFC-0009): ~10× the env steps per A100 at `num_envs=8`, but on an A100 the tiled render
-  returns black wrist cameras, so its frames are not yet equivalent to `num_envs=1`
-  (RFC-0009, Measured).
+  (RFC-0009): ~10× the env steps per A100 at `num_envs=8`, but on A100 and H100 the tiled render
+  returns black wrist cameras (upstream's `main.py --num_envs 4` does too), so its frames are not
+  yet equivalent to `num_envs=1` (RFC-0009, Measured).
 - **Competition-task metric deviation.** The 3 `dual_x5_and_franka_competition` tasks
   (`imitate_sorting_sequence`, `make_kong`, `play_tic_tac_toe`) can mark an episode "unstable"
   when the scripted Franka move fails; upstream *excludes* those from the denominator, but

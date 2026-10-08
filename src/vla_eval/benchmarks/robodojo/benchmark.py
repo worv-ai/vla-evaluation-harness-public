@@ -509,10 +509,9 @@ class RoboDojoVectorBenchmark(VectorStepBenchmark):
       batch: tasks with articulated objects fail from their second wave on ("Object ... of type
       articulation not found"; 7 task configs).
 
-    Not yet protocol-equivalent: on an A100 (no RT cores) Isaac Sim's tiled multi-env render
-    returns black wrist cameras (~79 % zero pixels) and a head camera off by 4-18/255 against
-    ``num_envs=1``, while joint states match.  Verify frames against ``num_envs=1`` on the GPU
-    you run before trusting scores (RFC-0009).
+    Not yet protocol-equivalent: with ``num_envs > 1`` Isaac Sim's tiled render returns black wrist
+    cameras (~79 % zero pixels) on A100 and H100, as upstream's own batched eval does there; joint
+    states match ``num_envs=1``.  Compare frames with ``num_envs=1`` on your GPU first (RFC-0009).
     """
 
     def __init__(self, num_envs: int = 4, **kwargs: Any) -> None:

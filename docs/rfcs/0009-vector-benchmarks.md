@@ -142,7 +142,7 @@ One A100 80GB (PCIe), sync mode, a hold-style model server answering at once unl
 | Synthetic (harness only) | 32 slots, 128 episodes of 200-400 steps, 10 ms step, chunk 10, server 60 ms + 1 ms/obs | 64.7 s waves, 170.8 s `partial_reset` | 56.7 s waves, 55.9 s `partial_reset` + `refill_every: 10` | unaligned refills split each step's inference into batches of 1-5 |
 | Synthetic + images | same, three 224×224 cameras | 1183 s | 250 s (PNG), 107 s (`raw`, `max_wait_time` 0.05) | PNG encoding serialised on the event loop |
 | Shortstop (mjlab / MuJoCo Warp) | 32 worlds, 32 episodes × 430 steps, three cameras | 231 s, 72 env-steps/s, mean batch 1.2 | 100 s, 152 env-steps/s, batch 32 (`raw`) | 50 ms forward: 264 s → 122 s.  Every episode's outcome identical before and after.  The simulator is 56 s of the 100 s |
-| RoboDojo (Isaac Sim 5.1 RTX) | stack_blocks, 150 steps, three 640×480 cameras | 1.03 env-steps/s with one environment | 5.6 (`num_envs` 4), 7.3 (8), 10.6 (8, `raw`) | joint states match `num_envs=1`; frames do not (below) |
+| RoboDojo (Isaac Sim 5.1 RTX, A100) | stack_blocks, 150 steps, three 640×480 cameras | 1.03 env-steps/s with one environment | 5.6 (`num_envs` 4), 7.3 (8), 10.6 (8, `raw`) | joint states match `num_envs=1`; frames do not (below) |
 | RoboTwin 2.0 (SAPIEN 3 ray tracer) | beat_block_hammer, three 320×240 cameras, 32 spp + OIDN | 2.94 frames/s, one env | 2.9-2.96 with 2-8 envs in one process; 2.5 with 2-4 processes | no adapter: see below |
 
 RoboTwin: the GPU is far from saturated (SM occupancy 0.12, 320×240 dispatches are small), but
@@ -153,13 +153,16 @@ no GIL release), so N scenes' renders never overlap.  Overlapping physics with r
 SAPIEN change (asynchronous OIDN, or one launch for many cameras); until then `render_every` and
 shards are the levers.
 
-RoboDojo: in one Isaac scene with `num_envs > 1` on an A100, the tiled render products return
-wrist-camera frames that are ~79 % black (opaque surfaces unshaded; the camera pose is right)
-and head-camera frames off by 4-18/255; with `num_envs=1` they are fine, and joint states match
-to 3e-4 either way.  Raising the wrist cameras' near clip does not help.  RoboDojo does not
-support the A100 (no RT cores) and upstream's own batched eval (`num_envs: 10`) has no such
-report, so the next check is an RTX GPU; until frames match, the vector adapter's scores are not
-comparable to `num_envs=1`.
+RoboDojo: in one Isaac scene with `num_envs > 1`, the tiled render products return wrist-camera
+frames that are ~79 % black (opaque surfaces unshaded; the camera pose is right) and head-camera
+frames off by 4-18/255; with `num_envs=1` they are fine, and joint states match to 3e-4 either
+way.  The same on an A100 and an H100 (H100: 4.4 env-steps/s with one environment, 12.3 with 4,
+15.0 with 8), and upstream's own `src/eval_client/main.py --num_envs 4` reproduces it, so it is
+not the adapter.  The wrist near clip, six RTX settings (antialiasing, shadows/AO/GI, sampled
+lighting, path tracing) and cleared Kit caches change nothing; one of about fifteen multi-env
+runs rendered the wrists correctly, cause unknown.  Neither GPU has RT cores, which Isaac Sim 5.1
+requires; until frames match on a supported GPU, the vector adapter's scores are not comparable
+to `num_envs=1`.
 
 ## Alternatives
 
