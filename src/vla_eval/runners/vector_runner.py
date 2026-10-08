@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 from concurrent.futures import ThreadPoolExecutor
-from collections.abc import Callable, Hashable, Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol, TypeVar
 
@@ -126,37 +126,25 @@ class VectorEpisodeRunner:
             raise ValueError(f"refill_every must be >= 1, got {refill_every}")
         running: dict[int, _Running] = {}
         tick = 0  # environment steps so far; partial refills wait for a multiple of refill_every
-        group: Hashable = None  # task_group of the running episodes
-        held: tuple[int, VectorEpisode] | None = None  # another group's episode, waiting for the slots to drain
         try:
             exhausted = False
             while True:
-                if (held or not exhausted) and (
-                    not running or (benchmark.partial_reset and held is None and tick % refill_every == 0)
-                ):
-                    new: list[tuple[int, VectorEpisode]] = []
+                if not exhausted and (not running or (benchmark.partial_reset and tick % refill_every == 0)):
                     if not running:
                         tick = 0  # a new phase: later refills keep in step with these episodes
-                        if held is not None:
-                            new.append(held)
-                            group, held = benchmark.task_group(held[1].task), None
+                    new: list[tuple[int, VectorEpisode]] = []
                     for slot in range(benchmark.num_envs):
-                        if slot in running or any(slot == s for s, _ in new):
+                        if slot in running:
                             continue
                         episode = next_episode(slot)
                         if episode is None:
                             exhausted = True
                             break
-                        key = benchmark.task_group(episode.task)
-                        if (running or new) and key != group:
-                            held = (slot, episode)
-                            break
-                        group = key
                         new.append((slot, episode))
                     if new:
                         await self._start(benchmark, conns, new, running, on_end)
                 if not running:
-                    if exhausted and held is None:
+                    if exhausted:
                         return
                     continue
                 before = len(running)
@@ -169,8 +157,6 @@ class VectorEpisodeRunner:
         except ConnectionError as exc:
             for r in running.values():
                 on_end(r.episode, None, exc, aborted=True)
-            if held is not None:
-                on_end(held[1], None, exc, aborted=True)
             raise
 
     async def _start(

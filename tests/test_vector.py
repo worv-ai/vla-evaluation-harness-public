@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import asyncio
 import sqlite3
 import threading
 from typing import Any, ClassVar
 from unittest.mock import patch
 
+import anyio
 import numpy as np
 import pytest
 import websockets.exceptions
@@ -80,15 +80,6 @@ class StubVectorBenchmark(VectorStepBenchmark):
 
     def cleanup(self) -> None:
         self.threads.add(threading.get_ident())
-
-
-class OneTaskPerWaveStub(StubVectorBenchmark):
-    def task_group(self, task):
-        return task["name"]
-
-
-class PartialOneTaskStub(OneTaskPerWaveStub):
-    partial_reset = True
 
 
 class PartialResetStub(StubVectorBenchmark):
@@ -272,7 +263,14 @@ async def test_shards_share_the_queue_without_double_claims(echo_server, tmp_pat
     config = _config(echo_server, tmp_path, episodes=5)
     with patch("vla_eval.orchestrator.resolve_import_string", return_value=StubVectorBenchmark):
         runs = [Orchestrator(config, shard_id=i, num_shards=2, eval_id="ev-vq", no_save=False) for i in range(2)]
-        results = await asyncio.gather(*(orch.run() for orch in runs))
+        results: list[Any] = [None] * len(runs)
+
+        async def run(i: int) -> None:
+            results[i] = await runs[i].run()
+
+        async with anyio.create_task_group() as tg:
+            for i in range(len(runs)):
+                tg.start_soon(run, i)
     keys = [(t, ep["episode_id"]) for (r,) in results for t, ep in _episodes(r)]
     assert sorted(keys) == [(f"task_{t}", e) for t in range(2) for e in range(5)]
     store = RecordingStore(tmp_path / "recording-ev-vq.sqlite")
@@ -450,19 +448,6 @@ async def test_refill_every_starts_episodes_only_on_its_steps(echo_server, tmp_p
     assert len(_episodes(result)) == 12 and result["mean_success"] == pytest.approx(1.0)
     refills = [at for (_, running), (at, _) in zip(bench.resets, bench.reset_at) if running]
     assert refills and all(at % 4 == 0 for at in refills)  # chunks of 4 stay in phase across slots
-
-
-@pytest.mark.anyio
-@pytest.mark.parametrize("cls", [OneTaskPerWaveStub, PartialOneTaskStub])
-async def test_task_group_never_mixes_groups(echo_server, tmp_path, cls):
-    result = await _run(cls, _config(echo_server, tmp_path, jitter=2), no_save=True)
-    bench = StubVectorBenchmark.last
-    assert len(_episodes(result)) == 8 and result["mean_success"] == pytest.approx(1.0)
-    running_task: dict[int, str] = {}
-    for (slots, running), (_, names) in zip(bench.resets, bench.reset_at):
-        live = {running_task[s] for s in running}
-        assert len(set(names) | live) == 1  # one task at a time, and a new one only on free slots
-        running_task.update(zip(slots, names))
 
 
 @pytest.mark.anyio

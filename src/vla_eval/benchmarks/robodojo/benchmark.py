@@ -497,12 +497,17 @@ class RoboDojoVectorBenchmark(VectorStepBenchmark):
     """RoboDojo with ``num_envs`` environments in one Isaac scene, as upstream's batched eval
     (``eval_batch``): one render and one physics loop serve every slot.
 
-    Episodes run in waves (one ``EvalEnv.reset`` loads every environment's layout and settles
-    them together) of one task: Isaac builds the task into the scene, so a process holds one
-    task, as :class:`RoboDojoBenchmark`.  Episode ``episode_idx`` runs layout ``episode_idx``
-    of the group (``seed``); a layout that fails its stability check fails its episode
-    (``env_start``) instead of being skipped for the next one.  Params as
+    Episodes run in waves: one ``EvalEnv.reset`` loads every environment's layout and settles
+    them together.  A process holds one task, as :class:`RoboDojoBenchmark`.  Params as
     :class:`RoboDojoBenchmark`, plus ``num_envs``.
+
+    Differences from the official protocol (and from :class:`RoboDojoBenchmark`):
+
+    * Episode ``episode_idx`` runs layout ``episode_idx``; a layout that fails its stability
+      check is an errored episode (``env_start``), where the protocol skips it for a spare one.
+    * The scene is reused across waves, where upstream relaunches the simulator after every
+      batch: tasks with articulated objects fail from their second wave on ("Object ... of type
+      articulation not found"; 7 task configs).
 
     Not yet protocol-equivalent: on an A100 (no RT cores) Isaac Sim's tiled multi-env render
     returns black wrist cameras (~79 % zero pixels) and a head camera off by 4-18/255 against
@@ -521,23 +526,20 @@ class RoboDojoVectorBenchmark(VectorStepBenchmark):
     def get_tasks(self) -> list[Task]:
         return self._base.get_tasks()
 
-    def task_group(self, task: Task) -> Any:
-        return task["name"]
-
     def reset(self, slots: list[int], tasks: list[Task], recorders: list[EpisodeRecorder]) -> list[Any]:
         name = str(tasks[0]["name"])
         if self._env is None:
             self._env = self._base._build_env(name, num_envs=self.num_envs)
             self._task_name = name
-        elif name != self._task_name:
-            raise RuntimeError("RoboDojo runs one task per process; give each task its own `vla-eval run`")
         env = self._env
         total = len(env.seed_manager.seed_list)
         seeds: list[int | None] = [None] * self.num_envs
         failed: dict[int, Exception] = {}
         for slot, task in zip(slots, tasks):
             layout = int(task["episode_idx"])
-            if layout < total:
+            if task["name"] != self._task_name:  # Isaac holds the task built first; its close() hangs
+                failed[slot] = RuntimeError("RoboDojo runs one task per process; give each task its own run")
+            elif layout < total:
                 seeds[slot] = layout
             else:
                 failed[slot] = RuntimeError(f"RoboDojo {name}: no layout {layout} in a group of {total}")

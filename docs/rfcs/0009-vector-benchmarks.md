@@ -40,7 +40,6 @@ class VectorStepBenchmark(BenchmarkCommon):
     def make_obs(self, raw_obs: Any, slot: int, task: Task) -> Observation: ...
     def get_step_result(self, slot: int, step_result: StepResult) -> EpisodeResult: ...
     def check_done(self, step_result: StepResult) -> bool: ...  # default: step_result.done
-    def task_group(self, task: Task) -> Hashable: ...  # default: None, every task runs together
 ```
 
 A slot is an environment index.  `reset` starts `tasks[i]` in slot `slots[i]`; `step`
@@ -59,10 +58,6 @@ default: mjlab, ManiSkill3 and Isaac Lab draw reset randomisation from one globa
 batch, so an adapter seeds each slot itself (per-slot generators, or a published layout as in
 RoboDojo) and turns native auto-reset off.
 
-`task_group` names the tasks that may run at once.  Simulators that build one scene for all
-environments (Isaac Lab, a ManiSkill3 reconfigure) hold one task at a time; the harness never
-mixes groups and starts another group's episodes once every slot is free.
-
 `partial_reset` declares per-environment resets.  With it, a slot that finishes takes the
 next episode at once.  Without it, the runner resets only when no slot is running and runs
 the items in waves of up to `num_envs`.
@@ -78,7 +73,7 @@ as in `SyncEpisodeRunner`.
 The runner's calls into the benchmark (`reset`, `step`, `make_obs`, `get_step_result`,
 `check_done`, `cleanup`) run on one dedicated thread: Isaac Sim's Kit loop, GL/Vulkan contexts
 and CUDA state are bound to the thread that created them, and the event loop stays free for the
-slots' connections.  The constructor, `get_tasks`, `get_metadata` and `task_group` still run on
+slots' connections.  The constructor, `get_tasks` and `get_metadata` still run on
 the orchestrator's thread, so an adapter builds its simulator lazily in the first `reset`.
 
 With `partial_reset`, `refill_every: N` (eval config) starts new episodes only on environment
@@ -179,4 +174,19 @@ comparable to `num_envs=1`.
 - Sync mode only.  A real-time vector runner needs a per-slot action buffer under one
   shared clock; it is left for a later RFC.
 - Lockstep: each step waits for the slowest slot's action.
-- Without `partial_reset`, a slot that finishes early idles until its wave ends.
+- Without `partial_reset`, a slot that finishes early idles until its wave ends, so the idle
+  share grows with the spread of episode lengths (episodes of 40 to 400 steps leave most
+  slot-steps waiting).
+- With `partial_reset`, `reset` is one synchronous call during which every running slot waits:
+  cheap where an environment resets in place, not where a reset rebuilds a scene.
+- `elapsed_sec` is wall time from the episode's reset, so it includes the other slots' resets
+  and inference; it is not comparable with the one-at-a-time runner's value.
+- An idle slot staying inert is the adapter's job; the harness cannot check it.  The benchmark
+  learns that a slot's episode ended early (`max_steps`, a model error) only from that slot's
+  absence in `actions`.
+- One-scene simulators (Isaac Lab, a ManiSkill3 reconfigure) hold one task at a time; such an
+  adapter fails the episodes of any other task, so give each task its own entry or run.
+- `Benchmark` and `VectorStepBenchmark` are siblings, so the orchestrator keeps two loops (they
+  share the per-episode bookkeeping, `Orchestrator._episode_ended`).  A `StepBenchmark` wrapped as
+  a one-slot vector benchmark would leave sync evaluation one runner and one loop; live mode
+  needs the async `Benchmark` contract either way.  Left for a later change.
