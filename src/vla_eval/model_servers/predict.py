@@ -40,8 +40,8 @@ class PredictModelServer(ModelServer):
     max_batch_size: Most rows per ``predict_batch`` call (``None``: no limit); raise it to batch episodes.
     max_wait_time: Seconds to wait for other connections' requests before inferring a partial batch.
     max_rows: Most concurrent episodes (``None``: no limit); 1 for a model whose state is not per episode.
-    continuous_inference: Live mode: infer each connection's latest observation in a loop and push its action;
-        chunks are not buffered.  laas: pick the chunk's action ``int(latency * hz)`` steps in (LAAS).
+    continuous_inference: Live mode (draft, untested on a real model): infer each connection's latest observation
+        in a loop and push its action, chunks unbuffered.  laas: send the action ``int(latency * hz)`` steps in.
     """
 
     def __init__(
