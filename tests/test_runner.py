@@ -572,3 +572,43 @@ async def test_model_calls_stay_on_one_thread(free_port):
         assert len(server.threads) == 1
     finally:
         await stop_server(task)
+
+
+def test_a_second_ctrl_c_exits_without_waiting(tmp_path, free_port):
+    """The first SIGINT waits for the predict() in flight; a second one exits at once."""
+    import os
+    import signal
+    import subprocess
+    import sys
+
+    script = tmp_path / "srv.py"
+    script.write_text(
+        "import signal, time, numpy as np\n"
+        "signal.signal(signal.SIGINT, signal.default_int_handler)\n"
+        "from vla_eval.model_servers.predict import PredictModelServer\n"
+        "from vla_eval.model_servers.serve import serve\n"
+        "class S(PredictModelServer):\n"
+        "    def predict(self, obs, row):\n"
+        "        time.sleep(30)\n"
+        "        return {'actions': np.zeros(7, np.float32)}\n"
+        f"serve(S(), host='127.0.0.1', port={free_port})\n"
+    )
+    proc = subprocess.Popen([sys.executable, str(script)], env={**os.environ, "PYTHONPATH": os.getcwd()})
+    try:
+        url = f"ws://127.0.0.1:{free_port}"
+
+        async def send() -> None:
+            await wait_for_server(free_port)
+            async with Connection(url, timeout=0.5) as conn:
+                await conn.start_episode({"task": {"name": "t"}})
+                with pytest.raises(TimeoutError):
+                    await conn.act({"value": 1.0})
+
+        anyio.run(send)
+        proc.send_signal(signal.SIGINT)
+        time.sleep(0.5)
+        assert proc.poll() is None  # still finishing the call in flight
+        proc.send_signal(signal.SIGINT)
+        assert proc.wait(timeout=3) == 130
+    finally:
+        proc.kill()

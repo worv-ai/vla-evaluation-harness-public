@@ -140,7 +140,8 @@ class PredictModelServer(ModelServer):
         return [bad.get(x, x) if isinstance(x, int) else x for x in out]
 
     async def end_episodes(self, ids: Sequence[int], results: list[EpisodeResult]) -> None:
-        live = [(i, r) for i, r in zip(ids, results) if 0 <= i < len(self._episodes) and self._episodes[i] is not None]
+        valid = {i: r for i, r in zip(ids, results) if 0 <= i < len(self._episodes) and self._episodes[i] is not None}
+        live = list(valid.items())  # a row ends (and is freed) once, even if listed twice
         if not live:
             return
         try:

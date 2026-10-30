@@ -307,3 +307,24 @@ async def test_buffered_actions_do_not_wait_for_a_batch(free_port):
             assert time.monotonic() - t0 < 0.4 and len(server.batches) == 1  # served from the buffer at once
     finally:
         await stop_server(task)
+
+
+@pytest.mark.anyio
+async def test_repeated_or_restarted_slots_never_share_a_row(free_port):
+    """A slot ended twice, started twice, or restarted while running frees its row once (rows stay distinct)."""
+    server = CountingServer(max_batch_size=None)
+    task, conn = await _connect(server, free_port)
+    try:
+        await conn.exchange(_step([0, 1], [_start(0), _start(1)]))
+        await conn.exchange(_step([0, 1], [_start(0), _start(0)], ends=[[0, {}], [0, {}]]))
+        await conn.exchange(_step([0, 1], [_start(1)]))  # slot 1 restarts without an end
+        other = Connection(f"ws://127.0.0.1:{free_port}")
+        await other.connect()
+        await other.exchange(_step([0, 1], [_start(0), _start(1)]))
+        await other.close()
+        assert server.ended[:2] == [[0], [1]]  # each once
+        mine, theirs = server.batches[-2], server.batches[-1]
+        assert len(set(mine)) == 2 and len(set(theirs)) == 2 and not set(mine) & set(theirs)
+    finally:
+        await conn.close()
+        await stop_server(task)

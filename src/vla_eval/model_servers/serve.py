@@ -19,8 +19,10 @@ import json
 import logging
 import math
 import os
+import signal
 import time
 import uuid
+from collections.abc import Callable
 from functools import partial
 from http import HTTPStatus
 from typing import Any
@@ -263,12 +265,13 @@ async def _vector_step(
     """One VECTOR_STEP (ends, then starts, then observations); ``slots[s]``: slot ``s``'s row, -1 if none.
     Returns the VECTOR_RESULT payload (actions of the slots that did not fail, in order) and the new ``slots``."""
     errors: dict[int, str] = {}
-    ends = [(s, r) for s, r in payload.get("ends", []) if s < len(slots) and slots[s] >= 0]
+    starts = list(dict(payload.get("starts", [])).items())  # one per slot
+    ends = {**{s: {} for s, _ in starts}, **dict(payload.get("ends", []))}  # restarting a busy slot ends it
+    ends = {s: r for s, r in ends.items() if s < len(slots) and slots[s] >= 0}
     if ends:
-        await model_server.end_episodes([int(slots[s]) for s, _ in ends], [r for _, r in ends])
-        for s, _ in ends:
+        await model_server.end_episodes([int(slots[s]) for s in ends], list(ends.values()))
+        for s in ends:
             slots[s] = -1
-    starts = payload.get("starts", [])
     if starts:
         top = max(s for s, _ in starts) + 1
         if top > len(slots):
@@ -388,9 +391,11 @@ async def serve_async(
     port: int = 8000,
     backpressure_threshold: int = 4,
     *,
+    on_shutdown: Callable[[], Any] | None = None,
     task_status: TaskStatus[int] = anyio.TASK_STATUS_IGNORED,
 ) -> None:
-    """Start a WebSocket server wrapping the given ModelServer. Reports the bound port via *task_status*."""
+    """Start a WebSocket server wrapping the given ModelServer. Reports the bound port via *task_status*;
+    calls *on_shutdown* when cancelled, before waiting for the calls in flight."""
     logger.info("Starting model server on ws://%s:%d", host, port)
     logger.info("HTTP config endpoint at http://%s:%d/config", host, port)
 
@@ -412,7 +417,12 @@ async def serve_async(
             ping_interval=None,  # disable keepalive pings; JIT warmup can hold the GIL for 20s+
         ) as server:
             task_status.started(server.sockets[0].getsockname()[1])
-            await anyio.sleep_forever()
+            try:
+                await anyio.sleep_forever()
+            except anyio.get_cancelled_exc_class():
+                if on_shutdown is not None:
+                    on_shutdown()
+                raise
 
 
 def serve(
@@ -420,8 +430,19 @@ def serve(
     host: str = "0.0.0.0",
     port: int = 8000,
 ) -> None:
-    """Start a WebSocket server (blocking). Entry point for model server scripts."""
-    anyio.run(serve_async, model_server, host, port)
+    """Start a WebSocket server (blocking). Entry point for model server scripts.
+
+    Ctrl-C finishes the call in flight and the open episodes' cleanup; a second Ctrl-C exits at once."""
+
+    def arm() -> None:
+        logger.info("Shutting down after the calls in flight; Ctrl-C again to exit now")
+        signal.signal(signal.SIGINT, lambda *_: os._exit(130))
+
+    previous = signal.getsignal(signal.SIGINT)
+    try:
+        anyio.run(partial(serve_async, model_server, host, port, on_shutdown=arm))
+    finally:
+        signal.signal(signal.SIGINT, previous)
 
 
 # ---------------------------------------------------------------------------
