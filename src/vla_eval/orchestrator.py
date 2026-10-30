@@ -517,7 +517,9 @@ class Orchestrator:
         if not conn.server_info.get("capabilities", {}).get("vector_step"):
             benchmark.cleanup()
             await conn.close()
-            raise RuntimeError(f"{e.name}: the model server does not take vector steps (vla-eval too old)")
+            raise RuntimeError(
+                f"{e.name}: the model server does not take vector steps (vla-eval too old, or continuous inference)"
+            )
         claimed: set[int] = set()  # queue items in flight
         held: tuple[int | None, tuple[int, Any, int]] | None = None  # the next task's first item, waiting
         group: int | None = None  # the running episodes' task_idx

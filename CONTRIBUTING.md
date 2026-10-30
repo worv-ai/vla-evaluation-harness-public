@@ -172,6 +172,8 @@ Every running episode is a row; inference and the episode hooks are batched over
 - `max_rows=1`: the model's state is global (e.g. its own action queue), so one episode at a time.
 - `chunk_size`: `[T, D]` per row, served from a per-episode buffer (`rows.episodes[i].chunk_size` overrides it).
   Leave it `None` if the model must see every observation.
+- `continuous_inference=True` (live mode): each connection's latest observation is inferred in a loop and its
+  action pushed; `laas=True, hz=...` picks the chunk's action `latency * hz` steps in.
 
 See [the Push-T example](examples/pusht_train_eval/train.py) for a global policy reset per episode.
 

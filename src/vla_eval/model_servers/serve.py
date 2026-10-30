@@ -28,7 +28,7 @@ from urllib.parse import parse_qs, urlparse
 
 import anyio
 import numpy as np
-from anyio.abc import TaskStatus
+from anyio.abc import TaskGroup, TaskStatus
 from anyio.to_thread import run_sync as _run_in_thread
 import websockets
 
@@ -63,19 +63,82 @@ _BACKPRESSURE_CHECK_INTERVAL: float = 5.0  # seconds between checks
 _BACKPRESSURE_COOLDOWN: float = 30.0  # minimum seconds between warnings
 
 
-async def _handle_connection(
-    ws: Any,
-    model_server: ModelServer,
-) -> None:
+class _Continuous:
+    """Continuous inference of one episode: infer its latest observation, push the action, repeat."""
+
+    def __init__(self, model_server: ModelServer, row: int, reply: Any, send: Any) -> None:
+        self.model_server, self.row, self.reply, self.send = model_server, row, reply, send
+        self.latest: tuple[dict[str, Any], int, float] | None = None  # observation, seq, arrival time
+        self.wake = anyio.Event()
+        self.stopped = False
+        self.exited = anyio.Event()
+
+    def observe(self, obs: dict[str, Any], seq: int) -> None:
+        self.latest = (obs, seq, time.monotonic())
+        self.wake.set()
+
+    async def stop(self) -> None:
+        """Returns once the loop exited: an inference in flight finishes, its action is dropped."""
+        self.stopped = True
+        self.wake.set()
+        await self.exited.wait()
+
+    async def run(self, *, task_status: TaskStatus[None] = anyio.TASK_STATUS_IGNORED) -> None:
+        task_status.started()
+        try:
+            while True:
+                await self.wake.wait()
+                self.wake = anyio.Event()
+                if self.stopped or self.latest is None:
+                    return
+                obs, seq, t = self.latest
+                actions, errors = await self.model_server.act(columns.stack([obs]), [self.row])
+                if self.stopped:
+                    return
+                try:
+                    if errors:
+                        raise errors[0]
+                    action = columns.split(actions, 1)[0]
+                    if "actions" in action:
+                        action["actions"] = self.model_server.pick_action(np.asarray(action["actions"]), t)
+                    data = pack_message(Message(type=MessageType.ACTION, payload=action, seq=seq))
+                except Exception as exc:  # this observation fails; the loop goes on
+                    detail = f"observation_failed: {type(exc).__name__}: {exc}"
+                    await self.reply(MessageType.ERROR, {"error": detail}, seq)
+                    continue
+                await self.send(data)
+        except websockets.exceptions.ConnectionClosed:
+            pass
+        except Exception:
+            logger.exception("continuous inference stopped row=%d", self.row)
+        finally:
+            self.exited.set()
+
+
+async def _handle_connection(ws: Any, model_server: ModelServer, tg: TaskGroup) -> None:
     """Handle one connection's messages in order, so an episode has at most one observation in flight."""
     global _inflight
     session_id = str(uuid.uuid4())
     row: int | None = None  # the connection's own episode
+    ci: _Continuous | None = None  # its continuous inference
     slots = np.full(0, -1, np.int64)  # a vector benchmark's slot -> row (-1: none)
 
     async def start(config: dict[str, Any]) -> int | Exception:
+        nonlocal ci
         (out,) = await model_server.start_episodes([(config, session_id)])
+        if model_server.continuous_inference and not isinstance(out, Exception):
+            ci = _Continuous(model_server, out, reply, ws.send)
+            await tg.start(ci.run)
         return out
+
+    async def end(result: dict[str, Any]) -> None:
+        nonlocal row, ci
+        if ci is not None:
+            await ci.stop()
+            ci = None
+        if row is not None:
+            await model_server.end_episodes([row], [result])
+            row = None
 
     async def reply(msg_type: MessageType, payload: dict[str, Any], seq: int) -> None:
         await ws.send(pack_message(Message(type=msg_type, payload=payload, seq=seq)))
@@ -102,7 +165,9 @@ async def _handle_connection(
                 except NotImplementedError:
                     pass
                 reply_payload = make_hello_payload(
-                    model_server=type(model_server).__name__, capabilities={"vector_step": True}, **extra
+                    model_server=type(model_server).__name__,
+                    capabilities={"vector_step": not model_server.continuous_inference},
+                    **extra,
                 )
                 await reply(MessageType.HELLO, reply_payload, msg.seq)
                 logger.info(
@@ -113,9 +178,7 @@ async def _handle_connection(
                 )
 
             elif msg.type == MessageType.EPISODE_START:
-                if row is not None:  # the client started over without ending
-                    await model_server.end_episodes([row], [{}])
-                    row = None
+                await end({})  # the client may start over without ending
                 out = await start(msg.payload)
                 if isinstance(out, Exception):
                     detail = f"episode_start_failed: {type(out).__name__}: {out}"
@@ -131,6 +194,10 @@ async def _handle_connection(
                         await _try_reply(reply, MessageType.ERROR, {"error": f"observation_failed: {out}"}, msg.seq)
                         continue
                     row = out
+                if ci is not None:
+                    ci.observe(msg.payload, msg.seq)
+                    continue
+                assert row is not None  # set above; the nested start/end defeat type narrowing
                 _inflight += 1
                 try:
                     actions, errors = await model_server.act(columns.stack([msg.payload]), [row])
@@ -157,9 +224,7 @@ async def _handle_connection(
 
             elif msg.type == MessageType.EPISODE_END:
                 logger.info("EPISODE_END session=%s", session_id[:8])
-                if row is not None:
-                    await model_server.end_episodes([row], [msg.payload])
-                    row = None
+                await end(msg.payload)
 
             elif msg.type == MessageType.ERROR:
                 logger.error("Client error: %s", msg.payload)
@@ -178,9 +243,10 @@ async def _handle_connection(
     except Exception:
         logger.exception("Error handling session=%s msgs=%d", session_id[:8], _msg_count)
     finally:
-        open_rows = ([row] if row is not None else []) + [int(r) for r in slots if r >= 0]
-        if open_rows:
-            with anyio.CancelScope(shield=True):
+        open_rows = [int(r) for r in slots if r >= 0]
+        with anyio.CancelScope(shield=True):
+            await end({})
+            if open_rows:
                 await model_server.end_episodes(open_rows, [{}] * len(open_rows))
 
 
@@ -328,11 +394,12 @@ async def serve_async(
     logger.info("Starting model server on ws://%s:%d", host, port)
     logger.info("HTTP config endpoint at http://%s:%d/config", host, port)
 
-    async def handler(ws: Any) -> None:
-        await _handle_connection(ws, model_server)
-
     process_request = _make_process_request(model_server)
     async with anyio.create_task_group() as tg:
+
+        async def handler(ws: Any) -> None:
+            await _handle_connection(ws, model_server, tg)
+
         await model_server.on_serve_start(tg)
         tg.start_soon(_backpressure_monitor, backpressure_threshold)
         async with ws_serve(

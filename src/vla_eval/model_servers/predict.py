@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import heapq
 import logging
+import time
 import uuid
 from collections import deque
 from collections.abc import Sequence
@@ -39,6 +40,8 @@ class PredictModelServer(ModelServer):
     max_batch_size: Most rows per ``predict_batch`` call (``None``: no limit); raise it to batch episodes.
     max_wait_time: Seconds to wait for other connections' requests before inferring a partial batch.
     max_rows: Most concurrent episodes (``None``: no limit); 1 for a model whose state is not per episode.
+    continuous_inference: Live mode: infer each connection's latest observation in a loop and push its action;
+        chunks are not buffered.  laas: pick the chunk's action ``int(latency * hz)`` steps in (LAAS).
     """
 
     def __init__(
@@ -48,11 +51,17 @@ class PredictModelServer(ModelServer):
         max_batch_size: int | None = 1,
         max_wait_time: float = 0.01,
         max_rows: int | None = None,
+        continuous_inference: bool = False,
+        laas: bool = False,
+        hz: float = 10.0,
     ) -> None:
         self.chunk_size = chunk_size
         self.max_batch_size = max_batch_size
         self.max_wait_time = max_wait_time
         self.max_rows = max_rows
+        self.continuous_inference = continuous_inference
+        self.laas = laas
+        self.hz = hz
         self._episodes: list[Episode | None] = []  # by row id
         self._free: list[int] = []  # ended rows' ids, reused smallest first
         self._steps = np.zeros(0, np.int64)
@@ -80,6 +89,14 @@ class PredictModelServer(ModelServer):
     # ------------------------------------------------------------------
     # Framework side (serve.py)
     # ------------------------------------------------------------------
+
+    def pick_action(self, actions: np.ndarray, obs_time: float) -> np.ndarray:
+        if actions.ndim == 1 or not (self.laas and self.hz > 0):
+            return super().pick_action(actions, obs_time)
+        steps = int((time.monotonic() - obs_time) * self.hz)
+        if steps >= len(actions):
+            logger.warning("LAAS: %d steps late for a %d-step chunk; sending its last action", steps, len(actions))
+        return actions[min(steps, len(actions) - 1)]
 
     async def on_serve_start(self, tg: TaskGroup) -> None:
         self._queue, self._wake = [], anyio.Event()
@@ -282,8 +299,9 @@ class PredictModelServer(ModelServer):
                     cs = episodes[ids[i]].chunk_size  # type: ignore[union-attr]
                     if cs is not None and np.ndim(a) == 2:
                         a = a[:cs]
-                        self._buffers[int(ids[i])] = deque(a[1:])
-                        a = a[0]
+                        if not self.continuous_inference:  # CI sends the whole chunk to pick_action
+                            self._buffers[int(ids[i])] = deque(a[1:])
+                            a = a[0]
                     action[i] = a
                 except Exception as exc:  # e.g. an empty chunk: this row alone
                     errors[i] = exc

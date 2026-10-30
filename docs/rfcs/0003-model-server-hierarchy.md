@@ -8,7 +8,7 @@
 - **Superseded-By:** —
 
 > **Superseded in part by the row API ([RFC-0009](0009-vector-benchmarks.md)):** `predict(obs, row)` / `predict_batch(obs,
-> rows)`; `SessionContext`, `on_observation`, action ensembling, continuous inference and LAAS are removed.
+> rows)`; `SessionContext`, `on_observation` and action ensembling are removed; CI/LAAS run in `serve`.
 
 ## Summary
 

@@ -74,6 +74,9 @@ class ModelServer(ABC):
     """What ``serve`` drives.  Subclass ``PredictModelServer``, which implements the abstract methods.
     Load weights and warm up in ``__init__``: connections are accepted as soon as it returns."""
 
+    continuous_inference: bool = False
+    """Live mode: ``serve`` infers each connection's latest observation in a loop and pushes its action."""
+
     async def on_serve_start(self, tg: TaskGroup) -> None:
         """Called by ``serve_async`` before accepting connections; *tg* lives as long as the server.
         Overrides call ``super()`` first."""
@@ -85,6 +88,10 @@ class ModelServer(ABC):
 
     def on_episode_end(self, rows: Rows, results: list[EpisodeResult]) -> None:
         """Episodes in ``rows`` ended (``results[i]`` from the harness, ``{}`` when it went away).  Blocking."""
+
+    def pick_action(self, actions: np.ndarray, obs_time: float) -> np.ndarray:
+        """Continuous inference: the action to send from ``actions`` for an observation received at ``obs_time``."""
+        return actions if actions.ndim == 1 else actions[0]
 
     @abstractmethod
     async def start_episodes(self, starts: list[tuple[dict[str, Any], str]]) -> list[int | Exception]:

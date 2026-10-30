@@ -353,3 +353,176 @@ async def test_predict_serialised_under_concurrent_clients(free_port):
             await c.close()
     finally:
         await stop_server(task)
+
+
+# ---------------------------------------------------------------------------
+# Continuous inference (CI) / LAAS
+# ---------------------------------------------------------------------------
+
+
+class CIEchoServer(PredictModelServer):
+    def __init__(self, delay: float = 0.0, **kwargs: Any):
+        super().__init__(continuous_inference=True, hz=10.0, **kwargs)
+        self.delay = delay
+        self.calls = 0
+
+    def predict(self, obs: dict[str, Any], row: Row) -> dict[str, Any]:
+        self.calls += 1
+        time.sleep(self.delay)
+        return {"actions": obs.get("value", 0) * np.ones(7, dtype=np.float32)}
+
+
+class CILAASChunkServer(PredictModelServer):
+    def __init__(self):
+        super().__init__(continuous_inference=True, laas=True, hz=10.0, chunk_size=4)
+
+    def predict(self, obs: dict[str, Any], row: Row) -> dict[str, Any]:
+        time.sleep(0.25)  # 2.5 steps at 10 Hz
+        return {"actions": np.arange(6 * 7, dtype=np.float32).reshape(6, 7)}
+
+
+async def _serve(server: PredictModelServer, port: int) -> asyncio.Task:
+    task = asyncio.create_task(serve_async(server, port=port))
+    await wait_for_server(port)
+    return task
+
+
+@pytest.mark.anyio
+async def test_ci_server_pushes_actions(free_port):
+    task = await _serve(CIEchoServer(), free_port)
+    try:
+        async with Connection(f"ws://127.0.0.1:{free_port}") as conn:
+            assert conn.server_info["capabilities"]["vector_step"] is False
+            for value in (2.0, 3.0):  # a second episode gets a fresh loop
+                await conn.start_episode({"task": {"name": "t"}, "mode": "live"})
+                action = await conn.act({"value": value})
+                assert np.allclose(action["actions"], value)
+                await conn.end_episode({})
+    finally:
+        await stop_server(task)
+
+
+@pytest.mark.anyio
+async def test_ci_laas_skips_stale_actions(free_port):
+    task = await _serve(CILAASChunkServer(), free_port)
+    try:
+        async with Connection(f"ws://127.0.0.1:{free_port}") as conn:
+            await conn.start_episode({"task": {"name": "t"}, "mode": "live"})
+            action = await conn.act({"value": 1.0})
+            chunk = np.arange(6 * 7, dtype=np.float32).reshape(6, 7)
+            assert any(np.array_equal(action["actions"], chunk[k]) for k in (2, 3))  # never past chunk_size=4
+            await conn.end_episode({})
+    finally:
+        await stop_server(task)
+
+
+def test_pick_action_laas():
+    server = CILAASChunkServer()
+    chunk = np.arange(28, dtype=np.float32).reshape(4, 7)
+    assert np.array_equal(server.pick_action(np.ones(7), time.monotonic()), np.ones(7))
+    assert np.array_equal(server.pick_action(chunk, time.monotonic() - 0.25), chunk[2])
+    assert np.array_equal(server.pick_action(chunk, time.monotonic() - 9.0), chunk[3])
+    server.laas = False
+    assert np.array_equal(server.pick_action(chunk, time.monotonic() - 0.25), chunk[0])
+
+
+@pytest.mark.anyio
+async def test_ci_infers_the_latest_observation(free_port):
+    """Observations arriving during an inference are skipped except the newest."""
+    server = CIEchoServer(delay=0.2)
+    task = await _serve(server, free_port)
+    try:
+        async with Connection(f"ws://127.0.0.1:{free_port}") as conn:
+            await conn.start_episode({"task": {"name": "t"}, "mode": "live"})
+            for value in (1.0, 2.0, 3.0):
+                await conn.send_observation({"value": value})
+            first = await conn.recv(timeout=2.0)
+            second = await conn.recv(timeout=2.0)
+            assert np.allclose(first.payload["actions"], 1.0) and np.allclose(second.payload["actions"], 3.0)
+            assert server.calls == 2
+            await conn.end_episode({})
+    finally:
+        await stop_server(task)
+
+
+@pytest.mark.anyio
+async def test_ci_episode_end_drops_inflight_action(free_port):
+    """EPISODE_END waits for the inference in flight; its action is never sent."""
+    server = CIEchoServer(delay=0.3)
+    task = await _serve(server, free_port)
+    try:
+        async with Connection(f"ws://127.0.0.1:{free_port}") as conn:
+            await conn.start_episode({"task": {"name": "t"}, "mode": "live"})
+            await conn.send_observation({"value": 1.0})
+            await anyio.sleep(0.05)
+            await conn.end_episode({})
+            await conn.start_episode({"task": {"name": "t"}, "mode": "live"})
+            action = await conn.act({"value": 4.0})  # the first episode's action would arrive first
+            assert np.allclose(action["actions"], 4.0)
+            assert server.calls == 2
+            await conn.end_episode({})
+    finally:
+        await stop_server(task)
+
+
+class CIBatchServer(CIEchoServer):
+    def __init__(self):
+        super().__init__(max_batch_size=2, max_wait_time=0.5)
+        self.sizes: list[int] = []
+
+    def predict_batch(self, obs, rows):
+        self.sizes.append(len(rows))
+        return {"actions": np.asarray(obs["value"], np.float32)[:, None] * np.ones((1, 7), np.float32)}
+
+
+@pytest.mark.anyio
+async def test_ci_connections_batch(free_port):
+    server = CIBatchServer()
+    task = await _serve(server, free_port)
+    try:
+        conns = [Connection(f"ws://127.0.0.1:{free_port}") for _ in range(2)]
+        for c in conns:
+            await c.connect()
+            await c.start_episode({"task": {"name": "t"}, "mode": "live"})
+        actions = await asyncio.gather(*(c.act({"value": float(i + 1)}) for i, c in enumerate(conns)))
+        assert [float(a["actions"][0]) for a in actions] == [1.0, 2.0]
+        assert server.sizes == [2]
+        for c in conns:
+            await c.close()
+    finally:
+        await stop_server(task)
+
+
+@pytest.mark.anyio
+async def test_live_runner_with_ci_server(free_port):
+    task = await _serve(CIEchoServer(delay=0.02), free_port)
+    try:
+        async with Connection(f"ws://127.0.0.1:{free_port}") as conn:
+            result = await LiveEpisodeRunner(hz=100.0).run_episode(
+                StubBenchmark(done_at_step=20), {"name": "t"}, conn, max_steps=50
+            )
+        assert result["metrics"]["success"] is True
+        assert result["rt_metrics"]["fresh_count"] > 0  # pushed actions reached the env
+    finally:
+        await stop_server(task)
+
+
+class CIEmptyChunkServer(CIEchoServer):
+    def predict(self, obs: dict[str, Any], row: Row) -> dict[str, Any]:
+        if obs["value"] < 0:
+            return {"actions": np.zeros((0, 7), np.float32)}
+        return super().predict(obs, row)
+
+
+@pytest.mark.anyio
+async def test_ci_failure_errors_one_observation(free_port):
+    task = await _serve(CIEmptyChunkServer(), free_port)
+    try:
+        async with Connection(f"ws://127.0.0.1:{free_port}") as conn:
+            await conn.start_episode({"task": {"name": "t"}, "mode": "live"})
+            with pytest.raises(RuntimeError, match="observation_failed"):
+                await conn.act({"value": -1.0})
+            assert np.allclose((await conn.act({"value": 5.0}))["actions"], 5.0)
+            await conn.end_episode({})
+    finally:
+        await stop_server(task)
