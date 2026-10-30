@@ -32,13 +32,14 @@ from __future__ import annotations
 import logging
 import os
 import sys
+from collections import deque
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import torch
 
-from vla_eval.model_servers.base import SessionContext
+from vla_eval.model_servers.base import Row, Rows
 from vla_eval.model_servers.predict import PredictModelServer
 from vla_eval.specs import (
     GRIPPER_CLOSE_POS,
@@ -119,15 +120,17 @@ class VLANeXtModelServer(PredictModelServer):
         attn_implementation: str = "sdpa",
         center_crop_ratio: float = 1.0,
         chunk_size: int = 8,
-        action_ensemble: str = "newest",
         **kwargs: Any,
     ) -> None:
-        super().__init__(chunk_size=chunk_size, action_ensemble=action_ensemble, **kwargs)
+        # Every observation must reach predict (dense state history), so the chunk is queued here.
+        super().__init__(chunk_size=None, **kwargs)
+        self.action_chunk_size = chunk_size
         self.checkpoint = checkpoint
         self.suite = suite
         self.attn_implementation = attn_implementation
         self.center_crop_ratio = center_crop_ratio
-        self._state_histories: dict[str, list[np.ndarray]] = {}
+        self._state_histories: dict[int, list[np.ndarray]] = {}
+        self._action_queues: dict[int, deque[np.ndarray]] = {}
 
         if suite not in ACTION_BOUNDS:
             raise ValueError(f"Unknown suite {suite!r}. Choose from {list(ACTION_BOUNDS)}")
@@ -145,22 +148,32 @@ class VLANeXtModelServer(PredictModelServer):
     def get_observation_spec(self) -> dict[str, DimSpec]:
         return {"image": IMAGE_RGB, "wrist": IMAGE_RGB, "language": LANGUAGE, "state": STATE_EEF_POS_AA_GRIP}
 
-    async def on_episode_start(self, config: dict[str, Any], ctx: SessionContext) -> None:
-        await super().on_episode_start(config, ctx)
-        self._state_histories[ctx.session_id] = []
+    def on_episode_start(self, rows: Rows) -> None:
+        for rid in rows.ids.tolist():
+            self._state_histories[rid] = []
+            self._action_queues[rid] = deque()
 
-    async def on_episode_end(self, result: dict[str, Any], ctx: SessionContext) -> None:
-        await super().on_episode_end(result, ctx)
-        self._state_histories.pop(ctx.session_id, None)
+    def on_episode_end(self, rows: Rows, results: list[dict[str, Any]]) -> None:
+        for rid in rows.ids.tolist():
+            self._state_histories.pop(rid, None)
+            self._action_queues.pop(rid, None)
 
-    async def on_observation(self, obs: Observation, ctx: SessionContext) -> None:
-        """Capture proprioception from every observation (even buffered steps).
+    def predict(self, obs: Observation, row: Row) -> Action:
+        """Record this observation's state, then serve the queued chunk or infer a new one."""
+        self._record_state(obs, row)
+        queue = self._action_queues.setdefault(row.id, deque())
+        if queue:
+            return {"actions": queue.popleft()}
+        actions = np.asarray(self._predict_chunk(obs, row)["actions"], dtype=np.float32)
+        if self.action_chunk_size is None or actions.ndim != 2:
+            return {"actions": actions}
+        actions = actions[: self.action_chunk_size]
+        queue.extend(actions[1:])
+        return {"actions": actions[0]}
 
-        The base PredictModelServer only calls predict() when the chunk buffer
-        is empty (every chunk_size steps).  VLANeXt needs dense proprioception
-        history — one state per env step — so we extract and accumulate here
-        before delegating to the normal chunking logic.
-        """
+    def _record_state(self, obs: Observation, row: Row) -> None:
+        """Capture proprioception from every observation (even buffered steps): VLANeXt needs dense
+        proprioception history, one state per env step."""
         # LIBERO sends "states" (plural); other benchmarks / the smoke stub use "state".
         state = obs.get("states", obs.get("state"))
         if state is not None:
@@ -172,7 +185,7 @@ class VLANeXtModelServer(PredictModelServer):
                     1.0,
                 )
                 state_arr = np.concatenate([state_arr[:6], [gripper_scalar]])
-            sid = ctx.session_id
+            sid = row.id
             if sid not in self._state_histories:
                 self._state_histories[sid] = []
             self._state_histories[sid].append(state_arr)
@@ -180,12 +193,10 @@ class VLANeXtModelServer(PredictModelServer):
             if hist_len <= 2 or hist_len % 8 == 0:
                 logger.debug(
                     "on_obs step=%d hist_len=%d state_7d=%s",
-                    ctx.step,
+                    row.step,
                     hist_len,
                     np.array2string(state_arr, precision=4, separator=","),
                 )
-
-        await super().on_observation(obs, ctx)
 
     @staticmethod
     def _center_crop(img: np.ndarray, ratio: float) -> np.ndarray:
@@ -299,7 +310,7 @@ class VLANeXtModelServer(PredictModelServer):
         self._model = model
         logger.info("VLANeXt model loaded.")
 
-    def predict(self, obs: Observation, ctx: SessionContext) -> Action:
+    def _predict_chunk(self, obs: Observation, row: Row) -> Action:
         from PIL import Image as PILImage
 
         device = self._device
@@ -330,11 +341,11 @@ class VLANeXtModelServer(PredictModelServer):
         # --- Task description ---
         task_description = obs.get("task_description", "")
 
-        # --- Proprioception (dense history accumulated via on_observation) ---
+        # --- Proprioception (dense history accumulated via _record_state) ---
         proprioception = None
         num_history = self._model.num_history  # 8
         if self._model.use_proprio_input_vlm:
-            sid = ctx.session_id
+            sid = row.id
             history = self._state_histories.get(sid, [])
             if history:
                 states = history[-num_history:]
@@ -351,7 +362,7 @@ class VLANeXtModelServer(PredictModelServer):
                 )
                 logger.debug(
                     "predict step=%d hist_total=%d proprio_shape=%s grip_vals=%s",
-                    ctx.step,
+                    row.step,
                     len(history),
                     proprioception.shape,
                     np.array2string(proprio_np[:, 6], precision=4, separator=","),

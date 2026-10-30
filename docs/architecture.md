@@ -26,7 +26,7 @@ Status markers: ✅ implemented, 🚧 partial, 🔜 planned.
 | Component | Role | Status |
 |-----------|------|--------|
 | **Protocol** | WebSocket + msgpack serialization, message schema, numpy codec | ✅ |
-| **Model Server** | Runs model inference. User implements `predict()`. | ✅ |
+| **Model Server** | Runs model inference. User implements `predict()` or `predict_batch()`. | ✅ |
 | **Connection** | Client library for benchmark→server communication. Framework-provided. | ✅ |
 | **Benchmark** | Async environment interface; StepBenchmark supplies synchronous reset/step helpers; VectorStepBenchmark steps `num_envs` environments together. | ✅ |
 | **EpisodeRunner** | Episode execution strategy. Combines Benchmark + Connection. | ✅ Sync, ✅ Live, ✅ Vector |
@@ -85,14 +85,14 @@ A `VectorStepBenchmark` holds `num_envs` environments in one process (GPU-parall
 simulators such as MuJoCo Warp or ManiSkill3).  `VectorEpisodeRunner` runs up to
 `num_envs` episodes of one task at once over one connection: each step is one `VECTOR_STEP`
 round trip carrying the running slots' observations as columns (and the episodes ending and
-starting), which the server, holding one session per slot, infers as a batch; then `step()` runs
+starting), which the server, holding one row per slot, infers as a batch; then `step()` runs
 once.  Sync mode only.
 See [RFC-0009](rfcs/0009-vector-benchmarks.md).
 
 ```
 Orchestrator ── VectorEpisodeRunner ── Connection ──► Model Server
-                 │ reset(slots, ...)   VECTOR_STEP     (one session per slot,
-                 │ step(slots, acts) ◄─VECTOR_RESULT   on_observations → predict_stacked)
+                 │ reset(slots, ...)   VECTOR_STEP     (one row per slot,
+                 │ step(slots, acts) ◄─VECTOR_RESULT   act → predict_batch(obs, rows))
                  ▼
           VectorStepBenchmark (num_envs environments)
 ```
@@ -132,15 +132,27 @@ Observations and actions are `dict[str, Any]`; the framework imposes **no fixed 
 | `states` | `np.ndarray` | Proprioception |
 | `task_description` | `str` | Natural language instruction |
 
-## Model Server Hierarchy
+## Model Server
 
 ```
-ModelServer (ABC)                    ← Advanced: async on_observation()
-├── PredictModelServer               ← Most models: blocking predict()
-└── BatchPredictModelServer          ← Batched inference across sessions
+ModelServer (ABC)            ← contract driven by serve.py: start_episodes / act / end_episodes
+└── PredictModelServer       ← subclass this: predict(obs, row) or predict_batch(obs, rows)
 ```
 
-**`PredictModelServer`** wraps `predict()` in `run_in_executor` and manages action chunk buffers automatically. Supports `chunk_size`, `action_ensemble` ("newest", "average", "ema", callable), and `ema_alpha`.
+Every running episode is a **row** of the model server: a connection's `EPISODE_START`..`EPISODE_END`, or a vector
+benchmark's slot. `row.id` is stable while the episode runs and reused after it ends; per-episode state is keyed
+by it. Inference and the episode hooks are batched over rows:
+
+- `predict(obs, row)`: one observation dict of one episode. The default `predict_batch` calls it per row.
+- `predict_batch(obs, rows)`: a column batch (`vla_eval.columns`, a row per episode) to action columns. Observations
+  of several connections (shards) and a `VECTOR_STEP`'s slots coalesce into one call, up to `max_batch_size` rows
+  (default 1: one at a time; raise it to batch) after waiting up to `max_wait_time` (default 0.01 s).
+- `on_episode_start(rows)` / `on_episode_end(rows, results)`: blocking, on the inference thread.
+- `chunk_size`: the model returns `[T, D]` per row; the server returns the first action and serves the rest from a
+  per-row buffer before inferring that row again. `None`: every observation is inferred.
+- `max_rows`: most concurrent episodes; 1 for a model whose state is global.
+
+One call into the model runs at a time, on a worker thread.
 
 The server runner (`model_servers/serve.py`) wraps any `ModelServer` into a WebSocket server with `serve(model_server, host, port)`.
 

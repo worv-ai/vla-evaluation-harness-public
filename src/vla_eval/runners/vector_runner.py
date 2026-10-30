@@ -10,8 +10,9 @@ from typing import Any, Protocol
 
 import numpy as np
 
-from vla_eval import watchdog
-from vla_eval.benchmarks.base import Batch, VectorStepBenchmark
+from vla_eval import columns, watchdog
+from vla_eval.benchmarks.base import VectorStepBenchmark
+from vla_eval.columns import Batch
 from vla_eval.recording import EpisodeRecorder, RecordingError
 from vla_eval.runners.base import EnvStartError, EnvStepError, ModelActError, episode_start_payload, phase
 from vla_eval.types import EpisodeResult, Task
@@ -28,25 +29,6 @@ def _try(error: type[EnvStartError] | type[EnvStepError], fn: Callable[..., Any]
         raise
     except Exception as exc:
         return exc
-
-
-def _take(batch: Batch, rows: list[int]) -> Batch:
-    """The ``rows`` of ``batch``, in that order."""
-    return {
-        k: v[np.asarray(rows, np.int64)] if isinstance(v, np.ndarray) else [v[i] for i in rows]
-        for k, v in batch.items()
-    }
-
-
-def _concat(a: Batch, b: Batch) -> Batch:
-    """``a``'s rows, then ``b``'s (the same columns)."""
-    if not a:
-        return b
-    return {k: np.concatenate([v, b[k]]) if isinstance(v, np.ndarray) else [*v, *b[k]] for k, v in a.items()}
-
-
-def _rows(batch: Batch) -> int | None:
-    return len(next(iter(batch.values()))) if batch else None
 
 
 @dataclass
@@ -160,7 +142,7 @@ class VectorEpisodeRunner:
         """Keep only these rows of the running slots (the others' episodes have ended)."""
         if len(rows) < len(self._slots):
             self._slots = [self._slots[i] for i in rows]
-            self._obs = _take(self._obs, rows)
+            self._obs = columns.take(self._obs, rows)
 
     def _end_running(self, exc: Exception) -> None:
         for slot, r in self._running.items():
@@ -179,13 +161,13 @@ class VectorEpisodeRunner:
         def reset() -> Batch:
             with phase(EnvStartError):
                 obs = benchmark.reset(slots, [e.task for e in episodes], [e.recorder for e in episodes])
-                if _rows(obs) not in (None, len(slots)):
-                    raise ValueError(f"reset() returned {_rows(obs)} observations for {len(slots)} slots")
+                if columns.num_rows(obs) not in (None, len(slots)):
+                    raise ValueError(f"reset() returned {columns.num_rows(obs)} observations for {len(slots)} slots")
                 return obs
 
         try:
             obs = reset()
-            self._obs = _concat(self._obs, obs) if self._slots else obs  # a new task's columns may differ
+            self._obs = columns.concat([self._obs, obs]) if self._slots else obs  # a new task's columns may differ
         except RecordingError:
             raise
         except Exception as exc:
@@ -217,9 +199,12 @@ class VectorEpisodeRunner:
                 self._ends.append([slot, {}])
             self._keep([i for i, s in enumerate(self._slots) if s not in errors])
         actions = reply.get("actions", {})
-        if _rows(actions) not in (None, len(self._slots)) or (not actions and self._slots):
-            exc = ModelActError(f"Server reply has {_rows(actions)} actions for {len(self._slots)} slots")
-            self._end_running(exc)
+        try:
+            rows = columns.num_rows(actions)
+        except ValueError as exc:
+            rows = f"malformed ({exc})"
+        if rows not in (None, len(self._slots)) or (not actions and self._slots):
+            self._end_running(ModelActError(f"Server reply has {rows} actions for {len(self._slots)} slots"))
             return None
         return actions if self._slots else None
 

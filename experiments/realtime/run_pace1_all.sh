@@ -1,5 +1,6 @@
 #!/bin/bash
-# Pace=1.0 experiments: main table (realtime/ci/laas) + inference delay sweep
+# Pace=1.0 experiments: main table (realtime) + inference delay sweep
+# The CI and LAAS conditions were removed with continuous inference and LAAS (row API, RFC-0009).
 # All conditions use pace=1.0, wait_first_action=true, 50 eps/task, 12 tasks
 set -euo pipefail
 
@@ -114,24 +115,14 @@ echo "============================================"
 echo ""
 
 # ==========================================
-# Experiment 1: Main table (realtime/ci/laas)
+# Experiment 1: Main table (realtime)
 # ==========================================
 
 echo ">>> EXPERIMENT 1: Main table <<<"
 
-# --- Real-time (base, no CI/LAAS) ---
+# --- Real-time ---
 launch_server configs/model_servers/rtc_kinetix.yaml "base"
 run_benchmark "realtime" "$BENCH_CONFIG"
-stop_server
-
-# --- +CI ---
-launch_server configs/model_servers/rtc_kinetix_ci.yaml "ci"
-run_benchmark "ci" "$BENCH_CONFIG"
-stop_server
-
-# --- +LAAS ---
-launch_server configs/model_servers/rtc_kinetix_laas.yaml "laas"
-run_benchmark "laas" "$BENCH_CONFIG"
 stop_server
 
 echo ""

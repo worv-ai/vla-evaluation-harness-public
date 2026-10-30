@@ -7,5 +7,4 @@
 script: "src/vla_eval/model_servers/vlanext.py"
 args:
   chunk_size: 8
-  action_ensemble: newest
   port: 8000

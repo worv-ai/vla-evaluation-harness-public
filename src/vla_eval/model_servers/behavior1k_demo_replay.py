@@ -42,7 +42,7 @@ from typing import Any
 import numpy as np
 
 from vla_eval.benchmarks.behavior1k.benchmark import R1PRO_ACTION_DIM
-from vla_eval.model_servers.base import SessionContext
+from vla_eval.model_servers.base import Row
 from vla_eval.model_servers.predict import PredictModelServer
 from vla_eval.specs import IMAGE_RGB, LANGUAGE, DimSpec
 from vla_eval.types import Action, Observation
@@ -71,7 +71,6 @@ class Behavior1KDemoReplayModelServer(PredictModelServer):
         **kwargs: Any,
     ) -> None:
         kwargs.setdefault("chunk_size", 1)
-        kwargs.setdefault("action_ensemble", "newest")
         super().__init__(**kwargs)
         if not demo_path:
             raise ValueError("demo_path is required (path to a LeRobot v2.1 parquet episode)")
@@ -82,10 +81,6 @@ class Behavior1KDemoReplayModelServer(PredictModelServer):
         self.on_overrun = on_overrun
 
         self._actions: np.ndarray | None = None
-        # ``PredictModelServer`` can serve concurrent benchmark sessions (one connection per shard),
-        # so the step cursor is keyed per (session, episode).  ``on_episode_start`` / ``on_episode_end``
-        # keep the dict bounded.
-        self._step_idx: dict[tuple[str, str], int] = {}
 
     def _load(self) -> np.ndarray:
         if self._actions is not None:
@@ -113,26 +108,9 @@ class Behavior1KDemoReplayModelServer(PredictModelServer):
             "language": LANGUAGE,
         }
 
-    async def on_episode_start(self, config: dict[str, Any], ctx: SessionContext) -> None:
-        await super().on_episode_start(config, ctx)
-        self._step_idx[(ctx.session_id, ctx.episode_id)] = 0
-
-    async def on_episode_end(self, result: dict[str, Any], ctx: SessionContext) -> None:
-        self._step_idx.pop((ctx.session_id, ctx.episode_id), None)
-        await super().on_episode_end(result, ctx)
-
-    def predict(self, obs: Observation, ctx: SessionContext | None = None) -> Action:
-        if ctx is None:
-            raise RuntimeError("Behavior1KDemoReplayModelServer.predict requires a SessionContext")
+    def predict(self, obs: Observation, row: Row) -> Action:
         actions = self._load()
-        key = (ctx.session_id, ctx.episode_id)
-        if key not in self._step_idx:
-            raise RuntimeError(
-                f"predict() called before on_episode_start for session={ctx.session_id} "
-                f"episode={ctx.episode_id}; the harness must send EPISODE_START first."
-            )
-        idx = self._step_idx[key]
-        self._step_idx[key] = idx + 1
+        idx = row.step  # the episode's step cursor: every observation reaches predict (1-D actions)
 
         if idx < len(actions):
             return {"actions": actions[idx].copy()}

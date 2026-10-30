@@ -14,7 +14,7 @@ import pytest
 import websockets
 
 from vla_eval.benchmarks.base import StepBenchmark, StepResult, repeat_last_hold
-from vla_eval.model_servers.base import SessionContext
+from vla_eval.model_servers.base import Row
 from vla_eval.model_servers.predict import PredictModelServer
 from vla_eval.model_servers.serve import serve_async
 from vla_eval.tracking import Tracker
@@ -73,7 +73,7 @@ class BrokenTracker(Tracker):
 class EchoModelServer(PredictModelServer):
     """Echo model server: returns obs['value'] * ones(7)."""
 
-    def predict(self, obs: dict[str, Any], ctx: SessionContext) -> dict[str, Any]:
+    def predict(self, obs: dict[str, Any], row: Row) -> dict[str, Any]:
         return {"actions": obs.get("value", 0) * np.ones(7, dtype=np.float32)}
 
 
@@ -85,7 +85,7 @@ class RandomActionModelServer(PredictModelServer):
         self._rng = np.random.default_rng(seed)
         self._action_dim = action_dim
 
-    def predict(self, obs: dict[str, Any], ctx: SessionContext) -> dict[str, Any]:
+    def predict(self, obs: dict[str, Any], row: Row) -> dict[str, Any]:
         return {"actions": self._rng.standard_normal(self._action_dim).astype(np.float32)}
 
 
@@ -93,10 +93,10 @@ class ChunkModelServer(PredictModelServer):
     """Returns action chunks. Validates chunk buffering with StubBenchmark."""
 
     def __init__(self, action_dim: int = 7) -> None:
-        super().__init__(chunk_size=4, action_ensemble="newest")
+        super().__init__(chunk_size=4)
         self._action_dim = action_dim
 
-    def predict(self, obs: dict[str, Any], ctx: SessionContext) -> dict[str, Any]:
+    def predict(self, obs: dict[str, Any], row: Row) -> dict[str, Any]:
         assert self.chunk_size is not None
         chunk = np.ones((self.chunk_size, self._action_dim), dtype=np.float32)
         return {"actions": chunk}

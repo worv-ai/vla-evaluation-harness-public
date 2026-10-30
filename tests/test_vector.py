@@ -13,7 +13,7 @@ import pytest
 import websockets.exceptions
 
 from vla_eval.benchmarks.base import BenchmarkCommon, VectorStepBenchmark
-from vla_eval.model_servers.base import SessionContext
+from vla_eval.model_servers.base import Row
 from vla_eval.model_servers.predict import PredictModelServer
 from vla_eval.orchestrator import Orchestrator, UnhealthyShardError
 from vla_eval.recording import RecordingStore
@@ -140,10 +140,10 @@ class SessionLogServer(PredictModelServer):
         super().__init__()
         self.seen: list[tuple[str, float]] = []
 
-    def predict(self, obs: dict[str, Any], ctx: SessionContext) -> dict[str, Any]:
+    def predict(self, obs: dict[str, Any], row: Row) -> dict[str, Any]:
         if obs["value"] < 0:
             raise ValueError("bad observation")
-        self.seen.append((ctx.session_id, obs["value"]))
+        self.seen.append((row.episode.session_id, float(obs["value"])))
         return {"actions": obs["value"] * np.ones(7, dtype=np.float32)}
 
 
@@ -152,9 +152,9 @@ class BatchLogServer(PredictModelServer):
         super().__init__(max_batch_size=8, max_wait_time=0.2)
         self.sizes: list[int] = []
 
-    def predict_batch(self, obs_batch, ctx_batch):
-        self.sizes.append(len(obs_batch))
-        return [{"actions": o["value"] * np.ones(7, dtype=np.float32)} for o in obs_batch]
+    def predict_batch(self, obs, rows):
+        self.sizes.append(len(rows))
+        return {"actions": np.asarray(obs["value"])[:, None] * np.ones(7, dtype=np.float32)}
 
 
 def _config(url: str, tmp_path, name: str = "vec", episodes: int = 4, **params: Any) -> dict[str, Any]:
@@ -401,6 +401,22 @@ async def test_a_step_carries_ends_starts_and_observations(tmp_path):
     shape = [(len(s["ends"]), len(s["starts"]), len(s["slots"])) for s in conn.steps]
     # wave of 3 for 2 steps, then the fourth episode starts as the first wave's sessions end, then a final end
     assert shape == [(0, 3, 3), (0, 0, 3), (3, 1, 1), (0, 0, 1), (1, 0, 0)]
+
+
+@pytest.mark.anyio
+async def test_a_malformed_reply_fails_the_running_episodes_not_the_run(tmp_path):
+    class Malformed(FakeConnection):
+        async def exchange(self, step):
+            reply = await super().exchange(step)
+            if self.calls == 1:
+                reply["actions"]["extra"] = [1]  # columns of different lengths
+            return reply
+
+    with patch("vla_eval.orchestrator.Connection", Malformed), patch.object(FakeConnection, "fail", {}):
+        result = await _run(StubVectorBenchmark, _config("ws://fake:9999", tmp_path), no_save=True)
+    episodes = _episodes(result)
+    assert len(episodes) == 8 and "partial" not in result
+    assert sorted(ep.get("failure_reason") or "" for _, ep in episodes) == [""] * 5 + ["model_act"] * 3
 
 
 @pytest.mark.anyio

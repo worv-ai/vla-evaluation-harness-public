@@ -625,7 +625,7 @@ class StepRecorder:
     """
 
     def __init__(self, db_path: str | Path, sid: str, eid: str) -> None:
-        self._store = RecordingStore(db_path)
+        self._db_path = db_path  # opened in close(): SQLite connections are bound to their thread
         self._sid = sid
         self._eid = eid
         self._steps: dict[int, dict[str, Any]] = {}
@@ -643,11 +643,15 @@ class StepRecorder:
             return
         self._closed = True
         try:
-            self._store.upsert_step_rows(self._sid, self._eid, self._steps)
+            store = RecordingStore(self._db_path)
+        except Exception as exc:
+            raise RecordingError(f"Failed to save steps sid={self._sid} eid={self._eid}") from exc
+        try:
+            store.upsert_step_rows(self._sid, self._eid, self._steps)
         except Exception as exc:
             raise RecordingError(f"Failed to save steps sid={self._sid} eid={self._eid}") from exc
         finally:
-            self._store.close()
+            store.close()
 
     def __enter__(self) -> "StepRecorder":
         return self

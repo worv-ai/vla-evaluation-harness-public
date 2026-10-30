@@ -2,7 +2,7 @@
 """Demand curve benchmark: measure observation arrival rate λ(N) from real environments.
 
 Starts an instant-response model server, then launches N real Docker
-benchmark shards against it.  Counts on_observation() calls to measure
+benchmark shards against it.  Counts the observations reaching act() to measure
 the true observation rate including all real-world overhead (physics sim,
 rendering, observation serialization, network).
 
@@ -31,6 +31,7 @@ import shutil
 import subprocess
 import tempfile
 import time
+from collections.abc import Sequence
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -41,7 +42,8 @@ import yaml
 from tqdm import tqdm
 
 from vla_eval.docker_resources import _detect_runtime
-from vla_eval.model_servers.base import SessionContext
+from vla_eval.columns import Batch
+from vla_eval.model_servers.base import Row
 from vla_eval.model_servers.predict import PredictModelServer
 from vla_eval.model_servers.serve import serve_async
 from vla_eval.types import Action, Observation
@@ -247,21 +249,21 @@ class InstantServer(PredictModelServer):
     """Returns immediately with zero-latency actions. Counts all observations."""
 
     def __init__(self, action_dim: int = 7) -> None:
-        super().__init__(chunk_size=1)
+        super().__init__()
         self.action_dim = action_dim
         self.call_count = 0
         self._pbar = tqdm()
         self._first_obs_time: float | None = None
 
-    def predict(self, obs: Observation, ctx: SessionContext) -> Action:
+    def predict(self, obs: Observation, row: Row) -> Action:
         return {"actions": np.zeros(self.action_dim, dtype=np.float32)}
 
-    async def on_observation(self, obs: Observation, ctx: SessionContext) -> None:
+    async def act(self, obs: Batch, ids: Sequence[int]) -> tuple[Batch, dict[int, Exception]]:
         if self._first_obs_time is None:
             self._first_obs_time = time.monotonic()
-        self.call_count += 1
-        self._pbar.update(1)
-        await super().on_observation(obs, ctx)
+        self.call_count += len(ids)
+        self._pbar.update(len(ids))
+        return await super().act(obs, ids)
 
     def reset(self) -> None:
         """Reset counters for the next measurement round."""

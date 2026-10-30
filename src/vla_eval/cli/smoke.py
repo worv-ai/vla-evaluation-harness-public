@@ -350,11 +350,11 @@ def _make_echo_server(action_dim: int) -> Any:
     """Create an EchoModelServer that returns zero actions."""
     import numpy as np
 
-    from vla_eval.model_servers.base import SessionContext
+    from vla_eval.model_servers.base import Row
     from vla_eval.model_servers.predict import PredictModelServer
 
     class _EchoModelServer(PredictModelServer):
-        def predict(self, obs: dict[str, Any], ctx: SessionContext) -> dict[str, Any]:
+        def predict(self, obs: dict[str, Any], row: Row) -> dict[str, Any]:
             return {"actions": np.zeros(action_dim, dtype=np.float32)}
 
     return _EchoModelServer()

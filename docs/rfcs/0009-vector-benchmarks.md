@@ -14,8 +14,8 @@ process steps together, and `VectorEpisodeRunner`, which runs up to `num_envs` e
 once on it over one connection, one `VECTOR_STEP` round trip per step.  Observations and
 actions travel as columns (one array per key, a row per slot) from the simulator to the model
 and back, so a step costs the harness about the same at 4500 environments as at 500.  Each
-running episode is its own server session; model servers need no change, and one that infers
-columns directly (`predict_stacked`) runs at the simulator's own speed.
+running episode is a row of the model server, whose lifecycle and inference are batched over rows; a
+server that infers columns directly (`predict_batch`) runs at the simulator's own speed.
 
 ## Motivation
 
@@ -91,23 +91,17 @@ VECTOR_STEP   {"ends": [[slot, result]], "starts": [[slot, episode_start]], "slo
 VECTOR_RESULT {"actions": Batch, "errors": [[slot, detail]]}   # action rows: the slots without an error, in order
 ```
 
-The server handles a step in that order: it ends the slots' sessions, starts new ones (a failed
-`on_episode_start` is that slot's error), then hands the observation columns and the slots'
-sessions to `ModelServer.on_observations(obs, ctxs)`, which returns the action columns of the
-rows that did not fail and an exception for each that did.  Each slot is its own
-`SessionContext`, whose `session_id` is the episode's `recording.sid` (else
-`<connection>:<slot>`), so chunk buffers, `ctx.is_first`, model-side history keyed by
-`ctx.session_id` and the episode lifecycle work as for one connection per episode.
-
-`on_observations` defaults to `on_observation` per row.  `PredictModelServer` calls
-`predict_stacked(obs, ctxs) -> Batch` in slices of `max_batch_size` when a subclass overrides it
-and no session chunks its actions: columns in, columns out, no per-row Python.  Otherwise it
-splits the rows, serves buffered chunk actions and infers the rest with `predict_batch` in
-groups of `max_batch_size`; a subclass that overrides `on_observation` (e.g. to keep a dense
-history) keeps the per-row path.  HELLO advertises `capabilities.vector_step`
-(continuous-inference servers do not, as their actions come later than the observation), and
-the orchestrator refuses a server without it.  Messages other than `VECTOR_STEP` keep the
-connection's own session, so the sync and live runners are unchanged.
+The server handles a step in that order: it ends the slots' episodes, starts new ones (one
+`on_episode_start(rows)` for all of them; a position it fails is that slot's error), then hands the
+observation columns to the model.  Every running episode is a row of the model server, a vector slot as much as
+a single-episode connection: `rows.ids` are stable while an episode runs (reused after), so a policy keeps
+per-episode state in arrays indexed by them, and the lifecycle and inference are batched alike.  The model
+implements `predict(obs, row)` (one observation) or `predict_batch(obs, rows)` (columns in, columns out); the
+framework slices batches by `max_batch_size`, serves chunked episodes from per-row buffers and infers only the
+rows whose buffer ran out.  The same dispatcher coalesces single-episode connections' observations, so
+sharded and vector evaluations reach the model the same way.  HELLO advertises `capabilities.vector_step`, and
+the orchestrator refuses a server without it.  Messages other than `VECTOR_STEP` are unchanged, so the sync and
+live runners are too.
 
 ### Orchestrator
 
@@ -141,18 +135,18 @@ The unhealthy-shard check (RFC-0006) counts episodes as before; with
 The harness's own cost per step, measured with a zero-cost environment and model (64-float
 state observations, server in its own process, a shared and loaded host):
 
-| `num_envs` | one connection per slot (first design) | per-slot rows, one message | columns, `predict_batch` | columns, `predict_stacked` |
+| `num_envs` | one connection per slot (first design) | per-slot rows, one message | columns, per-row `predict` | columns, `predict_batch` |
 |---:|---:|---:|---:|---:|
-| 1 | 2.2 ms | 1.7 ms | 2.4 ms | 2.5 ms |
-| 64 | 77 ms | 7.1 ms | 4.2 ms | 2.5 ms |
-| 512 | 533 ms | 32 ms | 16.0 ms | 3.4 ms |
-| 4500 | — | 188 ms | 91 ms | 12.1 ms |
+| 1 | 2.2 ms | 1.7 ms | 3.0 ms | 2.6 ms |
+| 64 | 77 ms | 7.1 ms | 3.5 ms | 2.6 ms |
+| 512 | 533 ms | 32 ms | 9.7 ms | 4.0 ms |
+| 4500 | — | 188 ms | 33 ms | 13 ms |
 
 One connection per slot paid per message: three quarters for moving each message's encode and
 decode to a thread, the rest asyncio and websockets work per message.  Per-slot rows in one
 message still paid ~40-60 µs per environment-step of Python (a dict and an array per slot each
 way through msgpack, `make_obs`, the server's per-item handling).  Columns leave a fixed ~2-4 ms
-a step (the round trip's thread hops: the server's decode and inference threads) and ~2 µs per environment (the server's per-slot session bookkeeping).
+a step (the round trip's thread hops: the server's decode and inference threads) and ~2 µs per environment (the server's per-row bookkeeping).
 
 `Connection.exchange` encodes on the event loop, which has nothing else to do meanwhile.  The
 default PNG encoding takes ~10 ms per 224×224 frame, so a step with many cameras is bound by
@@ -174,7 +168,7 @@ first rows were measured with one connection per slot; the notes add later revis
 | Synthetic (harness only) | 32 slots, 128 episodes of 200-400 steps, 10 ms step, chunk 10, server 60 ms + 1 ms/obs | 64.7 s waves, 170.8 s `partial_reset` | 56.7 s waves | with `partial_reset`, refills at arbitrary steps put the slots' chunks out of phase and split each step's inference into batches of 1-5 (below) |
 | Synthetic + images | same, three 224×224 cameras | 1183 s | 250 s (PNG), 107 s (`raw`, `max_wait_time` 0.05) | PNG encoding serialised on the event loop |
 | Shortstop (mjlab / MuJoCo Warp) | 32 worlds, 32 episodes × 430 steps, three cameras | 231 s, 72 env-steps/s, mean batch 1.2 | 100 s, 152 env-steps/s, batch 32 (`raw`) | 50 ms forward: 264 s → 122 s.  Every episode's outcome identical before and after.  The simulator is 56 s of the 100 s.  With `VECTOR_STEP` (hold server, A100): 279 s at #90's first commit, 268 s (per-slot rows, PNG), 76 s (per-slot rows, `raw`), 72 s (columns, `raw`; the adapter ported), every episode's outcome identical |
-| OCBench (MuJoCo Warp) | a fixed linear policy, model server with `predict_stacked`; OCBench's own loop runs it in-process | own loop, ms a step: block-single 31.8 (500 worlds) / 71.5 (4500), chamber-hard 50.2 / 158.0 | vla-eval: 35.6 / 81.3, 53.7 / 172.2 (+7 to +14 %; medians of three interleaved runs) | first observations bit-identical, first five steps equal; whole trajectories differ as between two runs of OCBench's loop (MuJoCo Warp is not deterministic).  The 4500-world runs (100 steps) include their wave's 4500 episode ends at once, ~3 ms a step of bookkeeping |
+| OCBench (MuJoCo Warp) | a fixed linear policy, model server with `predict_batch` over columns; OCBench's own loop runs it in-process | own loop, ms a step: block-single 31.9 (500 worlds) / 71.2 (4500), chamber-hard 50.4 / 162.5 | vla-eval: 36.1 / 83.2, 54.1 / 176.7 (+7 to +17 %; medians of three interleaved runs) | first observations bit-identical, first five steps equal; whole trajectories differ as between two runs of OCBench's loop (MuJoCo Warp is not deterministic).  The 4500-world runs (100 steps) include their wave's 4500 episode ends at once, ~3 ms a step of bookkeeping |
 | RoboDojo (Isaac Sim 5.1 RTX, A100) | stack_blocks, 150 steps, three 640×480 cameras | 1.03 env-steps/s with one environment | 5.6 (`num_envs` 4), 7.3 (8), 10.6 (8, `raw`) | joint states match `num_envs=1`; frames do not (below) |
 | RoboTwin 2.0 (SAPIEN 3 ray tracer) | beat_block_hammer, three 320×240 cameras, 32 spp + OIDN | 2.94 frames/s, one env | 2.9-2.96 with 2-8 envs in one process; 2.5 with 2-4 processes | no adapter: see below |
 
@@ -229,8 +223,8 @@ to `num_envs=1`.
 - With `partial_reset`, a chunking server's slots fall out of phase (each refill starts a new
   chunk), so a step infers the slots whose chunk ran out rather than all of them every chunk
   length: the same samples in more, smaller batches.  Not measured on a real model yet.
-- A model server that only implements `predict_batch` takes per-row dicts: ~20 µs per
-  environment-step (the split and the per-item path).  `predict_stacked` removes it.
+- A model server that only implements `predict` takes a dict per row: ~5-20 µs per
+  environment-step (the split and the per-row calls).  `predict_batch` removes it.
 - `Benchmark` and `VectorStepBenchmark` are siblings, so the orchestrator keeps two loops (they
   share the per-episode bookkeeping, `Orchestrator._episode_ended`).  A `StepBenchmark` wrapped as
   a one-slot vector benchmark would leave sync evaluation one runner and one loop; live mode

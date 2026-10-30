@@ -7,6 +7,11 @@
 - **Requires:** RFC-0001
 - **Superseded-By:** —
 
+> **Superseded in part by the row API ([RFC-0009](0009-vector-benchmarks.md)).** `ModelServer` is now the
+> batched contract driven by `serve.py`; models subclass `PredictModelServer` and implement `predict(obs, row)` or
+> `predict_batch(obs, rows)`. `SessionContext`, `on_observation`, `BatchPredictModelServer`, action ensembling,
+> continuous inference and LAAS are removed. See [CONTRIBUTING.md](../../CONTRIBUTING.md#adding-a-model-server).
+
 ## Summary
 
 Three-level class hierarchy for model servers: an async base (`ModelServer`), a blocking convenience layer (`PredictModelServer`), and a planned batched variant (`BatchPredictModelServer`). The hierarchy lets most researchers implement a single `predict()` method while preserving full async control for advanced use cases.

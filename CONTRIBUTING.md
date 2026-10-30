@@ -105,9 +105,10 @@ the GPU), subclass `VectorStepBenchmark` instead, with `num_envs` as a construct
 dict per slot.  Set `partial_reset = True` when environments can be reset individually while
 others run.  An episode's outcome must depend only on its task (seed,
 layout), never on its slot or on the episodes running beside it.  The harness runs up to
-`num_envs` episodes of one task at once, one model-server session each, so pair it with a model
-server whose `max_batch_size` covers `num_envs` (times the shards); a `PredictModelServer` that
-overrides `predict_stacked(obs, ctxs)` takes the columns without per-row dicts.  Sync mode only; see [RFC-0009](docs/rfcs/0009-vector-benchmarks.md).
+`num_envs` episodes of one task at once over one connection, each a row of the model server, so pair it with
+a `PredictModelServer` that overrides `predict_batch(obs, rows)` (columns in, columns out) and sets
+`max_batch_size` to `num_envs` (times the shards); a step's observations then reach the model as one batch.
+Sync mode only; see [RFC-0009](docs/rfcs/0009-vector-benchmarks.md).
 
 ### Render Backends
 
@@ -154,8 +155,8 @@ depends on the Mesa driver. See [render backends](docs/render-backends.md).
 ## Adding a Model Server
 
 1. Create `src/vla_eval/model_servers/<name>.py` as a **uv script** with [PEP 723](https://peps.python.org/pep-0723/) inline metadata
-2. Subclass `PredictModelServer` from `model_servers/predict.py` (or `ModelServer` from `model_servers/base.py` for advanced async use cases)
-3. Implement `predict(obs, ctx) -> dict`. Load the model inside `__init__` (no lazy-load hook)
+2. Subclass `PredictModelServer` from `model_servers/predict.py`
+3. Implement `predict(obs, row) -> dict` or `predict_batch(obs, rows) -> Batch` (below). Load the model inside `__init__` (no lazy-load hook)
 4. Use `run_server()` for the CLI entrypoint. **Do not write manual argparse**:
    ```python
    if __name__ == "__main__":
@@ -167,12 +168,29 @@ depends on the Mesa driver. See [render backends](docs/render-backends.md).
 
 See `model_servers/cogact.py` for a complete reference implementation.
 
-`ctx.session_id` can span multiple episodes; use `ctx.episode_id` to identify an episode.
-Reset policy-owned history, action queues, and other episode state in `on_episode_start`,
-then `await super().on_episode_start(config, ctx)` to preserve the base lifecycle.
-For concurrent clients, keep that state per session and reset only the starting session.
-The base class resets its own chunk buffers, not your policy's internal state.
-See [the Push-T example](examples/pusht_train_eval/train.py) for a single-session policy reset.
+Every running episode is a row; inference and the episode hooks are batched over rows.
+
+- `predict(obs, row) -> {"actions": ...}`: one observation (a dict) of one episode. The simple default.
+- `predict_batch(obs, rows) -> Batch`: a column batch (`vla_eval.columns`), a row per episode, to action columns
+  with a row each. Override it when the model infers a batch faster than its rows one by one: vector benchmarks,
+  or several shards on one server. The default calls `predict` per row.
+- `max_batch_size` (default 1: episodes inferred one at a time) caps the rows per call; raise it to batch, e.g. to
+  `num_envs` for a vector benchmark. Observations of several connections coalesce, waiting up to `max_wait_time`
+  (default 0.01 s) for a fuller batch.
+- `on_episode_start(rows)` / `on_episode_end(rows, results)`: blocking, on the inference thread; no `super()` call.
+  `rows.episodes[i].config` is the `EPISODE_START` payload (`config["task"]`). Return `{i: exc}` from
+  `on_episode_start` to fail position `i` alone, or raise to fail them all.
+- Per-episode state: key it by `row.id` in `predict` (`rows.ids[i]` in the hooks). An id is stable while its
+  episode runs and reused after it ends, so reset that state in `on_episode_start`.
+- `max_rows=1` (constructor): for a model whose state is global, not per episode (e.g. a policy with its own
+  action queue). The server then refuses a second concurrent episode.
+- `chunk_size`: the model returns `[T, D]` per row; the server trims it to the episode's chunk size, returns the
+  first action and serves the rest before inferring that episode again (a 1-D action passes through). Set
+  `rows.episodes[i].chunk_size` in `on_episode_start` for a per-episode size. Leave it `None` when the model must
+  see every observation (it keeps a history or queues actions itself): every observation is then inferred and the
+  output returned as is.
+
+See [the Push-T example](examples/pusht_train_eval/train.py) for a global policy reset per episode.
 
 ## Config Conventions
 

@@ -1,6 +1,6 @@
 # OCBench on MuJoCo Warp: the 28 tasks, 500 episodes each, 500 worlds stepped together (VectorStepBenchmark).
 # Needs `pip install "ocbench[mjwarp]"` and a CUDA GPU; MUJOCO_GL=egl on a headless host.  A model server that
-# overrides PredictModelServer.predict_stacked keeps the harness within ~10 % of OCBench's own loop.
+# implements predict_batch over columns keeps the harness within ~10 % of OCBench's own loop.
 server:
   url: "ws://localhost:8000"
   timeout: 600

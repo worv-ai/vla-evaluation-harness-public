@@ -16,12 +16,13 @@ from __future__ import annotations
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, ClassVar, Dict
+from typing import Any, ClassVar
 
 from vla_eval.specs import DimSpec
 
 import numpy as np
 
+from vla_eval.columns import Batch
 from vla_eval.recording import EpisodeRecorder, NullEpisodeRecorder
 from vla_eval.types import Action, EpisodeResult, Observation, Task
 
@@ -289,11 +290,6 @@ class StepBenchmark(Benchmark, ABC):
 # ---------------------------------------------------------------------------
 # Vectorized (several environments stepped together)
 # ---------------------------------------------------------------------------
-
-
-Batch = Dict[str, Any]
-"""Rows of several slots, one column per key: an array whose first axis is the row, or a list (images as
-``{camera: HWC array}``, strings, actions of different lengths).  Row ``i`` belongs to ``slots[i]``."""
 
 
 class VectorStepBenchmark(BenchmarkCommon):

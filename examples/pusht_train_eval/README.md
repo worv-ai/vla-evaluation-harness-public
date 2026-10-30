@@ -31,9 +31,8 @@ The two specs are compared before the first episode; a mismatch between what the
 and what the environment expects is warned about up front instead of showing up as a 0% run.
 
 `PolicyServer.on_episode_start` calls `policy.reset()` to clear observation history and queued
-actions between episodes, then awaits the base hook. A WebSocket session spans episodes;
-initializing state only once per `ctx.session_id` would leak it into the next episode.
-This example shares one policy with one evaluation session; concurrent sessions need isolated state.
+actions between episodes. The policy's state is global, so the server passes `max_rows=1` and
+refuses a second concurrent episode; per-episode state would be keyed by `row.id` instead.
 
 ## The call in the training loop
 

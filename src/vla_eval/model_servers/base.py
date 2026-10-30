@@ -1,149 +1,114 @@
-"""Base ModelServer ABC and SessionContext."""
+"""Model-server contract: every running episode is a row; inference and the episode lifecycle are batched.
+
+A single-episode benchmark is a batch of one row; a vector benchmark's step, or requests coalesced across
+connections, are batches of many.  ``PredictModelServer`` (predict.py) implements the framework side.
+"""
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Any, Callable, Coroutine, Dict, Literal
+from collections.abc import Sequence
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, NamedTuple
 
-import anyio
+import numpy as np
 
+from vla_eval.columns import Batch
 from vla_eval.specs import DimSpec
-from vla_eval.types import Action, Observation
 
 if TYPE_CHECKING:
     from anyio.abc import TaskGroup
 
-# Type alias for the async send_action callback injected by the framework.
-# NOTE: Dict (not dict) for Python 3.8 compatibility in type aliases.
-SendActionFn = Callable[[Dict[str, Any]], Coroutine[Any, Any, None]]
 
+@dataclass(eq=False)
+class Episode:
+    """One running episode, as its ``EPISODE_START`` announced it.
 
-class SessionContext:
-    """Per-session state passed to ModelServer callbacks.
-
-    Attributes:
-        session_id: Persistent across episodes within one WebSocket connection.
-            When the harness supplies a ``recording.sid`` in ``EPISODE_START``,
-            it overrides the WS-level session id so external recording emits
-            (e.g. opening a :class:`vla_eval.recording.StepRecorder` with
-            ``ctx.session_id`` / ``ctx.episode_id``) land in the same SQLite
-            bucket the harness wrote to.
-        episode_id: Regenerated on each ``EPISODE_START``. When the harness
-            supplies a ``recording.eid`` it is used verbatim.
-        eval_id: Run-level identifier (from ``EPISODE_START.recording.eval_id``),
-            or ``""`` when recording is disabled.
-        recording_db_path: Path to the SQLite file the harness writes to, or
-            ``""`` when recording is disabled. External callers (e.g.
-            a training pipeline) open a :class:`vla_eval.recording.StepRecorder` at
-            this path to record per-step inference traces alongside the
-            benchmark's step rows.
-        task: Task metadata dict sent by the client in ``EPISODE_START``.
-        step: Number of observations processed so far in this episode.
-            Inside ``predict()``, this is the count *before* the current
-            observation (i.e. 0 on the first call).
-        mode: Evaluation mode (currently always ``"sync"``).
-        is_first: True when ``step == 0`` (first observation of the episode).
+    ``session_id`` / ``episode_id`` are the harness's recording ``sid`` / ``eid`` when it records (open a
+    :class:`vla_eval.recording.StepRecorder` with them and ``recording_db_path`` to add rows to its episode),
+    else generated.  ``chunk_size``: this episode's action chunk length, the server's ``chunk_size`` unless
+    ``on_episode_start`` sets it (e.g. per task suite).
     """
 
-    def __init__(
-        self,
-        session_id: str,
-        episode_id: str,
-        mode: Literal["sync", "live"] = "sync",
-        eval_id: str = "",
-        recording_db_path: str = "",
-    ) -> None:
-        self._session_id = session_id
-        self._episode_id = episode_id
-        self._mode: Literal["sync", "live"] = mode
-        self._eval_id = eval_id
-        self._recording_db_path = recording_db_path
-        self._step = 0
-        self._send_action_fn: SendActionFn | None = None  # set by framework
+    config: dict[str, Any]
+    episode_id: str
+    session_id: str
+    eval_id: str = ""
+    recording_db_path: str = ""
+    chunk_size: int | None = None
+
+
+class Row(NamedTuple):
+    id: int
+    step: int
+    is_first: bool
+    episode: Episode
+
+
+class Rows:
+    """The rows of one call.
+
+    ``ids[i]``: row ``i``'s id, stable while its episode runs and reused once it ended (below the most
+    episodes the server has held at once), so a policy can keep per-episode state in arrays indexed by it.
+    ``step[i]``: observations its episode had before this one.  ``episodes[i]``: its :class:`Episode`.
+    """
+
+    def __init__(self, ids: np.ndarray, step: np.ndarray, table: Sequence[Episode | None]) -> None:
+        self.ids = ids
+        self.step = step
+        self._table = table
 
     @property
-    def session_id(self) -> str:
-        return self._session_id
+    def is_first(self) -> np.ndarray:
+        return self.step == 0
 
     @property
-    def episode_id(self) -> str:
-        return self._episode_id
+    def episodes(self) -> list[Episode]:
+        return [self._table[i] for i in self.ids.tolist()]  # type: ignore[misc]
 
-    @property
-    def eval_id(self) -> str:
-        return self._eval_id
+    def __len__(self) -> int:
+        return len(self.ids)
 
-    @property
-    def recording_db_path(self) -> str:
-        return self._recording_db_path
-
-    @property
-    def mode(self) -> Literal["sync", "live"]:
-        return self._mode
-
-    @property
-    def step(self) -> int:
-        return self._step
-
-    @property
-    def is_first(self) -> bool:
-        return self._step == 0
-
-    async def send_action(self, action: Action) -> None:
-        """Send an action back to the benchmark client."""
-        if self._send_action_fn is None:
-            raise RuntimeError("send_action_fn not set by framework")
-        await self._send_action_fn(action)
-
-    def _increment_step(self) -> None:
-        self._step += 1
+    def __getitem__(self, i: int) -> Row:
+        rid = int(self.ids[i])
+        episode = self._table[rid]
+        assert episode is not None
+        return Row(rid, int(self.step[i]), bool(self.step[i] == 0), episode)
 
 
 class ModelServer(ABC):
-    """Base async model server. For advanced use cases only.
+    """What ``serve`` drives: episodes start and end in batches, observations come as column batches.
 
-    Subclasses MUST load all weights and complete any setup needed
-    to serve inference inside ``__init__`` — including JIT warmup
-    (e.g. one dummy forward) when first-call latency would otherwise
-    blow the HELLO response budget. The framework starts accepting
-    WebSocket connections as soon as ``__init__`` returns.
+    Subclass :class:`~vla_eval.model_servers.predict.PredictModelServer`; it implements :meth:`start_episodes`,
+    :meth:`end_episodes` and :meth:`act` and calls the hooks below.  Load weights and finish warmup in
+    ``__init__``: the server accepts connections as soon as it returns.
     """
 
     async def on_serve_start(self, tg: TaskGroup) -> None:
         """Called by ``serve_async`` before accepting connections; *tg* lives as long as the server.
-        Start background work with ``tg.start_soon`` and create loop-bound resources here."""
+        Overrides call ``super()`` first."""
+
+    def on_episode_start(self, rows: Rows) -> dict[int, Exception] | None:
+        """Episodes start in ``rows`` (each row's ``episode.config`` is its ``EPISODE_START`` payload; reset that
+        row's state).  Return the exception of each position whose start failed, or raise to fail them all.
+        Blocking; runs on the inference thread."""
+        return None
+
+    def on_episode_end(self, rows: Rows, results: list[dict[str, Any]]) -> None:
+        """Episodes in ``rows`` ended (``results[i]`` from the harness, ``{}`` when it went away).  Blocking."""
 
     @abstractmethod
-    async def on_observation(self, obs: Observation, ctx: SessionContext) -> None:
-        """Called when an observation arrives. Run inference and call ctx.send_action()."""
+    async def start_episodes(self, starts: list[tuple[dict[str, Any], str]]) -> list[int | Exception]:
+        """Start an episode per ``(EPISODE_START payload, default session id)``; its row id or why it failed."""
 
-    async def on_observations(
-        self, obs: dict[str, Any], ctxs: list[SessionContext]
-    ) -> tuple[dict[str, Any], dict[int, Exception]]:
-        """One step of a vector benchmark: ``obs`` holds a row per running slot (columns: arrays whose
-        first axis is the row, or lists), ``ctxs[i]`` is row ``i``'s session.
+    @abstractmethod
+    async def end_episodes(self, ids: Sequence[int], results: list[dict[str, Any]]) -> None:
+        """End these rows' episodes and free the rows."""
 
-        Returns the actions of the rows that did not fail, in row order, as columns, and the
-        exception of each row that did.  Default: :meth:`on_observation` per row, concurrently."""
-        rows, sent = _split_rows(obs, len(ctxs)), _collect(ctxs)
-        errors: dict[int, Exception] = {}
-
-        async def one(i: int) -> None:
-            try:
-                await self.on_observation(rows[i], ctxs[i])
-            except Exception as exc:
-                errors[i] = exc
-
-        async with anyio.create_task_group() as tg:
-            for i in range(len(rows)):
-                tg.start_soon(one, i)
-        return _columns(sent, errors, len(rows))
-
-    async def on_episode_start(self, config: dict[str, Any], ctx: SessionContext) -> None:
-        """Called at episode start. Override to reset model state."""
-
-    async def on_episode_end(self, result: dict[str, Any], ctx: SessionContext) -> None:
-        """Called at episode end. Optional."""
+    @abstractmethod
+    async def act(self, obs: Batch, ids: Sequence[int]) -> tuple[Batch, dict[int, Exception]]:
+        """Actions for ``obs`` (row ``i`` of row ``ids[i]``): the columns of the positions that did not fail,
+        in order, and the exception of each position that did."""
 
     def get_action_spec(self) -> dict[str, DimSpec]:
         """Declare the action output format of this model server.
@@ -175,40 +140,6 @@ class ModelServer(ABC):
         tell the benchmark what observation data it needs (e.g. wrist images,
         proprioceptive state) without requiring manual ``--param`` flags.
 
-        Override in subclasses to auto-detect from model config, or pass
-        an explicit ``observation_params`` dict to ``PredictModelServer``.
+        Override in subclasses to auto-detect from model config.
         """
         return {}
-
-
-def _split_rows(batch: dict[str, Any], n: int) -> list[Observation]:
-    """Row dicts of a column batch."""
-    return [{k: v[i] for k, v in batch.items()} for i in range(n)]
-
-
-def _collect(ctxs: list[SessionContext]) -> dict[int, Action]:
-    """Route each ``ctxs[i].send_action`` into the returned dict, under ``i``."""
-    sent: dict[int, Action] = {}
-    for i, ctx in enumerate(ctxs):
-
-        async def send(action: Action, i: int = i) -> None:
-            sent[i] = action
-
-        ctx._send_action_fn = send
-    return sent
-
-
-def _columns(
-    sent: dict[int, Action], errors: dict[int, Exception], n: int
-) -> tuple[dict[str, Any], dict[int, Exception]]:
-    """The sent actions of the rows that did not fail, as columns (lists); a row that sent none, or other
-    keys than the first row, fails."""
-    for i in range(n):
-        if i not in errors and i not in sent:
-            errors[i] = RuntimeError("the model server sent no action")
-    ok = [i for i in range(n) if i not in errors]
-    keys = list(sent[ok[0]]) if ok else []
-    for i in ok:
-        if set(sent[i]) != set(keys):
-            errors[i] = RuntimeError(f"action keys {sorted(sent[i])} differ from the batch's {sorted(keys)}")
-    return {k: [sent[i][k] for i in range(n) if i not in errors] for k in keys}, errors
