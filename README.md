@@ -3,7 +3,7 @@
 [![CI](https://github.com/allenai/vla-evaluation-harness/actions/workflows/ci.yml/badge.svg)](https://github.com/allenai/vla-evaluation-harness/actions/workflows/ci.yml)
 [![pypi](https://img.shields.io/pypi/v/vla-eval.svg)](https://pypi.python.org/pypi/vla-eval)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-[![Python 3.8+](https://img.shields.io/badge/Python-3.8+-blue.svg)](https://www.python.org/)
+[![Python 3.11+](https://img.shields.io/badge/Python-3.11+-blue.svg)](https://www.python.org/)
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 [![Docker Images](https://img.shields.io/badge/Docker_Images-ghcr.io-2496ED.svg?logo=docker)](https://ghcr.io/allenai/vla-evaluation-harness)
 
@@ -60,7 +60,7 @@ See [Architecture](docs/architecture.md) for how the pieces connect.
 
 ## Installation
 
-Requires Python 3.8+ and SQLite 3.24+ with JSON support for recording. A uv-managed
+Requires Python 3.11+ and SQLite 3.24+ with JSON support for recording. A uv-managed
 Python build includes a suitable SQLite; system Python builds may not.
 
 ```bash
