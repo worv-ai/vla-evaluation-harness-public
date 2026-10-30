@@ -31,7 +31,7 @@ RUN mkdir -p /tmp/RoboCerebra \
 
 # ── Download RoboCerebra benchmark data ────────────────────────────
 RUN uv pip install --no-cache-dir huggingface_hub \
-    && huggingface-cli download qiukingballball/RoboCerebraBench \
+    && hf download qiukingballball/RoboCerebraBench \
         --repo-type dataset \
         --local-dir /workspace/RoboCerebra_Bench \
     && rm -rf ~/.cache/pip ~/.cache/uv

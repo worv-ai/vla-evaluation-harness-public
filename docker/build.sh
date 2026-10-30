@@ -33,8 +33,9 @@ BENCHMARKS=(simpler libero libero_pro libero_plus libero_mem robocerebra maniski
 # Derived images that extend a benchmark image instead of base
 DERIVED_BENCHMARKS=(simpler_groot simpler_xvla)
 
-# Simulator envs still below Python 3.11, the harness's floor; skipped until migrated.
-PY311_PENDING=(calvin robocasa behavior1k)
+# Simulator envs still below Python 3.11, the harness's floor: behavior1k until it moves to the 2026
+# stack, rlbench until its removal lands.
+PY311_PENDING=(behavior1k rlbench)
 
 # Images whose Dockerfile gates the build behind an ``ARG ACCEPT_*=YES``
 # build-arg.  Map: image-name → "<arg-name> <licence-url>".  Adding a new

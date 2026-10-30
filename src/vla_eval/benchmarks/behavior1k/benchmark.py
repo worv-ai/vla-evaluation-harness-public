@@ -389,7 +389,7 @@ class Behavior1KBenchmark(StepBenchmark):
             get_task_instance_path(scene_model),
             f"json/{scene_model}_task_{task.activity_name}_instances/{tro_filename}-tro_state.json",
         )
-        with open(tro_file_path) as f:
+        with open(tro_file_path, "r") as f:
             tro_state = recursively_convert_to_torch(json.load(f))
 
         robot = env.scene.object_registry("name", "robot_r1")
