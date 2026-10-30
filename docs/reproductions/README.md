@@ -20,24 +20,25 @@ Systematic verification that vla-eval reproduces published VLA model scores acro
 | | [DB-GR00TN1](https://arxiv.org/abs/2510.23511) | ⬜<br>94.8%† | · | · | · | · |
 | [starVLA/starVLA](https://github.com/starVLA/starVLA) | Q2.5-FAST | ⬜<br>[95.2%](https://huggingface.co/StarVLA/Qwen2.5-VL-FAST-LIBERO-4in1) | · | ✅<br>**64.6%** / [58.6%](https://huggingface.co/StarVLA/Qwen-FAST-Bridge-RT-1) | · | · |
 | | Qwen3-FAST | ⬜<br>95.4%† | · | ⬜<br>31.6%† | · | · |
-| | Qwen3-OFT | ✅<br>**96.8%** / [97.8%²](https://huggingface.co/StarVLA/Qwen3-VL-OFT-LIBERO-4in1) | · | ⬜<br>[42.7%](https://huggingface.co/StarVLA/Qwen3VL-OFT-Bridge-RT-1) | · | · |
+| | Qwen3-OFT | ✅<br>Spatial: **96.8%** / [97.8%²](https://huggingface.co/StarVLA/Qwen3-VL-OFT-LIBERO-4in1) | · | ⬜<br>[42.7%](https://huggingface.co/StarVLA/Qwen3VL-OFT-Bridge-RT-1) | · | · |
 | | Qwen3-PI | ⬜<br>[95.7%](https://huggingface.co/StarVLA/Qwen3-VL-PI-LIBERO-4in1) | · | ⬜<br>60.9%† | · | · |
 | | Qwen3-GR00T | ⬜<br>96.5%† | ⬜<br>3.76† | ✅<br>**66.7%** / [65.3%](https://huggingface.co/StarVLA/Qwen3VL-GR00T-Bridge-RT-1) | · | · |
 | [DravenALG/VLANeXt](https://github.com/DravenALG/VLANeXt) | [VLANeXt](https://arxiv.org/abs/2602.18532) | ✅<br>[**96.9%**](https://github.com/allenai/vla-evaluation-harness/pull/34) / [97.4%](https://huggingface.co/DravenALG/VLANeXt)³ | · | · | · | · |
-| [huggingface/lerobot](https://github.com/huggingface/lerobot) | π₀.₅ (LeRobot) | ✅<br>**100%** / [99.0%](https://huggingface.co/lerobot/pi05_libero_finetuned)⁵ | · | · | · | · |
-| | GR00T N1.7 | ✅<br>**99.0%** / [81%](https://huggingface.co/nvidia/gr00t17-lerobot-libero_object-640)⁵ | · | · | · | · |
-| | [MolmoAct2](https://huggingface.co/allenai/MolmoAct2-LIBERO) | ✅<br>**97.0%** / [98.0%](https://huggingface.co/allenai/MolmoAct2-LIBERO)⁵ | · | · | · | · |
-| | VLA-JEPA | ✅<br>**96.0%** / [93.0%](https://huggingface.co/lerobot/VLA-JEPA-LIBERO)⁵ | · | · | · | · |
+| [huggingface/lerobot](https://github.com/huggingface/lerobot) | π₀.₅ (LeRobot) | ✅<br>Object: **100%** / [99.0%](https://huggingface.co/lerobot/pi05_libero_finetuned)⁵ | · | · | · | · |
+| | GR00T N1.7 | ✅<br>Object: **99.0%** / [81%](https://huggingface.co/nvidia/gr00t17-lerobot-libero_object-640)⁵ | · | · | · | · |
+| | [MolmoAct2](https://huggingface.co/allenai/MolmoAct2-LIBERO) | ✅<br>Goal: **97.0%** / [98.0%](https://huggingface.co/allenai/MolmoAct2-LIBERO)⁵ | · | · | · | · |
+| | VLA-JEPA | ✅<br>Long: **96.0%** / [93.0%](https://huggingface.co/lerobot/VLA-JEPA-LIBERO)⁵ | · | · | · | · |
+| | [SmolVLA](https://arxiv.org/abs/2506.01844) | Spatial: **85.4%** / –⁶ | · | · | · | · |
 
-SE = SimplerEnv. SE GR = Google Robot VM.
+LIBERO cells are 4-suite averages unless the cell names a suite; single-suite results are not comparable row to row with them. SE = SimplerEnv. SE GR = Google Robot VM.
 
-¹ Community checkpoint (not official NVIDIA). ² Spatial suite only (reported 97.8%); 4-suite avg is 96.6%. ³ 4-suite LIBERO average (Spatial 98.2, Object 98.8, Goal 97.0, Long 93.6). ⁴ Self-reported best rollout. Move Near 10 variants × 60 eps. ⁵ Single suite, 10 tasks × 10 eps (π₀.₅/GR00T: Object, MolmoAct2: Goal, VLA-JEPA: Long); see [lerobot.md](lerobot.md). † Checkpoint not publicly available on HuggingFace.
+¹ Community checkpoint (not official NVIDIA). ² Spatial suite only (reported 97.8%); 4-suite avg is 96.6%. ³ 4-suite LIBERO average (Spatial 98.2, Object 98.8, Goal 97.0, Long 93.6). ⁴ Self-reported best rollout. Move Near 10 variants × 60 eps. ⁵ Single suite (named in the cell), 10 tasks × 10 eps; see [lerobot.md](lerobot.md). ⁶ `lerobot/smolvla_libero`, Spatial only, 10 tasks × 50 eps; no official score for this checkpoint (the paper's 90 is a different model). The community report [lerobot#4614](https://github.com/huggingface/lerobot/issues/4614) has 82.7% (chunk_size 1, 150 eps, 280-step cap); ours at the same cap is 85.8%, +3.1 pp (95% CI [−3.1, 10.5], independent samples). MuJoCo version (Spatial task 5) and checkpoint revision are not aligned, so this shows no detectable difference, not agreement; see [lerobot.md](lerobot.md). † Checkpoint not publicly available on HuggingFace.
 
 ## Other Benchmarks
 
 | Benchmark | Model | Reproduced | Reported | Details |
 |-----------|-------|:----------:|:--------:|---------|
-| RoboTwin | [X-VLA](https://arxiv.org/abs/2510.10274) | ⬜ | [70/39%](https://huggingface.co/2toINF/X-VLA-WidowX) | [xvla.md](xvla.md) |
+| RoboTwin | [X-VLA](https://arxiv.org/abs/2510.10274) | 🟡 **66.7%**⁴ | [70.0/39.0%](https://huggingface.co/2toINF/X-VLA-RoboTwin2) | [xvla.md](xvla.md) |
 | RoboTwin | [DB-CogACT](https://arxiv.org/abs/2510.23511) | ⬜ | [58.5%](https://huggingface.co/Dexmal/robotwin-db-cogact) | [dexbotic.md](dexbotic.md) |
 | RoboTwin | starVLA Qwen3-OFT | ⬜ | [50.4%](https://huggingface.co/StarVLA/Qwen3-VL-OFT-RoboTwin2-All) | [starvla.md](starvla.md) |
 | RoboMME | [MME-VLA π₀.5](https://arxiv.org/abs/2603.04639) | ✅ **25.5%** | [22.7%](https://huggingface.co/Yinpei/pi05_baseline)¹ | [robomme.md](robomme.md) |
@@ -53,6 +54,7 @@ SE = SimplerEnv. SE GR = Google Robot VM.
 ¹ Counting suite only (4/16 tasks). Full 4-suite evaluation pending.
 ² Pick-and-Place only on `procthor-objaverse/FrankaPickandPlaceHardBench` (200 ep). Other task types not yet reproduced.
 ³ Score / SR, Memory dimension only (1 of 5), 15/50 episodes, seed 0 of 3; 2 of 6 tasks blocked by an upstream layout bug (counted as 0).
+⁴ Easy only, 50 tasks × up to 20 episodes (915 in total) at the official client's 300-action cap; 78.2% with RoboTwin's per-task step limits. Hard not evaluated.
 
 **Cell format:** status / [reported%](HF checkpoint link). Bold = our reproduced score. Per-codebase reproduction details live in the per-codebase docs linked below; rows without a per-codebase doc (currently VLANeXt) hyperlink the bolded score to the landing PR instead.
 

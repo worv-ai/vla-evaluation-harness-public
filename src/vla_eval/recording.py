@@ -502,6 +502,7 @@ class EpisodeRecorder:
         elapsed_sec: float = 0.0,
         failure_reason: str | None = None,
         failure_detail: str | None = None,
+        rt_metrics: dict[str, Any] | None = None,
     ) -> None:
         if self._closed:
             return
@@ -542,7 +543,8 @@ class EpisodeRecorder:
                     metrics=metrics,
                     steps=steps,
                     elapsed_sec=elapsed_sec,
-                    context=self._context,
+                    # Kept in the context JSON (export spreads it into the episode row): no schema change.
+                    context=self._context if rt_metrics is None else {**self._context, "rt_metrics": rt_metrics},
                     jsonl_path=jsonl_path,
                     failure_reason=failure_reason,
                     failure_detail=failure_detail,
@@ -596,6 +598,7 @@ class NullEpisodeRecorder(EpisodeRecorder):
         elapsed_sec: float = 0.0,
         failure_reason: str | None = None,
         failure_detail: str | None = None,
+        rt_metrics: dict[str, Any] | None = None,
     ) -> None:
         pass
 

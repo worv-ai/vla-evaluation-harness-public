@@ -3,12 +3,10 @@
 from __future__ import annotations
 
 import logging
-import os
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Callable
 
 import anyio
-import anyio.to_thread
 import websockets
 from websockets.protocol import State as WebSocketState
 
@@ -16,8 +14,6 @@ from vla_eval.protocol.messages import Message, MessageType, make_hello_payload,
 from vla_eval.types import Action, Observation
 
 logger = logging.getLogger(__name__)
-
-_ENCODE_LIMITER = anyio.CapacityLimiter(max(8, os.cpu_count() or 8))
 
 
 class Connection:
@@ -31,7 +27,7 @@ class Connection:
     **Core primitives** — the irreducible operations everything else builds on:
 
     - `connect` / `close` — WebSocket lifecycle.
-    - `send(msg_type, payload)` — send any message (auto-reconnects, auto-seq).
+    - `send(msg_type, payload)` — send any message (auto-seq; EPISODE_START auto-reconnects).
     - `recv(timeout=...)` — receive the next message.
 
     **Convenience methods** — thin compositions of the primitives above:
@@ -68,7 +64,6 @@ class Connection:
         self.backoff_base = backoff_base
         self._ws: Any = None
         self._seq: int = 0
-        self._send_lock = anyio.Lock()
         self._action_callback: Callable[[Action], None] | None = None
         self._benchmark: str | None = None
         self.server_info: dict[str, Any] = {}
@@ -105,17 +100,16 @@ class Connection:
     async def send(self, msg_type: MessageType, payload: dict[str, Any]) -> int:
         """Send a message of any type.  Returns the assigned sequence number.
 
-        Auto-reconnects if the connection was lost.
+        Only EPISODE_START reconnects a lost connection: mid-episode a new server
+        session would lack EPISODE_START, so the dead socket raises ``ConnectionClosed``.
         Sequence numbers are managed internally — callers never set them.
         """
-        await self._ensure_connected()  # outside the lock: a reconnect sends HELLO through here
-        async with self._send_lock:  # one connection's messages leave in sequence order
-            seq = self._next_seq()
-            msg = Message(type=msg_type, payload=payload, seq=seq)
-            # Encoding images (PNG by default) takes milliseconds: off the event loop, so the
-            # concurrent sends of a vector benchmark's slots encode in parallel.
-            data = await anyio.to_thread.run_sync(pack_message, msg, limiter=_ENCODE_LIMITER)
-            await self._ws.send(data)
+        if msg_type == MessageType.EPISODE_START:
+            await self._ensure_connected()
+        elif self._ws is None:
+            raise RuntimeError("Not connected")
+        seq = self._next_seq()
+        await self._ws.send(pack_message(Message(type=msg_type, payload=payload, seq=seq)))
         return seq
 
     async def recv(self, *, timeout: float | None = None) -> Message:
@@ -178,10 +172,22 @@ class Connection:
 
     @asynccontextmanager
     async def listening(self) -> AsyncIterator[None]:
-        """Run the listener for the block's duration (live mode): ACTIONs go to ``on_action``."""
+        """Run the listener for the block's duration (live mode): ACTIONs go to ``on_action``.
+
+        If the listener fails (e.g. the connection dropped), the block is cancelled and the error re-raised.
+        """
         error: Exception | None = None
+
+        async def listen() -> None:
+            nonlocal error
+            try:
+                await self._listener_loop()
+            except Exception as exc:
+                error = exc
+                tg.cancel_scope.cancel()
+
         async with anyio.create_task_group() as tg:
-            tg.start_soon(self._run_listener)
+            tg.start_soon(listen)
             try:
                 yield
             except Exception as exc:
@@ -189,14 +195,6 @@ class Connection:
             tg.cancel_scope.cancel()
         if error is not None:
             raise error
-
-    async def _run_listener(self) -> None:
-        try:
-            await self._listener_loop()
-        except anyio.get_cancelled_exc_class():
-            raise
-        except Exception:
-            logger.exception("Listener loop crashed")
 
     # ── Private helpers ──────────────────────────────────────────────
 
@@ -242,12 +240,9 @@ class Connection:
         Only used in live mode (LiveEpisodeRunner).  Sync mode uses
         ``act()`` (send + recv) directly and never starts the listener.
 
-        On connection loss the listener exits instead of reconnecting.
-        Reconnecting here would create a new server-side session without
-        re-sending EPISODE_START, causing the model server to receive
-        observations on an uninitialised session.  Letting the listener
-        exit causes the episode to fail cleanly, which the orchestrator
-        already handles via episode-level error isolation.
+        On connection loss the listener raises instead of reconnecting: a new
+        server-side session would lack EPISODE_START.  ``listening()`` re-raises
+        it so the orchestrator fails the episode via episode-level error isolation.
         """
         cancelled = anyio.get_cancelled_exc_class()
         _recv_count = 0
@@ -267,10 +262,8 @@ class Connection:
                 except cancelled:
                     raise
                 except (ConnectionError, websockets.exceptions.ConnectionClosed):
-                    logger.warning(
-                        "Connection lost in listener loop, exiting listener (received %d msgs)", _recv_count
-                    )
-                    break
+                    logger.warning("Connection lost in listener loop (received %d msgs)", _recv_count)
+                    raise
                 except Exception:
                     logger.exception("Error processing message in listener loop, continuing")
         except cancelled:

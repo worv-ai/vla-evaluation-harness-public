@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import anyio
 import numpy as np
 import pytest
+import websockets
 
 from vla_eval.connection import Connection
 
@@ -109,35 +111,34 @@ async def test_listening_reraises_bare_exception(echo_server):
 
 
 @pytest.mark.anyio
-async def test_concurrent_sends_leave_in_sequence_order(monkeypatch):
-    """Encoding runs on worker threads; a slow first message must still reach the socket first."""
-    import time
+async def test_mid_episode_send_does_not_reconnect(free_port):
+    """A dropped socket mid-episode raises instead of reopening a session that never saw EPISODE_START."""
+    url = f"ws://127.0.0.1:{free_port}"
+    task1 = await start_echo_server(free_port)
+    conn = Connection(url, max_retries=5, backoff_base=0.3)
+    await conn.connect()
+    await conn.start_episode({"task": "test"})
+    await stop_server(task1)
+    task2 = await start_echo_server(free_port)
+    try:
+        with pytest.raises(websockets.exceptions.ConnectionClosed):
+            await conn.act({"value": 1.0})
+    finally:
+        await conn.close()
+        await stop_server(task2)
 
-    import anyio
-    from websockets.protocol import State
 
-    import vla_eval.connection as connection_module
-    from vla_eval.protocol.messages import MessageType, pack_message, unpack_message
-
-    class FakeSocket:
-        state = State.OPEN
-
-        def __init__(self) -> None:
-            self.sent: list[int] = []
-
-        async def send(self, data: bytes) -> None:
-            self.sent.append(unpack_message(data).seq)
-
-    def slow_first(msg):
-        if msg.seq == 1:
-            time.sleep(0.2)
-        return pack_message(msg)
-
-    monkeypatch.setattr(connection_module, "pack_message", slow_first)
-    conn = Connection("ws://unused")
-    conn._ws = FakeSocket()
-    async with anyio.create_task_group() as tg:
-        for _ in range(4):
-            tg.start_soon(conn.send, MessageType.OBSERVATION, {"value": 1.0})
-            await anyio.sleep(0.01)
-    assert conn._ws.sent == [1, 2, 3, 4]
+@pytest.mark.anyio
+async def test_listening_raises_when_connection_drops(free_port):
+    """Live mode: a dropped socket cancels the episode body and surfaces as ConnectionClosed."""
+    task = await start_echo_server(free_port)
+    conn = Connection(f"ws://127.0.0.1:{free_port}")
+    await conn.connect()
+    await conn.start_episode({"task": "test"})
+    try:
+        with anyio.fail_after(10), pytest.raises(websockets.exceptions.ConnectionClosed):
+            async with conn.listening():
+                await stop_server(task)
+                await anyio.sleep(30)
+    finally:
+        await conn.close()
