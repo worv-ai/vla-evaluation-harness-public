@@ -10,10 +10,11 @@ RUN uv pip install --no-cache-dir "torch==2.1.0" \
 # robosuite/robomimic are installed from libero-mem's bundled thirdparty/
 # forks (not PyPI) — they contain modifications for memory-dependent envs.
 # opencv-python is preinstalled so the fork's unpinned dep keeps numpy 1.x (opencv >=4.12 needs numpy 2).
-# numpy 1.24.4: LIBERO pins 1.22.4 (no cp311 wheel); the harness already upgraded it to 1.24.4 on 3.8.
+# numpy 1.24.4 (LIBERO pins 1.22.4, which has no cp311 wheel), numba and scipy are what the 3.8 image ran;
+# with them the 3.11 LIBERO image reproduces the 3.8 one's observations and actions bit for bit.
 RUN uv pip install --no-cache-dir \
-        numpy==1.24.4 mujoco==3.2.3 bddl==1.0.1 opencv-python \
-        Pillow scipy h5py pyyaml termcolor future easydict hydra-core \
+        numpy==1.24.4 numba==0.58.1 scipy==1.10.1 mujoco==3.2.3 bddl==1.0.1 opencv-python \
+        Pillow h5py pyyaml termcolor future easydict hydra-core \
         "gym>=0.21,<0.27" matplotlib \
     && rm -rf ~/.cache/pip ~/.cache/uv
 
