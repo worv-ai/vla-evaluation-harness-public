@@ -38,7 +38,7 @@ from vla_eval.registry import resolve_import_string
 from vla_eval.render import apply_render_mode, normalize_render_mode
 from vla_eval.specs import DimSpec, check_specs
 from vla_eval.results.collector import EpisodeResult, ResultCollector
-from vla_eval.runners.base import EpisodeError
+from vla_eval.runners.base import episode_status, failure_reason
 from vla_eval.runners.live_runner import LiveEpisodeRunner
 from vla_eval.runners.clock import Clock
 from vla_eval.runners.sync_runner import SyncEpisodeRunner
@@ -430,8 +430,7 @@ class Orchestrator:
         if error is None:
             assert result is not None
             ep_dict = {**result, "episode_id": ep}
-            metrics = ep_dict.get("metrics")
-            status = "success" if isinstance(metrics, dict) and metrics.get("success") else "fail"
+            status = episode_status(ep_dict)
         else:
             reason, detail = self._failure(error)
             ep_dict = {"episode_id": ep, "metrics": {"success": False}}
@@ -614,15 +613,16 @@ class Orchestrator:
 
     def _failure(self, error: BaseException) -> tuple[str, str]:
         """``(failure_reason, failure_detail)`` of an episode that ended in ``error``."""
-        if isinstance(error, ConnectionError):
-            return "server_unreachable", str(error)
+        reason = failure_reason(error)
+        if reason == "server_unreachable":
+            return reason, str(error)
         if isinstance(error, websockets.exceptions.ConnectionClosed):
             rcvd = error.rcvd
-            return "connection_closed", f"code={rcvd.code if rcvd else None} reason={rcvd.reason if rcvd else None}"
-        if isinstance(error, TimeoutError):
-            return "timeout", f"timeout={self._server_cfg.timeout}s: {error}"
+            return reason, f"code={rcvd.code if rcvd else None} reason={rcvd.reason if rcvd else None}"
+        if reason == "timeout":
+            return reason, f"timeout={self._server_cfg.timeout}s: {error}"
         detail = "".join(traceback.format_exception(type(error), error, error.__traceback__))  # 3.8: no 1-arg form
-        return (error.phase if isinstance(error, EpisodeError) else "exception"), detail
+        return reason, detail
 
     def _close_recorder(
         self,

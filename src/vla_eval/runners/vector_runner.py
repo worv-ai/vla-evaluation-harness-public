@@ -14,7 +14,14 @@ from vla_eval import columns, watchdog
 from vla_eval.benchmarks.base import VectorStepBenchmark
 from vla_eval.types import Batch, EpisodeResult, Task
 from vla_eval.recording import EpisodeRecorder, RecordingError
-from vla_eval.runners.base import EnvStartError, EnvStepError, ModelActError, episode_start_payload, phase
+from vla_eval.runners.base import (
+    EnvStartError,
+    EnvStepError,
+    ModelActError,
+    episode_end_payload,
+    episode_start_payload,
+    phase,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +88,7 @@ class VectorEpisodeRunner:
         self._slots: list[int] = []  # the running slots, in the rows' order of
         self._obs: Batch = {}  # their observations
         self._steps = np.zeros(benchmark.num_envs, np.int64)
-        self._ends: list[list[Any]] = []  # [slot, result] of the server sessions to end in the next round trip
+        self._ends: list[list[Any]] = []  # [slot, EPISODE_END payload] of the server sessions to end next round trip
         exhausted = False
 
         def ended(episode: VectorEpisode, result: Any, error: Any, *, aborted: bool = False) -> None:
@@ -131,7 +138,7 @@ class VectorEpisodeRunner:
     def _end_running(self, exc: Exception) -> None:
         for slot, r in self._running.items():
             self._on_end(r.episode, None, exc)
-            self._ends.append([slot, {}])
+            self._ends.append([slot, episode_end_payload(error=exc)])
         self._running.clear()
         self._slots, self._obs = [], {}
 
@@ -179,8 +186,9 @@ class VectorEpisodeRunner:
         errors = {slot: detail for slot, detail in reply.get("errors", [])}
         if errors:
             for slot in [s for s in self._slots if s in errors]:
-                self._on_end(self._running.pop(slot).episode, None, ModelActError(f"Server error: {errors[slot]}"))
-                self._ends.append([slot, {}])
+                error = ModelActError(f"Server error: {errors[slot]}")
+                self._on_end(self._running.pop(slot).episode, None, error)
+                self._ends.append([slot, episode_end_payload(error=error)])
             self._keep([i for i, s in enumerate(self._slots) if s not in errors])
         actions = reply.get("actions", {})
         try:
@@ -224,7 +232,7 @@ class VectorEpisodeRunner:
             r = self._running.pop(slot)
             if isinstance(value, Exception):
                 self._on_end(r.episode, None, value)
-                self._ends.append([slot, {}])
+                self._ends.append([slot, episode_end_payload(error=value)])
                 continue
             result: EpisodeResult = {
                 "metrics": value,
@@ -232,7 +240,7 @@ class VectorEpisodeRunner:
                 "elapsed_sec": round(now - r.t0, 3),
             }
             self._on_end(r.episode, result, None)
-            self._ends.append([slot, result])
+            self._ends.append([slot, episode_end_payload(result)])
 
     async def _reconnect(self, exc: Exception) -> None:
         """End every running episode with ``exc`` after reconnecting; aborted when the reconnect fails."""
