@@ -621,7 +621,7 @@ class Orchestrator:
             return "connection_closed", f"code={rcvd.code if rcvd else None} reason={rcvd.reason if rcvd else None}"
         if isinstance(error, TimeoutError):
             return "timeout", f"timeout={self._server_cfg.timeout}s: {error}"
-        detail = "".join(traceback.format_exception(error))
+        detail = "".join(traceback.format_exception(type(error), error, error.__traceback__))  # 3.8: no 1-arg form
         return (error.phase if isinstance(error, EpisodeError) else "exception"), detail
 
     def _close_recorder(
