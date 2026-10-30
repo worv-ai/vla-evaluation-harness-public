@@ -149,8 +149,7 @@ class Orchestrator:
            and re-sort it by task so env rebuilds stay rare.
         6. Run each work item via the runner. Recording goes through SQLite.
            Failures are isolated per episode.  A :class:`VectorStepBenchmark`
-           runs up to ``num_envs`` items at once, one server connection (and
-           recording ``sid``) per environment slot.
+           runs up to ``num_envs`` items at once over one connection.
 
     Error recovery:
         - ``ConnectionError`` (server unreachable after retries): abort the
@@ -242,8 +241,7 @@ class Orchestrator:
 
     def _check_health(self, bench_eval_id: str | None, item: int, in_flight: Collection[int] = ()) -> None:
         """Exit a sharded run's shard whose first UNHEALTHY_AFTER episodes all errored (a dead GPU).
-
-        ``in_flight``: queue items this shard still runs (vector benchmarks); requeued with the failed ones."""
+        ``in_flight``: queue items still running (vector benchmarks), requeued with the failed ones."""
         if self.num_shards is None or self._episodes_ok or not self._episode_errored:
             return
         self._errors_from_start += 1
@@ -425,10 +423,8 @@ class Orchestrator:
         error: BaseException | None,
         done: Callable[[], int],
     ) -> None:
-        """Book one episode's end, the same for every runner: collector, recording, trackers, log, progress.
-
-        Exactly one of ``result`` / ``error`` is set.  ``done()`` runs once the recording is durable
-        (the place to finish a queue item) and returns the entry's count of finished episodes."""
+        """Book one episode's end (``result`` xor ``error``) for every runner.  ``done()`` runs once the recording
+        is durable (finish the queue item there) and returns the entry's finished-episode count."""
         status: EpisodeStatus
         ep_dict: dict[str, Any]
         if error is None:
@@ -516,14 +512,12 @@ class Orchestrator:
         return self._finalize_benchmark(e.collector, e.cfg, e.safe_name, partial=False, server_info=conn.server_info)
 
     async def _run_vector(self, benchmark: VectorStepBenchmark, conn: Connection, e: _Entry) -> dict[str, Any]:
-        """Run the entry's items on a :class:`VectorStepBenchmark`, up to ``num_envs`` at once on ``conn``.
-
-        The running episodes share one task: a free slot takes an item of that task, and the next task
-        starts once they all ended.  Each episode has its own recording ``sid``, its server session's id."""
+        """Run the entry's items up to ``num_envs`` at once on ``conn``.  Running episodes share one task;
+        the next task starts once they all ended.  Each episode has its own recording ``sid``."""
         if not conn.server_info.get("capabilities", {}).get("vector_step"):
             benchmark.cleanup()
             await conn.close()
-            raise RuntimeError(f"{e.name}: the model server does not take vector steps (vla-eval too old, or CI mode)")
+            raise RuntimeError(f"{e.name}: the model server does not take vector steps (vla-eval too old)")
         claimed: set[int] = set()  # queue items in flight
         held: tuple[int | None, tuple[int, Any, int]] | None = None  # the next task's first item, waiting
         group: int | None = None  # the running episodes' task_idx

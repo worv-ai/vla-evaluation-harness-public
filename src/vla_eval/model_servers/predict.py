@@ -1,21 +1,5 @@
-"""PredictModelServer: the model server to subclass.
-
-Override one of:
-
-- ``predict(obs, row) -> action``: one observation (a dict) of one episode.  Simple, and enough when the server
-  sees one episode at a time.
-- ``predict_batch(obs, rows) -> actions``: a :data:`~vla_eval.columns.Batch` of observations, a row per
-  episode, to a batch of actions.  Use it when the model infers a batch faster than its rows one by one: vector
-  benchmarks (hundreds of environments per step) and several shards on one server.  ``rows.ids`` index
-  per-episode state kept in arrays.
-
-The default ``predict_batch`` calls ``predict`` per row.  Episodes start and end through ``on_episode_start(rows)``
-/ ``on_episode_end(rows, results)``, batched the same way.
-
-With ``chunk_size``, the model returns a chunk ``[T, D]`` per row; the server trims it to ``chunk_size``, returns
-its first action and serves the rest from a per-episode buffer before inferring that episode again.  A server that
-must see every observation (it keeps a history, or queues actions itself) leaves ``chunk_size`` unset.
-"""
+"""PredictModelServer: override ``predict(obs, row)`` (one episode's observation), or ``predict_batch(obs, rows)``
+(column batch, a row per episode) when batched inference beats per-row; the default calls ``predict`` per row."""
 
 from __future__ import annotations
 
@@ -51,13 +35,11 @@ class _Request:
 
 class PredictModelServer(ModelServer):
     """Args:
-    chunk_size: Actions per inference of an episode (``None``: every observation is inferred and the model's
-        output is returned as is).
-    max_batch_size: Most rows per ``predict_batch`` call (``None``: no limit).  The default 1 infers episodes one
-        at a time; raise it (to ``num_envs`` for a vector benchmark) to batch them.
-    max_wait_time: Seconds to wait for more requests before inferring a batch smaller than ``max_batch_size``
-        (``0``: infer what has arrived).  Requests from several connections coalesce into one batch.
-    max_rows: Most episodes at once (``None``: no limit); 1 for a model whose state is not per episode.
+    chunk_size: Actions per inference; the rest of each ``[T, D]`` chunk is served from a per-episode buffer.
+        Leave unset if the model must see every observation.
+    max_batch_size: Most rows per ``predict_batch`` call (``None``: no limit); raise it to batch episodes.
+    max_wait_time: Seconds to wait for other connections' requests before inferring a partial batch.
+    max_rows: Most concurrent episodes (``None``: no limit); 1 for a model whose state is not per episode.
     """
 
     def __init__(
@@ -90,8 +72,7 @@ class PredictModelServer(ModelServer):
         raise NotImplementedError(f"{type(self).__name__} must override predict() or predict_batch()")
 
     def predict_batch(self, obs: Batch, rows: Rows) -> Batch:
-        """Observations of ``rows`` (row ``i`` of every column for ``rows[i]``) to action columns with a row each.
-        Blocking.  Default: :meth:`predict` per row."""
+        """Observation columns of ``rows`` to action columns, a row each.  Blocking."""
         actions, errors = self._predict_rows(obs, rows)
         if errors:
             raise next(iter(errors.values()))

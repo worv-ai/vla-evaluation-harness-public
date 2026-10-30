@@ -7,10 +7,8 @@
 - **Requires:** RFC-0001
 - **Superseded-By:** —
 
-> **Superseded in part by the row API ([RFC-0009](0009-vector-benchmarks.md)).** `ModelServer` is now the
-> batched contract driven by `serve.py`; models subclass `PredictModelServer` and implement `predict(obs, row)` or
-> `predict_batch(obs, rows)`. `SessionContext`, `on_observation`, `BatchPredictModelServer`, action ensembling,
-> continuous inference and LAAS are removed. See [CONTRIBUTING.md](../../CONTRIBUTING.md#adding-a-model-server).
+> **Superseded in part by the row API ([RFC-0009](0009-vector-benchmarks.md)):** `predict(obs, row)` / `predict_batch(obs,
+> rows)`; `SessionContext`, `on_observation`, action ensembling, continuous inference and LAAS are removed.
 
 ## Summary
 

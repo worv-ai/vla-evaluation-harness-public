@@ -30,9 +30,8 @@ HERE = Path(__file__).resolve().parent
 
 
 class PolicyServer(PredictModelServer):
-    """Serves the live policy. ``select_action`` keeps the policy's own observation
-    history and action queue, so one action comes back per observation. That state is
-    global, hence one episode at a time (``max_rows=1``)."""
+    """Serves the live policy.  ``select_action`` keeps global history and action queue state,
+    hence one episode at a time (``max_rows=1``)."""
 
     def __init__(self, policy: DiffusionPolicy, preprocess: Any, postprocess: Any, device: torch.device) -> None:
         super().__init__(max_rows=1)

@@ -61,26 +61,11 @@ class _Running:
 
 
 class VectorEpisodeRunner:
-    """Runs episodes on the slots of a :class:`VectorStepBenchmark` over one connection.
+    """Runs episodes on a :class:`VectorStepBenchmark`'s slots, one ``VECTOR_STEP`` round trip per step.
 
-    A step is one round trip (``Connection.exchange``): the episodes ended since the last one,
-    the ones just started and the running slots' observations (one :data:`Batch`) go out
-    together, the server infers them together, then every environment steps once.  Each slot's
-    episode is its own server session.  Free slots take the next episode from
-    ``next_episode(slot)`` (``None`` when there is none now): at any step when the benchmark has
-    ``partial_reset``, else when no slot runs.  After a ``None`` it asks again once an episode
-    ends, and returns when no episode runs and none comes.
-
-    A server error for a slot (a failed episode start, a model error) and an exception from
-    ``result`` end that episode.  An exception raised by ``reset`` or ``step`` ends every episode
-    on the simulator, whose state is then unknown.  A failed round trip (closed connection,
-    timeout, bad reply) ends every running episode, then the runner reconnects, with new
-    sessions, and goes on.  When the reconnect fails or the server is unreachable
-    (``ConnectionError``), every episode it holds ends aborted and ``ConnectionError`` is raised.
-    ``RecordingError`` and exceptions from ``on_end`` propagate.
-
-    The benchmark runs on the event loop's thread, as it was built: simulators keep thread-bound
-    state, and the loop has nothing to do while one steps.
+    Free slots take ``next_episode(slot)`` (``None``: none now; asked again when an episode ends).  A slot's error
+    ends its episode; a ``reset``/``step`` exception ends all on the simulator; a failed round trip ends the
+    running ones and reconnects, raising ``ConnectionError`` if that fails.  The benchmark runs on the loop thread.
     """
 
     async def run(

@@ -1,15 +1,7 @@
 """WebSocket server runner for ModelServer instances.
 
-Episodes and rows:
-    Every running episode is a row of the model server (``ModelServer.start_episodes``).  A connection's
-    ``EPISODE_START`` .. ``EPISODE_END`` is one; a ``VECTOR_STEP``'s ``starts`` / ``ends`` open and close one per
-    slot.  An episode's session id is its ``recording.sid`` from ``EPISODE_START``, else the connection's UUID
-    (``<uuid>:<slot>`` for a vector slot).  Messages of one connection are handled in order, so an episode has at
-    most one observation in flight; observations of several connections coalesce into one batch.
-
-Error handling:
-    A failed episode start or observation sends an ``ERROR`` (a vector step: an error for that slot) and keeps
-    the connection.  A disconnect ends the connection's open episodes.
+Each episode is a model-server row: ``EPISODE_START``..``EPISODE_END`` of a connection, or a vector slot's
+``starts``..``ends``.  Failures send an ``ERROR`` (per slot) and keep the connection; a disconnect ends its episodes.
 
 HTTP control plane:
     ``GET /health`` returns ``200 {"status": "ok"}`` once ``__init__`` has
@@ -75,11 +67,7 @@ async def _handle_connection(
     ws: Any,
     model_server: ModelServer,
 ) -> None:
-    """Handle a single WebSocket client connection.
-
-    Messages are handled one at a time, so an episode has at most one observation in flight.  Its episode
-    (``EPISODE_START`` .. ``EPISODE_END``) is a row of the model server; a vector benchmark's slots are a row each.
-    """
+    """Handle one connection's messages in order, so an episode has at most one observation in flight."""
     global _inflight
     session_id = str(uuid.uuid4())
     row: int | None = None  # the connection's own episode
@@ -206,10 +194,8 @@ async def _try_reply(reply: Any, msg_type: MessageType, payload: dict[str, Any],
 async def _vector_step(
     payload: dict[str, Any], slots: np.ndarray, session_id: str, model_server: ModelServer
 ) -> tuple[dict[str, Any], np.ndarray]:
-    """Handle one VECTOR_STEP: its episode ends, then starts, then the running slots' observations.
-
-    ``slots[s]`` is slot ``s``'s row (-1: none); returns the VECTOR_RESULT payload and the updated ``slots``:
-    the actions of the slots that did not fail, in request order, and an error for each that did."""
+    """One VECTOR_STEP (ends, then starts, then observations); ``slots[s]``: slot ``s``'s row, -1 if none.
+    Returns the VECTOR_RESULT payload (actions of the slots that did not fail, in order) and the new ``slots``."""
     errors: dict[int, str] = {}
     ends = [(s, r) for s, r in payload.get("ends", []) if s < len(slots) and slots[s] >= 0]
     if ends:

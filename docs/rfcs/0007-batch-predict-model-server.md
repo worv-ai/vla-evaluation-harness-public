@@ -7,10 +7,8 @@
 - **Requires:** RFC-0003, RFC-0006
 - **Superseded-By:** —
 
-> **Superseded in part by the row API ([RFC-0009](0009-vector-benchmarks.md)).** Batching lives in
-> `PredictModelServer`: `predict_batch(obs, rows)` takes and returns column batches (`max_batch_size` still
-> defaults to 1 and `max_wait_time` to 0.01), and chunk buffers are kept per row (episode), not per session.
-> `BatchPredictModelServer` and the queue-depth warning are removed.
+> **Superseded in part by the row API ([RFC-0009](0009-vector-benchmarks.md)):** `predict_batch(obs, rows)` takes
+> column batches and chunk buffers are per row; the queue-depth warning is removed.
 
 ## Summary
 

@@ -97,18 +97,11 @@ See `benchmarks/libero/` for a complete reference implementation.
 
 ### Vectorized Benchmarks
 
-When the simulator steps many environments per call (MuJoCo Warp / mjlab, ManiSkill3 on
-the GPU), subclass `VectorStepBenchmark` instead, with `num_envs` as a constructor parameter:
-`reset(slots, tasks, recorders) -> Batch`, `step(slots, actions) -> (Batch, done)` and
-`result(slot) -> EpisodeResult`.  A `Batch` holds a column per key, an array with a row per slot
-(or a list, for images as `{camera: frame}`, strings, ragged actions), so a step never builds a
-dict per slot.  Set `partial_reset = True` when environments can be reset individually while
-others run.  An episode's outcome must depend only on its task (seed,
-layout), never on its slot or on the episodes running beside it.  The harness runs up to
-`num_envs` episodes of one task at once over one connection, each a row of the model server, so pair it with
-a `PredictModelServer` that overrides `predict_batch(obs, rows)` (columns in, columns out) and sets
-`max_batch_size` to `num_envs` (times the shards); a step's observations then reach the model as one batch.
-Sync mode only; see [RFC-0009](docs/rfcs/0009-vector-benchmarks.md).
+For simulators that step many environments per call (MuJoCo Warp, ManiSkill3), subclass `VectorStepBenchmark`:
+`reset(slots, tasks, recorders) -> Batch`, `step(slots, actions) -> (Batch, done)`, `result(slot)`. A `Batch` is a
+dict of columns, a row per slot (`vla_eval.columns`). Set `partial_reset = True` if slots can reset while others
+run. An episode's outcome must depend only on its task, never its slot. Pair it with a server that overrides
+`predict_batch` and sets `max_batch_size` to `num_envs`. See [RFC-0009](docs/rfcs/0009-vector-benchmarks.md).
 
 ### Render Backends
 
@@ -170,25 +163,15 @@ See `model_servers/cogact.py` for a complete reference implementation.
 
 Every running episode is a row; inference and the episode hooks are batched over rows.
 
-- `predict(obs, row) -> {"actions": ...}`: one observation (a dict) of one episode. The simple default.
-- `predict_batch(obs, rows) -> Batch`: a column batch (`vla_eval.columns`), a row per episode, to action columns
-  with a row each. Override it when the model infers a batch faster than its rows one by one: vector benchmarks,
-  or several shards on one server. The default calls `predict` per row.
-- `max_batch_size` (default 1: episodes inferred one at a time) caps the rows per call; raise it to batch, e.g. to
-  `num_envs` for a vector benchmark. Observations of several connections coalesce, waiting up to `max_wait_time`
-  (default 0.01 s) for a fuller batch.
-- `on_episode_start(rows)` / `on_episode_end(rows, results)`: blocking, on the inference thread; no `super()` call.
-  `rows.episodes[i].config` is the `EPISODE_START` payload (`config["task"]`). Return `{i: exc}` from
-  `on_episode_start` to fail position `i` alone, or raise to fail them all.
-- Per-episode state: key it by `row.id` in `predict` (`rows.ids[i]` in the hooks). An id is stable while its
-  episode runs and reused after it ends, so reset that state in `on_episode_start`.
-- `max_rows=1` (constructor): for a model whose state is global, not per episode (e.g. a policy with its own
-  action queue). The server then refuses a second concurrent episode.
-- `chunk_size`: the model returns `[T, D]` per row; the server trims it to the episode's chunk size, returns the
-  first action and serves the rest before inferring that episode again (a 1-D action passes through). Set
-  `rows.episodes[i].chunk_size` in `on_episode_start` for a per-episode size. Leave it `None` when the model must
-  see every observation (it keeps a history or queues actions itself): every observation is then inferred and the
-  output returned as is.
+- `predict(obs, row)`: one episode's observation dict. `predict_batch(obs, rows)`: observation columns (a row per
+  episode) to action columns; override it when batched inference beats per-row (default: `predict` per row).
+- `max_batch_size` (default 1) caps rows per call; requests from several connections coalesce within `max_wait_time`.
+- `on_episode_start(rows)` / `on_episode_end(rows, results)`: blocking. `rows.episodes[i].config` is the
+  `EPISODE_START` payload; return `{i: exc}` to fail one start, or raise to fail all.
+- Per-episode state: key it by `row.id` (`rows.ids` in hooks); ids are reused, so reset it in `on_episode_start`.
+- `max_rows=1`: the model's state is global (e.g. its own action queue), so one episode at a time.
+- `chunk_size`: `[T, D]` per row, served from a per-episode buffer (`rows.episodes[i].chunk_size` overrides it).
+  Leave it `None` if the model must see every observation.
 
 See [the Push-T example](examples/pusht_train_eval/train.py) for a global policy reset per episode.
 

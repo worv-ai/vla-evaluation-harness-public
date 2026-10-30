@@ -163,9 +163,8 @@ class Connection:
         return response.payload
 
     async def exchange(self, step: dict[str, Any]) -> dict[str, Any]:
-        """A vector benchmark's step: send ``VECTOR_STEP``, return the ``VECTOR_RESULT`` payload.
-
-        Never reconnects: the server's slot sessions die with the socket, so the runner must know."""
+        """Send a ``VECTOR_STEP``, return the ``VECTOR_RESULT`` payload.  Never reconnects: the server's episodes
+        die with the socket, so the runner must know."""
         if self._ws is None:
             raise RuntimeError("Not connected")
         seq = self._next_seq()

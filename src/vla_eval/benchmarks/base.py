@@ -1,14 +1,12 @@
 """Benchmark ABCs: the environment interface for evaluation.
 
-* :class:`BenchmarkCommon` — what every benchmark declares: tasks, render backends,
-  action/observation specs, metrics, metadata, the real-time hold, cleanup.
+* :class:`BenchmarkCommon` — what every benchmark declares (tasks, specs, metrics, metadata).
 * :class:`Benchmark` — async, universal contract for one environment.  Runners depend
   only on this.  Suitable for both simulation and real-robot environments.
 * :class:`StepBenchmark` — sync convenience subclass.  Users implement
   ``reset`` / ``step`` / ``make_obs`` and the class auto-bridges to the
   async parent methods.
-* :class:`VectorStepBenchmark` — sync, ``num_envs`` environments stepped together
-  (GPU-parallel simulators).  The harness runs up to ``num_envs`` episodes at once.
+* :class:`VectorStepBenchmark` — sync, ``num_envs`` environments stepped together.
 """
 
 from __future__ import annotations
@@ -293,34 +291,15 @@ class StepBenchmark(Benchmark, ABC):
 
 
 class VectorStepBenchmark(BenchmarkCommon):
-    """Sync benchmark over ``num_envs`` environments stepped together.
+    """``num_envs`` environments stepped together (MuJoCo Warp, ManiSkill3, Isaac Lab); sync only.
 
-    For simulators that step many environments per call (MuJoCo Warp / mjlab, ManiSkill3
-    on the GPU, Isaac Lab): one process holds them all, and the harness runs up to
-    ``num_envs`` episodes of one task at once.  Observations and actions travel as
-    :data:`Batch` columns, so a step costs the harness the same whatever ``num_envs``.
-    Sync mode only.  Slots are the environment indices ``0 .. num_envs - 1``.
+    Contract (slots are env indices; observations and actions are :data:`Batch` columns, row ``i`` for ``slots[i]``):
+        - ``reset(slots, tasks, recorders)`` → first observations; other slots' episodes are unaffected.
+        - ``step(slots, actions)`` → ``(observations, done)``; slots not listed stay inert.
+        - ``result(slot)`` → the ended episode's EpisodeResult, called before the slot is reset again.
 
-        - ``reset(slots, tasks, recorders)`` → the model's first observation of each slot:
-          start the episode ``tasks[i]`` in environment ``slots[i]``, recording through
-          ``recorders[i]`` (Null when recording is off).  The other slots' episodes go on as
-          if nothing happened.
-        - ``step(slots, actions)`` → ``(observations, done)``: advance every environment one
-          step, ``actions`` row ``i`` for ``slots[i]``; the slots not in ``slots`` are idle
-          (keep them inert).  ``done[i]`` ends ``slots[i]``'s episode; the observation rows of
-          ended slots are not used.
-        - ``result(slot)`` → EpisodeResult (at least ``success``) of the episode that just
-          ended in ``slot``: done, or stopped at the harness's ``max_steps``.  Called before
-          the slot is reset again.
-
-    ``partial_reset``: ``True`` when ``reset`` may start some slots while others are
-    mid-episode, so a finished slot takes the next episode at once.  ``False`` (the
-    default): the harness resets only when no slot is running and runs the episodes in
-    waves of up to ``num_envs``.
-
-    The harness counts steps and ``max_steps`` per episode, and measures each episode's
-    ``elapsed_sec`` as wall time from its reset.  Every call, the constructor included, runs on
-    the orchestrator's thread.
+    ``partial_reset``: ``reset`` may start slots while others run; else episodes run in waves of ``num_envs``.
+    The harness counts steps and ``max_steps``, and calls everything on the orchestrator's thread.
     """
 
     partial_reset: ClassVar[bool] = False

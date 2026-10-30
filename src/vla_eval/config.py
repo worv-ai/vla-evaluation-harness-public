@@ -54,8 +54,7 @@ class ServerConfig:
     Attributes:
         url: WebSocket URL of the model server.
         timeout: Seconds to wait for each server response in ``Connection.act()``.
-        image_format: How observation images travel: ``png`` (lossless, ~1.3-2x smaller, ~10 ms per
-            224x224 frame to encode), ``raw`` (lossless, no encoding: the choice on one host or a fast
+        image_format: ``png`` (lossless, ~10 ms per 224x224 frame), ``raw`` (no encoding; one host or a fast
             network) or ``jpeg`` (lossy).
     """
 

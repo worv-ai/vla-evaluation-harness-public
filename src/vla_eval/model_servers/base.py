@@ -1,8 +1,5 @@
-"""Model-server contract: every running episode is a row; inference and the episode lifecycle are batched.
-
-A single-episode benchmark is a batch of one row; a vector benchmark's step, or requests coalesced across
-connections, are batches of many.  ``PredictModelServer`` (predict.py) implements the framework side.
-"""
+"""Model-server contract: every running episode is a row; inference and episode start/end are batched.
+``PredictModelServer`` (predict.py) implements the framework side."""
 
 from __future__ import annotations
 
@@ -22,13 +19,8 @@ if TYPE_CHECKING:
 
 @dataclass(eq=False)
 class Episode:
-    """One running episode, as its ``EPISODE_START`` announced it.
-
-    ``session_id`` / ``episode_id`` are the harness's recording ``sid`` / ``eid`` when it records (open a
-    :class:`vla_eval.recording.StepRecorder` with them and ``recording_db_path`` to add rows to its episode),
-    else generated.  ``chunk_size``: this episode's action chunk length, the server's ``chunk_size`` unless
-    ``on_episode_start`` sets it (e.g. per task suite).
-    """
+    """One running episode.  ``session_id``/``episode_id``/``recording_db_path`` open a ``StepRecorder`` on
+    its recording; ``on_episode_start`` may override ``chunk_size`` (e.g. per task suite)."""
 
     config: dict[str, Any]
     episode_id: str
@@ -46,12 +38,8 @@ class Row(NamedTuple):
 
 
 class Rows:
-    """The rows of one call.
-
-    ``ids[i]``: row ``i``'s id, stable while its episode runs and reused once it ended (below the most
-    episodes the server has held at once), so a policy can keep per-episode state in arrays indexed by it.
-    ``step[i]``: observations its episode had before this one.  ``episodes[i]``: its :class:`Episode`.
-    """
+    """The rows of one call.  ``ids``: stable while an episode runs, reused after, below the peak episode
+    count, so per-episode state fits in arrays indexed by them.  ``step``: the episode's prior observations."""
 
     def __init__(self, ids: np.ndarray, step: np.ndarray, table: Sequence[Episode | None]) -> None:
         self.ids = ids
@@ -77,21 +65,16 @@ class Rows:
 
 
 class ModelServer(ABC):
-    """What ``serve`` drives: episodes start and end in batches, observations come as column batches.
-
-    Subclass :class:`~vla_eval.model_servers.predict.PredictModelServer`; it implements :meth:`start_episodes`,
-    :meth:`end_episodes` and :meth:`act` and calls the hooks below.  Load weights and finish warmup in
-    ``__init__``: the server accepts connections as soon as it returns.
-    """
+    """What ``serve`` drives.  Subclass ``PredictModelServer``, which implements the abstract methods.
+    Load weights and warm up in ``__init__``: connections are accepted as soon as it returns."""
 
     async def on_serve_start(self, tg: TaskGroup) -> None:
         """Called by ``serve_async`` before accepting connections; *tg* lives as long as the server.
         Overrides call ``super()`` first."""
 
     def on_episode_start(self, rows: Rows) -> dict[int, Exception] | None:
-        """Episodes start in ``rows`` (each row's ``episode.config`` is its ``EPISODE_START`` payload; reset that
-        row's state).  Return the exception of each position whose start failed, or raise to fail them all.
-        Blocking; runs on the inference thread."""
+        """Reset the state of ``rows`` (``episode.config``: the ``EPISODE_START`` payload).  Blocking.
+        Return ``{position: exception}`` for starts that failed, or raise to fail them all."""
         return None
 
     def on_episode_end(self, rows: Rows, results: list[dict[str, Any]]) -> None:

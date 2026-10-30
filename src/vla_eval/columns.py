@@ -1,9 +1,5 @@
-"""Column batches: the rows of several episodes, one column per key.
-
-A :data:`Batch` is a dict whose values are columns or nested dicts of columns.  A column is an array whose
-first axis is the row, or a list with an item per row (strings, values of different shapes).  Row ``i`` of
-every column belongs to the same episode.
-"""
+"""Column batches: a (nested) dict of columns, each an array with a leading row axis or a list with an item per
+row; row ``i`` of every column belongs to one episode."""
 
 from __future__ import annotations
 

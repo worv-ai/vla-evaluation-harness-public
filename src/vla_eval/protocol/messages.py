@@ -19,10 +19,8 @@ class MessageType(str, enum.Enum):
     EPISODE_START = "episode_start"
     EPISODE_END = "episode_end"
     ERROR = "error"
-    # A vector benchmark's step, one round trip; each slot (environment) is a session.  VECTOR_STEP:
-    # {"ends": [[slot, result]], "starts": [[slot, episode_start]], "slots": [slot, ...], "observations": columns},
-    # handled in that order; VECTOR_RESULT: {"actions": columns, "errors": [[slot, detail]]}.  Columns hold a row
-    # per slot (arrays, first axis the row, or lists); the actions' rows are the slots without an error, in order.
+    # VECTOR_STEP {ends: [[slot, result]], starts: [[slot, episode_start]], slots, observations: columns} ->
+    # VECTOR_RESULT {actions: columns, rows = slots without an error, in order; errors: [[slot, detail]]}.
     VECTOR_STEP = "vector_step"
     VECTOR_RESULT = "vector_result"
 

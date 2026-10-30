@@ -81,12 +81,8 @@ Orchestrator          SyncEpisodeRunner        Connection         Model Server
 
 ## Vectorized Benchmarks
 
-A `VectorStepBenchmark` holds `num_envs` environments in one process (GPU-parallel
-simulators such as MuJoCo Warp or ManiSkill3).  `VectorEpisodeRunner` runs up to
-`num_envs` episodes of one task at once over one connection: each step is one `VECTOR_STEP`
-round trip carrying the running slots' observations as columns (and the episodes ending and
-starting), which the server, holding one row per slot, infers as a batch; then `step()` runs
-once.  Sync mode only.
+A `VectorStepBenchmark` steps `num_envs` environments together; each step is one `VECTOR_STEP` round trip whose
+observation columns the server infers as one batch, a row per slot. Sync mode only.
 See [RFC-0009](rfcs/0009-vector-benchmarks.md).
 
 ```
@@ -139,18 +135,8 @@ ModelServer (ABC)            ← contract driven by serve.py: start_episodes / a
 └── PredictModelServer       ← subclass this: predict(obs, row) or predict_batch(obs, rows)
 ```
 
-Every running episode is a **row** of the model server: a connection's `EPISODE_START`..`EPISODE_END`, or a vector
-benchmark's slot. `row.id` is stable while the episode runs and reused after it ends; per-episode state is keyed
-by it. Inference and the episode hooks are batched over rows:
-
-- `predict(obs, row)`: one observation dict of one episode. The default `predict_batch` calls it per row.
-- `predict_batch(obs, rows)`: a column batch (`vla_eval.columns`, a row per episode) to action columns. Observations
-  of several connections (shards) and a `VECTOR_STEP`'s slots coalesce into one call, up to `max_batch_size` rows
-  (default 1: one at a time; raise it to batch) after waiting up to `max_wait_time` (default 0.01 s).
-- `on_episode_start(rows)` / `on_episode_end(rows, results)`: blocking, on the inference thread.
-- `chunk_size`: the model returns `[T, D]` per row; the server returns the first action and serves the rest from a
-  per-row buffer before inferring that row again. `None`: every observation is inferred.
-- `max_rows`: most concurrent episodes; 1 for a model whose state is global.
+Every running episode is a **row** of the model server (a connection's episode, or a vector slot); `row.id` keys
+per-episode state. Hooks and options: see [CONTRIBUTING.md](../CONTRIBUTING.md#adding-a-model-server).
 
 One call into the model runs at a time, on a worker thread.
 

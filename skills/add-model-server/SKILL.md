@@ -60,10 +60,8 @@ missing inputs unless that behavior belongs to the upstream policy.
 - Identify ownership of history, recurrent state, action queues, and ensembling.
   Preserve replanning frequency; cached chunks may bypass observations needed by
   policies that update on every executed step.
-- Keep mutable state per episode, keyed by `row.id` (reused after an episode ends):
-  reset it for the starting rows in `on_episode_start`, drop it in `on_episode_end`.
-  A policy whose state cannot be per episode sets `max_rows=1`.  A policy that must
-  see every observation leaves `chunk_size` unset and queues its own actions.
+- Keep mutable state keyed by `row.id` (ids are reused): reset it in `on_episode_start`.
+  Global state → `max_rows=1`; a policy that must see every observation leaves `chunk_size` unset.
 - Verify batching with mixed episodes, episode lengths, and resets. Compare single
   and batched behavior with controlled inputs/randomness, allowing justified
   stochastic or numerical differences rather than requiring bitwise identity.

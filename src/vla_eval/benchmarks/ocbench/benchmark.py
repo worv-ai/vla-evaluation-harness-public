@@ -1,15 +1,7 @@
-"""OCBench on MuJoCo Warp: ``num_envs`` worlds of one task stepped together on the GPU.
+"""OCBench (arXiv:2610.07056) on MuJoCo Warp: ``num_envs`` worlds of one task stepped together.
 
-OCBench (arXiv:2610.07056, ``pip install "ocbench[mjwarp]"``) has 28 manipulation tasks with
-state observations.  The protocol follows OCBench's ``evaluate_mjwarp``: an episode ends when
-its world terminates or after the task's step limit, and succeeds when ``info["success"]`` is set
-then; bowling, which never flags success, scores its return (``score``, the paper's metric, is
-the return x 100).  Episode ``i`` of a task resets with the seed ``evaluate_mjwarp`` gives its
-``i``-th world, ``make_collection_seeds(seed, 0, 10, ·)[i]`` for the seed root ``seed``, so an
-episode is the same whatever world or ``num_envs`` runs it.
-
-Observation columns: ``state`` ``float32[n, D]``, ``task_description``.  Action column:
-``actions`` ``[n, 7]``, OCBench's joint action (six arm deltas and the gripper, in [-1, 1]).
+Follows ``evaluate_mjwarp``: episode ``i`` uses world ``i``'s seed (``make_collection_seeds(seed, 0, 10, ·)[i]``),
+ends on termination or the step limit; bowling, which never flags success, scores its return x 100.
 """
 
 from __future__ import annotations
