@@ -144,9 +144,10 @@ per environment-step, is per-slot Python: a dict and an array per slot each way 
 `on_observations`, 39 ms in the benchmark's per-slot calls).  At a few hundred environments
 this is about one MuJoCo Warp physics step.
 
-`Connection.exchange` encodes a step on a worker thread: the default PNG encoding takes ~10 ms
-per 224×224 frame.  `server.image_format: raw` sends images unencoded (lossless), the choice when
-the server is on the same host or a fast network.
+`Connection.exchange` encodes a step on one worker thread, and the default PNG encoding takes
+~10 ms per 224×224 frame, so a step with many cameras is bound by it.  `server.image_format: raw`
+sends images unencoded (lossless); use it with vector benchmarks when the server is on the same
+host or a fast network.
 
 ### Composition with sharding
 
@@ -162,7 +163,8 @@ rows were measured with one connection per slot.
 |-----------|-------|-----------------:|------:|-------|
 | Synthetic (harness only) | 32 slots, 128 episodes of 200-400 steps, 10 ms step, chunk 10, server 60 ms + 1 ms/obs | 64.7 s waves, 170.8 s `partial_reset` | 56.7 s waves | with `partial_reset`, refills at arbitrary steps put the slots' chunks out of phase and split each step's inference into batches of 1-5 (below) |
 | Synthetic + images | same, three 224×224 cameras | 1183 s | 250 s (PNG), 107 s (`raw`, `max_wait_time` 0.05) | PNG encoding serialised on the event loop |
-| Shortstop (mjlab / MuJoCo Warp) | 32 worlds, 32 episodes × 430 steps, three cameras | 231 s, 72 env-steps/s, mean batch 1.2 | 100 s, 152 env-steps/s, batch 32 (`raw`) | 50 ms forward: 264 s → 122 s.  Every episode's outcome identical before and after.  The simulator is 56 s of the 100 s |
+| Shortstop (mjlab / MuJoCo Warp) | 32 worlds, 32 episodes × 430 steps, three cameras | 231 s, 72 env-steps/s, mean batch 1.2 | 100 s, 152 env-steps/s, batch 32 (`raw`) | 50 ms forward: 264 s → 122 s.  Every episode's outcome identical before and after.  The simulator is 56 s of the 100 s.  With `VECTOR_STEP` (hold server, A100): 279 s at #90's first commit, 268 s (PNG), 76 s (`raw`), every episode's outcome identical, the benchmark unchanged |
+| OCBench (MuJoCo Warp) | 500 worlds, 500 episodes × 200 steps, state, a linear policy | 32.9 ms a step in OCBench's own loop (block-single), 48.9 (chamber-hard) | 67.1, 88.5 ms with `VECTOR_STEP` | first observations bit-identical, first five steps agree; whole trajectories differ as between two runs of OCBench's loop (MuJoCo Warp is not deterministic) |
 | RoboDojo (Isaac Sim 5.1 RTX, A100) | stack_blocks, 150 steps, three 640×480 cameras | 1.03 env-steps/s with one environment | 5.6 (`num_envs` 4), 7.3 (8), 10.6 (8, `raw`) | joint states match `num_envs=1`; frames do not (below) |
 | RoboTwin 2.0 (SAPIEN 3 ray tracer) | beat_block_hammer, three 320×240 cameras, 32 spp + OIDN | 2.94 frames/s, one env | 2.9-2.96 with 2-8 envs in one process; 2.5 with 2-4 processes | no adapter: see below |
 

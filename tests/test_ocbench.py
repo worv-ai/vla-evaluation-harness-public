@@ -53,14 +53,14 @@ class FakeEnv:
 def envs(monkeypatch):
     made: list[FakeEnv] = []
     ocbench = types.ModuleType("ocbench")
-    ocbench.parse_env_spec = lambda name: (name.split("-")[0], "mjwarp", {}, 5)  # type: ignore[attr-defined]
+    setattr(ocbench, "parse_env_spec", lambda name: (name.split("-")[0], "mjwarp", {}, 5))
     mjwarp = types.ModuleType("ocbench.mjwarp")
 
     def make_env(family, kwargs, nworld):
         made.append(FakeEnv(nworld))
         return made[-1]
 
-    mjwarp.make_env = make_env  # type: ignore[attr-defined]
+    setattr(mjwarp, "make_env", make_env)
     monkeypatch.setitem(sys.modules, "ocbench", ocbench)
     monkeypatch.setitem(sys.modules, "ocbench.mjwarp", mjwarp)
     return made
@@ -72,9 +72,7 @@ def _reset(bench, slots, name, idxs):
 
 def test_episodes_reset_with_their_own_seeds_and_end_at_the_limit(envs):
     bench = OCBenchBenchmark(num_envs=3, tasks=["block-single-task1-v0"], seed=7)
-    seeds = np.float32(
-        np.random.SeedSequence([7, 10]).generate_state(5, dtype=np.uint32)
-    )  # as the fake state holds them
+    seeds = np.asarray(np.random.SeedSequence([7, 10]).generate_state(5, dtype=np.uint32), np.float32)
     obs = _reset(bench, [0, 1], "block-single-task1-v0", [0, 1])
     assert [o[0] for o in obs] == [seeds[0], seeds[1]] and envs[0].calls == [("reset", [0, 1, 2])]
     out = bench.step({0: {"actions": np.ones(7)}, 1: {"actions": np.ones(7)}})
