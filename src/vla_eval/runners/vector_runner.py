@@ -12,10 +12,9 @@ import numpy as np
 
 from vla_eval import columns, watchdog
 from vla_eval.benchmarks.base import VectorStepBenchmark
-from vla_eval.columns import Batch
+from vla_eval.types import Batch, EpisodeResult, Task
 from vla_eval.recording import EpisodeRecorder, RecordingError
 from vla_eval.runners.base import EnvStartError, EnvStepError, ModelActError, episode_start_payload, phase
-from vla_eval.types import EpisodeResult, Task
 
 logger = logging.getLogger(__name__)
 

@@ -34,7 +34,7 @@ import numpy as np
 
 from vla_eval import columns
 from vla_eval.benchmarks.robocasa365.benchmark import ACTION_COMPONENTS, STATE_KEYS, VIDEO_KEYS
-from vla_eval.columns import Batch
+from vla_eval.types import Batch, Observation
 from vla_eval.model_servers.base import Rows
 from vla_eval.model_servers.predict import PredictModelServer
 from vla_eval.specs import (
@@ -48,7 +48,6 @@ from vla_eval.specs import (
     ROTATION_AA,
     DimSpec,
 )
-from vla_eval.types import Observation
 
 logger = logging.getLogger(__name__)
 

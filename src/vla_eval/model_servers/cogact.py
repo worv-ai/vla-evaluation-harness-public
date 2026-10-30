@@ -30,8 +30,7 @@ import numpy as np
 
 from vla_eval.specs import IMAGE_RGB, LANGUAGE, RAW, DimSpec
 from vla_eval import columns
-from vla_eval.columns import Batch
-from vla_eval.types import Action, Observation
+from vla_eval.types import Action, Batch, Observation
 
 from vla_eval.model_servers.base import Row, Rows
 from vla_eval.model_servers.predict import PredictModelServer

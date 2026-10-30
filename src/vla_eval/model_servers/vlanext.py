@@ -50,7 +50,7 @@ from vla_eval.specs import (
     STATE_EEF_POS_AA_GRIP,
     DimSpec,
 )
-from vla_eval.types import Action, Observation
+from vla_eval.types import Action, EpisodeResult, Observation
 
 logger = logging.getLogger(__name__)
 
@@ -153,7 +153,7 @@ class VLANeXtModelServer(PredictModelServer):
             self._state_histories[rid] = []
             self._action_queues[rid] = deque()
 
-    def on_episode_end(self, rows: Rows, results: list[dict[str, Any]]) -> None:
+    def on_episode_end(self, rows: Rows, results: list[EpisodeResult]) -> None:
         for rid in rows.ids.tolist():
             self._state_histories.pop(rid, None)
             self._action_queues.pop(rid, None)

@@ -4,14 +4,15 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 import numpy as np
+import numpy.typing as npt
 
-from vla_eval.columns import Batch
 from vla_eval.specs import DimSpec
+from vla_eval.types import Batch, EpisodeResult
 
 if TYPE_CHECKING:
     from anyio.abc import TaskGroup
@@ -41,21 +42,26 @@ class Rows:
     """The rows of one call.  ``ids``: stable while an episode runs, reused after, below the peak episode
     count, so per-episode state fits in arrays indexed by them.  ``step``: the episode's prior observations."""
 
-    def __init__(self, ids: np.ndarray, step: np.ndarray, table: Sequence[Episode | None]) -> None:
+    def __init__(
+        self, ids: npt.NDArray[np.int64], step: npt.NDArray[np.int64], table: Sequence[Episode | None]
+    ) -> None:
         self.ids = ids
         self.step = step
         self._table = table
 
     @property
-    def is_first(self) -> np.ndarray:
+    def is_first(self) -> npt.NDArray[np.bool_]:
         return self.step == 0
 
     @property
     def episodes(self) -> list[Episode]:
-        return [self._table[i] for i in self.ids.tolist()]  # type: ignore[misc]
+        return [self[i].episode for i in range(len(self))]
 
     def __len__(self) -> int:
         return len(self.ids)
+
+    def __iter__(self) -> Iterator[Row]:
+        return (self[i] for i in range(len(self)))
 
     def __getitem__(self, i: int) -> Row:
         rid = int(self.ids[i])
@@ -77,7 +83,7 @@ class ModelServer(ABC):
         Return ``{position: exception}`` for starts that failed, or raise to fail them all."""
         return None
 
-    def on_episode_end(self, rows: Rows, results: list[dict[str, Any]]) -> None:
+    def on_episode_end(self, rows: Rows, results: list[EpisodeResult]) -> None:
         """Episodes in ``rows`` ended (``results[i]`` from the harness, ``{}`` when it went away).  Blocking."""
 
     @abstractmethod
@@ -85,7 +91,7 @@ class ModelServer(ABC):
         """Start an episode per ``(EPISODE_START payload, default session id)``; its row id or why it failed."""
 
     @abstractmethod
-    async def end_episodes(self, ids: Sequence[int], results: list[dict[str, Any]]) -> None:
+    async def end_episodes(self, ids: Sequence[int], results: list[EpisodeResult]) -> None:
         """End these rows' episodes and free the rows."""
 
     @abstractmethod

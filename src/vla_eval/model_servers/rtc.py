@@ -56,7 +56,7 @@ from pathlib import Path
 from typing import Any
 
 from vla_eval.specs import LANGUAGE, RAW, DimSpec
-from vla_eval.types import Action, Observation
+from vla_eval.types import Action, EpisodeResult, Observation
 
 # Workaround: nvidia-cuda-nvcc-cu12 exposes __file__=None (namespace package),
 # which crashes jax 0.4.35's CUDA path detection.  Patch before any jax import.
@@ -349,7 +349,7 @@ class RTCModelServer(PredictModelServer):
 
         return {"actions": actions}
 
-    def on_episode_end(self, rows: Rows, results: list[dict[str, Any]]) -> None:
+    def on_episode_end(self, rows: Rows, results: list[EpisodeResult]) -> None:
         """Clear observation history buffer, RNG state and policy on episode end."""
         for rid in rows.ids.tolist():
             self._obs_buffer.pop(rid, None)

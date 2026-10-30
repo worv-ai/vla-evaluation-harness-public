@@ -4,11 +4,11 @@ row; row ``i`` of every column belongs to one episode."""
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Any, Dict
+from typing import Any
 
 import numpy as np
 
-Batch = Dict[str, Any]
+from vla_eval.types import Batch
 
 
 def num_rows(batch: Batch) -> int | None:

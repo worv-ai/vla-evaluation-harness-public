@@ -61,7 +61,7 @@ class Behavior1KBaselineModelServer(PredictModelServer):
 
     # -- inference --------------------------------------------------------
 
-    def predict(self, obs: Observation, row: Row | None = None) -> Action:
+    def predict(self, obs: Observation, row: Row) -> Action:
         return {"actions": np.zeros(self.action_dim, dtype=np.float32)}
 
 

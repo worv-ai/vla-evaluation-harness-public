@@ -42,11 +42,10 @@ import yaml
 from tqdm import tqdm
 
 from vla_eval.docker_resources import _detect_runtime
-from vla_eval.columns import Batch
+from vla_eval.types import Action, Batch, EpisodeResult, Observation
 from vla_eval.model_servers.base import Row
 from vla_eval.model_servers.predict import PredictModelServer
 from vla_eval.model_servers.serve import serve_async
-from vla_eval.types import Action, Observation
 
 
 # ---------------------------------------------------------------------------
@@ -532,7 +531,7 @@ def sweep_demand(
     return results
 
 
-def print_demand_table(results: list[dict[str, Any]]) -> None:
+def print_demand_table(results: list[EpisodeResult]) -> None:
     """Print formatted demand curve table with resource utilization."""
     has_resources = any("median_cpu_pct" in r for r in results)
     if has_resources:

@@ -72,7 +72,7 @@ from vla_eval.specs import (
     STATE_EE_POSE_DUAL_WXYZ,
     DimSpec,
 )
-from vla_eval.types import Action, Observation
+from vla_eval.types import Action, EpisodeResult, Observation
 
 from vla_eval.model_servers.base import Row, Rows
 from vla_eval.model_servers.predict import PredictModelServer
@@ -450,7 +450,7 @@ class XVLAModelServer(PredictModelServer):
                     failed[i] = exc
         return failed
 
-    def on_episode_end(self, rows: Rows, results: list[dict[str, Any]]) -> None:
+    def on_episode_end(self, rows: Rows, results: list[EpisodeResult]) -> None:
         for rid in rows.ids.tolist():
             self._last_raw_actions.pop(rid, None)
             self._current_xyz.pop(rid, None)

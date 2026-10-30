@@ -30,8 +30,7 @@ from typing import Any
 
 from vla_eval.specs import IMAGE_RGB, LANGUAGE, RAW, DimSpec
 from vla_eval import columns
-from vla_eval.columns import Batch
-from vla_eval.types import Action, Observation
+from vla_eval.types import Action, Batch, Observation
 
 import numpy as np
 

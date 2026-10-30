@@ -52,7 +52,7 @@ from PIL import Image as PILImage
 from transforms3d.euler import euler2axangle
 
 from vla_eval import columns
-from vla_eval.columns import Batch
+from vla_eval.types import Batch, EpisodeResult
 from vla_eval.model_servers.base import Rows
 from vla_eval.model_servers.predict import PredictModelServer
 from vla_eval.specs import GRIPPER_CLOSE_POS, IMAGE_RGB, LANGUAGE, RAW, DimSpec
@@ -493,7 +493,7 @@ class StarVLAModelServer(PredictModelServer):
                 self._ensemblers[rid] = _AdaptiveEnsembler(self._ensemble_horizon, self._ensemble_alpha)
         return None
 
-    def on_episode_end(self, rows: Rows, results: list[dict[str, Any]]) -> None:
+    def on_episode_end(self, rows: Rows, results: list[EpisodeResult]) -> None:
         for rid in rows.ids.tolist():
             self._ensemblers.pop(rid, None)
 

@@ -22,7 +22,7 @@ import numpy as np
 import websockets
 
 from vla_eval.connection import Connection
-from vla_eval.columns import Batch
+from vla_eval.types import Batch
 from vla_eval.model_servers.base import Rows
 from vla_eval.model_servers.predict import PredictModelServer
 from vla_eval.model_servers.serve import serve_async

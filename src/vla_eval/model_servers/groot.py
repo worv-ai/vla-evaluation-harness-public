@@ -42,7 +42,7 @@ from vla_eval.specs import (
     DimSpec,
 )
 from vla_eval import columns
-from vla_eval.columns import Batch
+from vla_eval.types import Batch
 
 from vla_eval.model_servers.base import Rows
 from vla_eval.model_servers.predict import PredictModelServer

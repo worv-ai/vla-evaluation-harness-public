@@ -17,9 +17,8 @@ from anyio.abc import TaskGroup
 from anyio.to_thread import run_sync as _run_in_thread
 
 from vla_eval import columns
-from vla_eval.columns import Batch
+from vla_eval.types import Action, Batch, EpisodeResult, Observation
 from vla_eval.model_servers.base import Episode, ModelServer, Row, Rows
-from vla_eval.types import Action, Observation
 
 logger = logging.getLogger(__name__)
 
@@ -122,7 +121,7 @@ class PredictModelServer(ModelServer):
             self._release(rid)
         return [bad.get(x, x) if isinstance(x, int) else x for x in out]
 
-    async def end_episodes(self, ids: Sequence[int], results: list[dict[str, Any]]) -> None:
+    async def end_episodes(self, ids: Sequence[int], results: list[EpisodeResult]) -> None:
         live = [(i, r) for i, r in zip(ids, results) if 0 <= i < len(self._episodes) and self._episodes[i] is not None]
         if not live:
             return

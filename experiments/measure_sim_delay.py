@@ -17,17 +17,15 @@ from __future__ import annotations
 
 import time
 from collections.abc import Sequence
-from typing import Any
 
 import anyio
 
 import numpy as np
 
-from vla_eval.columns import Batch
+from vla_eval.types import Action, Batch, EpisodeResult, Observation
 from vla_eval.model_servers.base import Row, Rows
 from vla_eval.model_servers.predict import PredictModelServer
 from vla_eval.model_servers.serve import serve_async
-from vla_eval.types import Action, Observation
 
 
 class InstantServer(PredictModelServer):
@@ -60,7 +58,7 @@ class InstantServer(PredictModelServer):
         self.step_timestamps.append(time.monotonic())
         return await super().act(obs, ids)
 
-    def on_episode_end(self, rows: Rows, results: list[dict[str, Any]]) -> None:
+    def on_episode_end(self, rows: Rows, results: list[EpisodeResult]) -> None:
         if not self.step_timestamps:
             return
         total_steps = len(self.step_timestamps)

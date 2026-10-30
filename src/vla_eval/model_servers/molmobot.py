@@ -41,7 +41,7 @@ import numpy as np
 from vla_eval.model_servers.base import Row, Rows
 from vla_eval.model_servers.predict import PredictModelServer
 from vla_eval.specs import IMAGE_RGB, LANGUAGE, RAW, STATE_JOINT, DimSpec
-from vla_eval.types import Action, Observation
+from vla_eval.types import Action, EpisodeResult, Observation
 
 logger = logging.getLogger(__name__)
 
@@ -113,7 +113,7 @@ class MolmoBotModelServer(PredictModelServer):
                 "step_count": 0,
             }
 
-    def on_episode_end(self, rows: Rows, results: list[dict[str, Any]]) -> None:
+    def on_episode_end(self, rows: Rows, results: list[EpisodeResult]) -> None:
         for rid in rows.ids.tolist():
             self._sessions.pop(rid, None)
 

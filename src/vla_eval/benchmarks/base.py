@@ -20,9 +20,8 @@ from vla_eval.specs import DimSpec
 
 import numpy as np
 
-from vla_eval.columns import Batch
+from vla_eval.types import Action, Batch, EpisodeResult, Observation, Task
 from vla_eval.recording import EpisodeRecorder, NullEpisodeRecorder
-from vla_eval.types import Action, EpisodeResult, Observation, Task
 
 
 def repeat_last_hold(last_action: Action | None, action_dim: int) -> Action:
