@@ -526,3 +526,49 @@ async def test_ci_failure_errors_one_observation(free_port):
             await conn.end_episode({})
     finally:
         await stop_server(task)
+
+
+class ThreadLogServer(PredictModelServer):
+    def __init__(self):
+        super().__init__(chunk_size=2)
+        self.threads: set[int] = set()
+        self.calls = 0
+
+    def predict(self, obs: dict[str, Any], row: Row) -> dict[str, Any]:
+        self.threads.add(threading.get_ident())
+        self.calls += 1
+        if self.calls == 1:
+            time.sleep(1.5)  # past the first client's timeout
+        return {"actions": np.ones((2, 7), np.float32)}
+
+    def on_episode_start(self, rows):
+        self.threads.add(threading.get_ident())
+
+    def on_episode_end(self, rows, results):
+        self.threads.add(threading.get_ident())
+
+
+@pytest.mark.anyio
+async def test_model_calls_stay_on_one_thread(free_port):
+    """A timed-out first call, reconnects and concurrent clients never move the model to another thread."""
+    server = ThreadLogServer()
+    task = await _serve(server, free_port)
+    try:
+        url = f"ws://127.0.0.1:{free_port}"
+        async with Connection(url, timeout=0.5) as conn:
+            await conn.start_episode({"task": {"name": "t"}})
+            with pytest.raises(TimeoutError):
+                await conn.act({"value": 1.0})
+
+        async def client():
+            async with Connection(url) as c:
+                for _ in range(2):
+                    await c.start_episode({"task": {"name": "t"}})
+                    for _ in range(3):
+                        await c.act({"value": 1.0})
+                    await c.end_episode({})
+
+        await asyncio.gather(client(), client())
+        assert len(server.threads) == 1
+    finally:
+        await stop_server(task)

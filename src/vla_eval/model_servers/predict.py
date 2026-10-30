@@ -9,6 +9,7 @@ import time
 import uuid
 from collections import deque
 from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -69,7 +70,8 @@ class PredictModelServer(ModelServer):
         self._buffers: dict[int, deque[Any]] = {}  # chunked rows' remaining actions
         self._queue: list[_Request] = []
         self._wake = anyio.Event()
-        self._thread_limiter = anyio.CapacityLimiter(1)  # one call into the model at a time
+        # Every model call on one thread, one at a time: CUDA graphs (torch.compile) and JAX are thread-bound.
+        self._model_thread = ThreadPoolExecutor(1, thread_name_prefix="model")
 
     # ------------------------------------------------------------------
     # Override these
@@ -100,7 +102,6 @@ class PredictModelServer(ModelServer):
 
     async def on_serve_start(self, tg: TaskGroup) -> None:
         self._queue, self._wake = [], anyio.Event()
-        self._thread_limiter = anyio.CapacityLimiter(1)
         tg.start_soon(self._dispatch)
 
     async def start_episodes(self, starts: list[tuple[dict[str, Any], str]]) -> list[int | Exception]:
@@ -185,7 +186,7 @@ class PredictModelServer(ModelServer):
         return Rows(idx, self._steps[idx], self._episodes)
 
     async def _call(self, fn: Any, *args: Any) -> Any:
-        return await _run_in_thread(fn, *args, limiter=self._thread_limiter)
+        return await _run_in_thread(self._model_thread.submit(fn, *args).result)
 
     # ------------------------------------------------------------------
     # Dispatch: coalesce requests, serve chunk buffers, infer
