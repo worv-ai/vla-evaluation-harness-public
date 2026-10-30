@@ -2,7 +2,7 @@ ARG BASE_IMAGE=ghcr.io/allenai/vla-evaluation-harness/base:latest
 FROM ${BASE_IMAGE}
 
 # ── Conda environment ──────────────────────────────────────────────
-RUN conda create -n libero python=3.8 pip -y && conda clean -afy
+RUN conda create -n libero python=3.11 pip -y && conda clean -afy
 SHELL ["conda", "run", "-n", "libero", "/bin/bash", "-c"]
 
 # ── CPU-only PyTorch ───────────────────────────────────────────────
@@ -10,8 +10,9 @@ RUN uv pip install --no-cache-dir "torch==2.1.0" \
         --torch-backend cpu
 
 # ── Python dependencies ───────────────────────────────────────────
+# numpy 1.24.4: LIBERO pins 1.22.4 (no cp311 wheel); the harness already upgraded it to 1.24.4 on 3.8.
 RUN uv pip install --no-cache-dir \
-        numpy==1.22.4 mujoco==3.2.3 robosuite==1.4.0 bddl==1.0.1 \
+        numpy==1.24.4 mujoco==3.2.3 robosuite==1.4.0 bddl==1.0.1 \
         Pillow scipy h5py pyyaml termcolor future easydict hydra-core \
         "gym>=0.21,<0.27" matplotlib \
     && rm -rf ~/.cache/pip ~/.cache/uv

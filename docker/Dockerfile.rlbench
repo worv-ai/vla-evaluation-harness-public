@@ -47,8 +47,8 @@ RUN wget -qO /tmp/coppeliasim.tar.xz \
 # The OpenGL3 renderer plugin (once disabled here for segfaulting headless)
 # works with the GLX integration above; cameras keep RLBench's default mode.
 
-# ── Conda environment (Python 3.8 required by PyRep/RLBench) ──────
-RUN conda create -y -n rlbench python=3.8 pip && conda clean -afy
+# ── Conda environment ──────────────────────────────────────────────
+RUN conda create -y -n rlbench python=3.11 pip && conda clean -afy
 SHELL ["conda", "run", "-n", "rlbench", "/bin/bash", "-c"]
 
 # ── PyRep (from source) ───────────────────────────────────────────
@@ -70,8 +70,9 @@ RUN uv pip install --no-cache-dir cffi \
 # editable_mode=compat sidesteps uv's PEP 660 empty-finder trap (issue #92).
 # --no-deps: RLBench declares an unpinned `pyrep @ git+...` that would replace
 # the pinned PyRep above; its other requirements are installed explicitly.
+# numpy 1.24.4 is what the former Python 3.8 env resolved to; keeps the stack on numpy 1.x.
 ARG RLBENCH_REF=02720bba4c73fe02eb75df946b8791b806028a9d
-RUN uv pip install --no-cache-dir natsort numpy Pillow pyquaternion scipy \
+RUN uv pip install --no-cache-dir natsort "numpy==1.24.4" Pillow pyquaternion scipy \
     && mkdir -p /tmp/RLBench \
     && cd /tmp/RLBench \
     && git init -q \
