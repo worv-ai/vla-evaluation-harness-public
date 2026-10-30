@@ -49,7 +49,13 @@ class _Pending:
     """The replies one ``OBSERVATION`` / ``VECTOR_STEP`` waits for (framework-private).  ``forward``: a live
     episode's sink, each reply sent on at once as ``(action, None)`` or ``(None, error)``."""
 
-    def __init__(self, n: int, *, vector: bool = False, forward: Forward | None = None) -> None:
+    def __init__(
+        self,
+        n: int,
+        *,
+        vector: bool = False,
+        forward: Callable[[Any, Exception | None], Awaitable[None]] | None = None,
+    ) -> None:
         self.answered = np.zeros(n, bool)
         self.left = n
         self.parts: list[tuple[np.ndarray, Batch]] = []  # (positions, their actions)
@@ -65,9 +71,6 @@ class _Pending:
         pos = np.concatenate([p for p, _ in self.parts])
         actions = self.parts[0][1] if len(self.parts) == 1 else columns.concat([a for _, a in self.parts])
         return actions if (np.diff(pos) > 0).all() else columns.take(actions, np.argsort(pos))
-
-
-Forward = Callable[[Any, "Exception | None"], Awaitable[None]]
 
 
 class Rows:
@@ -234,7 +237,10 @@ class ModelServer(ABC):
                 return None
         keep = np.flatnonzero(ok)
         p.answered[pos[keep]] = True
-        p.left -= len(keep)
+        left = len(p.answered) - int(np.count_nonzero(p.answered))
+        if p.left - left < len(keep):  # a position listed twice: its first listing answers it
+            keep = keep[np.sort(np.unique(pos[keep], return_index=True)[1])]
+        p.left = left
         return keep
 
     def _current(self, rows: Rows) -> npt.NDArray[np.bool_]:

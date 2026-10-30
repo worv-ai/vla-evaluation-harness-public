@@ -48,6 +48,11 @@ class ReplayServer(ModelServer):
             old_values, old_rows = self.seen[-1]
             await self.send_action(old_rows, _act(old_rows, old_values + 100))
         self.seen.append((values, rows))
+        if self.mode == "repeat":  # row 0 listed twice in one reply: it answers row 0 once, never row 1
+            await self.send_action(rows.take([0, 0]), _act(rows.take([0, 0]), [values[0], -1.0]))
+            assert rows._pending is not None and not rows._pending.done.is_set()
+            await self.send_action(rows.take([1]), _act(rows.take([1]), values[1:]))
+            return
         if self.mode == "partial":
             await self.send_action(rows.take([0]), _act(rows.take([0]), values[:1]))
             raise ValueError("the rest failed")
@@ -116,6 +121,19 @@ async def test_rows_answered_before_an_exception_keep_their_actions(free_port):
 
 
 @pytest.mark.anyio
+async def test_a_row_listed_twice_in_a_reply_is_answered_once(free_port):
+    server = ReplayServer()
+    server.mode = "repeat"
+    task = await start_server(server, free_port)
+    try:
+        async with Connection(f"ws://127.0.0.1:{free_port}") as conn:
+            reply = await conn.exchange(_vstep([0, 1], [[0, {}], [1, {}]], [1.0, 2.0]))
+        assert [_value({"actions": a}) for a in reply["actions"]["actions"]] == [1.0, 2.0] and reply["errors"] == []
+    finally:
+        await stop_server(task)
+
+
+@pytest.mark.anyio
 async def test_a_disconnect_ends_an_episode_waiting_for_a_reply(free_port):
     server = ReplayServer()
     server.mode = "silent"
@@ -153,6 +171,7 @@ class HistoryServer(PredictModelServer):
         self.delay = delay
         self.history: dict[int, list[float]] = {}
         self.predicted: list[tuple[float, list[float], int]] = []
+        self.finished: list[list[float]] = []
 
     def reset_episodes(self, rows: Rows) -> None:
         for rid in rows.ids.tolist():
@@ -161,6 +180,9 @@ class HistoryServer(PredictModelServer):
     def observe(self, obs, rows: Rows) -> None:
         for rid, v in zip(rows.ids.tolist(), np.asarray(obs["value"]).tolist()):
             self.history[rid].append(v)
+
+    def finish_episodes(self, rows: Rows, results) -> None:
+        self.finished += [list(self.history[rid]) for rid in rows.ids.tolist()]
 
     def predict(self, obs: dict[str, Any], row: Row) -> dict[str, Any]:
         self.predicted.append((float(obs["value"]), list(self.history[row.id]), row.step))
@@ -201,6 +223,24 @@ async def test_ci_observes_coalesced_observations_and_infers_aligned_history(fre
         assert got == [1.0, 3.0]
         # step counts every received observation, the coalesced one included
         assert server.predicted == [(1.0, [1.0], 0), (3.0, [1.0, 2.0, 3.0], 2)]
+    finally:
+        await stop_server(task)
+
+
+@pytest.mark.anyio
+async def test_ci_observes_every_observation_before_the_episode_ends(free_port):
+    server = HistoryServer(delay=0.3, continuous_inference=True)
+    task = await start_server(server, free_port)
+    try:
+        async with Connection(f"ws://127.0.0.1:{free_port}") as conn:
+            await conn.start_episode(LIVE)
+            await conn.send_observation({"value": 1.0})
+            await anyio.sleep(0.1)
+            await conn.send_observation({"value": 2.0})  # arrives during the inference of 1.0
+            await conn.end_episode({})
+            await conn.start_episode(LIVE)  # waits for the end: an inference was in flight
+            assert _value(await conn.act({"value": 3.0})) == 3.0
+        assert server.finished[0] == [1.0, 2.0]
     finally:
         await stop_server(task)
 

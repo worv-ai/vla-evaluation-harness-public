@@ -193,7 +193,7 @@ class PredictModelServer(ModelServer):
         for s in streams:  # an inference in flight finishes; its action is dropped
             await s.exited.wait()
         try:
-            await self._call(self.finish_episodes, rows, results)
+            await self._call(self._finish, [x for s in streams for x in s.unobserved], rows, results)
         finally:
             for rid in rows.ids.tolist():
                 self._buffers.pop(rid, None)
@@ -201,6 +201,15 @@ class PredictModelServer(ModelServer):
     # ------------------------------------------------------------------
     # Requests
     # ------------------------------------------------------------------
+
+    def _finish(self, unobserved: list[tuple[Batch, Rows]], rows: Rows, results: list[EpisodeResult]) -> None:
+        """On the model thread: observe what continuous inference left unobserved, then ``finish_episodes``."""
+        for o, r in unobserved:
+            try:
+                self.observe(o, r)
+            except Exception:
+                logger.exception("observe failed")
+        self.finish_episodes(rows, results)
 
     async def _call(self, fn: Any, *args: Any) -> Any:
         return await _run_in_thread(self._model_thread.submit(fn, *args).result)
@@ -332,9 +341,9 @@ class PredictModelServer(ModelServer):
         ids = rows.ids
         current = self._current(rows)
         errors: dict[int, Exception] = {}
-        if not current.all():  # ended while queued: neither observed nor inferred
+        if not current.all():  # ended while queued: not inferred; observed unless its row runs another episode
             errors = dict.fromkeys(np.flatnonzero(~current).tolist(), _ENDED)
-            pre = _without(pre, errors)
+            pre = _without(pre, {i for i in errors if self._table[ids[i]] is not rows._episodes[i]})
         chunked = np.flatnonzero(self._chunked[ids] & current).tolist()
         served: dict[int, Any] = {}
         for i in chunked:
@@ -432,7 +441,7 @@ def _merge(parts: list[Rows]) -> Rows:
     )
 
 
-def _without(pre: list[tuple[Batch, Rows, np.ndarray]], skip: dict[int, Any]) -> list[tuple[Batch, Rows, np.ndarray]]:
+def _without(pre: list[tuple[Batch, Rows, np.ndarray]], skip: set[int]) -> list[tuple[Batch, Rows, np.ndarray]]:
     """``pre`` without the rows at positions in ``skip``."""
     out = []
     for o, r, where in pre:
