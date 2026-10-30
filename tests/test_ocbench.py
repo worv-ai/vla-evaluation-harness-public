@@ -93,4 +93,4 @@ def test_a_new_task_builds_its_env(envs):
     _reset(bench, [0], "bowling-task1-v0", [0])
     assert len(envs) == 2 and envs[1].calls == [("reset", [0, 1])]
     out = bench.step({0: {"actions": np.zeros(7)}})
-    assert "score" in bench.get_step_result(0, out[0])
+    assert "score" in bench.get_step_result(0, out[0]) and "score" in bench.get_metric_keys()

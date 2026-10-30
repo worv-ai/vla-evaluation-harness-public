@@ -93,6 +93,8 @@ class OCBenchBenchmark(VectorStepBenchmark):
         done = np.asarray(terminated, bool) | (self._steps >= self._limit)
         success = np.asarray(info["success"], bool)
         failure = np.asarray(info.get("failure", np.zeros(self.num_envs, bool)), bool)
+        for s in slots:
+            self._recorders[int(s)].record_step(reward=float(reward[s]), done=bool(done[s]), success=bool(success[s]))
         return {
             int(s): StepResult(
                 obs=self._obs[s],
@@ -114,7 +116,7 @@ class OCBenchBenchmark(VectorStepBenchmark):
         return out
 
     def get_metric_keys(self) -> dict[str, str]:
-        return {"success": "mean", "failure": "mean", "return": "mean"}
+        return {"success": "mean", "failure": "mean", "return": "mean", "score": "mean"}
 
     def get_metadata(self) -> dict[str, Any]:
         return {"max_steps": None}  # each task's own limit (1250-5000), applied in step()
