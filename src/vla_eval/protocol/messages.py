@@ -19,6 +19,11 @@ class MessageType(str, enum.Enum):
     EPISODE_START = "episode_start"
     EPISODE_END = "episode_end"
     ERROR = "error"
+    # A vector benchmark's step, one round trip; each slot (environment) is a session.  VECTOR_STEP:
+    # {"ends": [[slot, result]], "starts": [[slot, episode_start]], "observations": [[slot, obs]]}, handled
+    # in that order; VECTOR_RESULT: {"actions": [[slot, action]], "errors": [[slot, detail]]}.
+    VECTOR_STEP = "vector_step"
+    VECTOR_RESULT = "vector_result"
 
 
 PROTOCOL_VERSION = 1

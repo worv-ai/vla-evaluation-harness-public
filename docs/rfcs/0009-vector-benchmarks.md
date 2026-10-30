@@ -11,9 +11,9 @@
 
 Add `VectorStepBenchmark`, a sync benchmark contract over `num_envs` environments that one
 process steps together, and `VectorEpisodeRunner`, which runs up to `num_envs` episodes at
-once on it.  Each running episode keeps its own model-server session, so model servers,
-the protocol and recording need no change, and a batching model server (RFC-0007) infers
-the concurrent observations in one batch.
+once on it over one connection, one `VECTOR_STEP` round trip per step.  Each running episode
+is its own server session, so model servers need no change, and a batching model server
+(RFC-0007) infers a step's observations in one batch.
 
 ## Motivation
 
@@ -64,11 +64,12 @@ the items in waves of up to `num_envs`.
 
 ### Runner
 
-`VectorEpisodeRunner` holds one `Connection` per slot.  Each step it sends every running
-slot's observation concurrently (one anyio task per slot), steps the environments with the
-returned actions, and ends the episodes that are done or reached `max_steps`.  The step
-count, `max_steps` and `elapsed_sec` (wall time from the episode's reset) are per episode,
-as in `SyncEpisodeRunner`.
+`VectorEpisodeRunner` holds one `Connection`.  Each step is one round trip
+(`Connection.exchange`): the episodes that ended since the last one, the ones just started and
+one observation per running slot go out in one `VECTOR_STEP`, and the reply carries each slot's
+action or error.  Then it steps the environments and ends the episodes that are done or reached
+`max_steps`.  The step count, `max_steps` and `elapsed_sec` (wall time from the episode's reset)
+are per episode, as in `SyncEpisodeRunner`.
 
 The runner's calls into the benchmark (`reset`, `step`, `make_obs`, `get_step_result`,
 `check_done`, `cleanup`) run on one dedicated thread: Isaac Sim's Kit loop, GL/Vulkan contexts
@@ -76,24 +77,34 @@ and CUDA state are bound to the thread that created them, and the event loop sta
 slots' connections.  The constructor, `get_tasks` and `get_metadata` still run on
 the orchestrator's thread, so an adapter builds its simulator lazily in the first `reset`.
 
-With `partial_reset`, `refill_every: N` (eval config) starts new episodes only on environment
-steps that are a multiple of N.  A chunking server answers most steps from its buffer and
-infers when a session's chunk runs out; refills at arbitrary steps put the slots' chunk
-boundaries out of phase, and the server then infers a few slots on almost every step instead
-of all of them every N steps.  Set N to the chunk length.
+### Protocol and server
 
-One session per running episode keeps every per-session mechanism as it is: chunk buffers
-and `ctx.is_first` in `PredictModelServer`, model-side history keyed by `ctx.session_id`,
-and the `EPISODE_START`/`EPISODE_END` lifecycle.  `PredictModelServer` with
-`max_batch_size >= num_envs` infers one step of all slots as one batch.
+```
+VECTOR_STEP   {"ends": [[slot, result]], "starts": [[slot, episode_start]], "observations": [[slot, obs]]}
+VECTOR_RESULT {"actions": [[slot, action]], "errors": [[slot, detail]]}
+```
+
+The server handles a step in that order: it ends the slots' sessions, starts new ones (a failed
+`on_episode_start` is that slot's error), then hands the observations to
+`ModelServer.on_observations(items)`.  Each slot is its own `SessionContext`, whose
+`session_id` is the episode's `recording.sid` (else `<connection>:<slot>`), so chunk buffers,
+`ctx.is_first`, model-side history keyed by `ctx.session_id` and the episode lifecycle work as
+for one connection per episode.  `on_observations` defaults to `on_observation` per item;
+`PredictModelServer` serves buffered chunk actions and infers the rest with `predict_batch` in
+groups of `max_batch_size` (a subclass that overrides `on_observation`, e.g. to keep a dense
+history, keeps the per-item path).  HELLO advertises `capabilities.vector_step`
+(continuous-inference servers do not, as their actions come later than the observation), and
+the orchestrator refuses a server without it.  Messages other than `VECTOR_STEP` keep the
+connection's own session, so the sync and live runners are unchanged.
 
 ### Orchestrator
 
 The orchestrator selects the vector path when the benchmark is a `VectorStepBenchmark`
-(sync mode only; live mode raises before any episode).  It opens `num_envs` connections
-and gives slot `i` its own recording `sid` (slot 0 keeps the shard's), because the server
-replaces its session id with `recording.sid` from `EPISODE_START`; a shared sid would merge
-the slots' sessions.  Work items, the shared work queue, recorders, results, progress and
+(sync mode only; live mode raises before any episode).  It runs the entry on the shard's one
+connection and gives each episode its own recording `sid`, the id of its server session, so
+sessions never merge and a reconnect never reuses one.  The running episodes share one task: a
+free slot takes an item of that task, and an item of the next task waits until they have all
+ended, so an adapter builds one scene at a time.  Work items, the shared work queue, recorders, results, progress and
 trackers are handled per episode as in the one-at-a-time loop, and an item is finished in the queue only after its
 episode is recorded.  `RecordingStore.claim`
 takes `exclude`, the shard's items still running, so a shard holding several claims is
@@ -103,12 +114,12 @@ Failures stay with their episode:
 
 | Failure | Episodes that end | Then |
 |---------|-------------------|------|
-| `reset` raises | those it was starting (`env_start`) | next items |
+| `reset` raises | every one on the simulator: those it was starting (`env_start`) and the running ones, as the shared state is unknown | next items |
 | `reset` returns an exception for a slot | that slot's (`env_start`) | next items |
-| `make_obs` / `start_episode` raises | that slot's | next items |
+| `make_obs` raises | that slot's | next items |
 | `step` raises | every running one (`env_step`) | next items |
-| server `ERROR` reply | that slot's (`model_act`) | continue |
-| connection closed / `act` timeout | that slot's | the slot reconnects; if that fails, as below |
+| a slot's error in `VECTOR_RESULT` (`on_episode_start`, the model) | that slot's (`model_act`) | continue |
+| round trip fails (connection closed, timeout, bad reply) | every running one, after the reconnect succeeded | new sessions; if the reconnect fails, as below |
 | server unreachable, failed reconnect | every one the runner holds | partial result; their items stay for a rerun |
 
 The unhealthy-shard check (RFC-0006) counts episodes as before; with
@@ -116,17 +127,26 @@ The unhealthy-shard check (RFC-0006) counts episodes as before; with
 
 ### Transport
 
-A lockstep step sends every running slot's observation at once, so three costs that hide
-behind one environment per process show up:
+The harness's own cost per step, measured with a zero-cost environment and model (64-float
+state observations, server in its own process):
 
-- `PredictModelServer` waits up to `max_wait_time` for a full batch also when the first
-  request wakes it from idle; before, that first request went alone and the rest of the step
-  followed as a second batch.  Raise `max_wait_time` (e.g. 0.05 s) when the slots' images are
-  large enough to spread their arrival.
-- `Connection` encodes messages on worker threads: the default PNG encoding takes ~10 ms per
-  224×224 frame, which serialised on the event loop is slots × cameras per step.
-- `server.image_format: raw` sends images unencoded (lossless), the choice when the server is
-  on the same host or a fast network.
+| `num_envs` | one connection per slot (first design) | one `VECTOR_STEP` per step |
+|---:|---:|---:|
+| 1 | 2.2 ms | 1.7 ms |
+| 64 | 77 ms | 7.1 ms |
+| 512 | 533 ms | 32 ms |
+| 4500 | — | 188 ms |
+
+One connection per slot paid per message: three quarters for moving each message's encode and
+decode to a thread, the rest asyncio and websockets work per message.  What remains, ~40-60 µs
+per environment-step, is per-slot Python: a dict and an array per slot each way through msgpack,
+`make_obs`, and the server's chunk handling (at 4500: 34 ms encode, 41 ms decode, 27 ms
+`on_observations`, 39 ms in the benchmark's per-slot calls).  At a few hundred environments
+this is about one MuJoCo Warp physics step.
+
+`Connection.exchange` encodes a step on a worker thread: the default PNG encoding takes ~10 ms
+per 224×224 frame.  `server.image_format: raw` sends images unencoded (lossless), the choice when
+the server is on the same host or a fast network.
 
 ### Composition with sharding
 
@@ -135,11 +155,12 @@ Each shard process holds its own `num_envs` environments and connections, so sha
 
 ## Measured
 
-One A100 80GB (PCIe), sync mode, a hold-style model server answering at once unless noted.
+One A100 80GB (PCIe), sync mode, a hold-style model server answering at once unless noted.  These
+rows were measured with one connection per slot.
 
 | Benchmark | Setup | Before (PR head) | After | Notes |
 |-----------|-------|-----------------:|------:|-------|
-| Synthetic (harness only) | 32 slots, 128 episodes of 200-400 steps, 10 ms step, chunk 10, server 60 ms + 1 ms/obs | 64.7 s waves, 170.8 s `partial_reset` | 56.7 s waves, 55.9 s `partial_reset` + `refill_every: 10` | unaligned refills split each step's inference into batches of 1-5 |
+| Synthetic (harness only) | 32 slots, 128 episodes of 200-400 steps, 10 ms step, chunk 10, server 60 ms + 1 ms/obs | 64.7 s waves, 170.8 s `partial_reset` | 56.7 s waves | with `partial_reset`, refills at arbitrary steps put the slots' chunks out of phase and split each step's inference into batches of 1-5 (below) |
 | Synthetic + images | same, three 224×224 cameras | 1183 s | 250 s (PNG), 107 s (`raw`, `max_wait_time` 0.05) | PNG encoding serialised on the event loop |
 | Shortstop (mjlab / MuJoCo Warp) | 32 worlds, 32 episodes × 430 steps, three cameras | 231 s, 72 env-steps/s, mean batch 1.2 | 100 s, 152 env-steps/s, batch 32 (`raw`) | 50 ms forward: 264 s → 122 s.  Every episode's outcome identical before and after.  The simulator is 56 s of the 100 s |
 | RoboDojo (Isaac Sim 5.1 RTX, A100) | stack_blocks, 150 steps, three 640×480 cameras | 1.03 env-steps/s with one environment | 5.6 (`num_envs` 4), 7.3 (8), 10.6 (8, `raw`) | joint states match `num_envs=1`; frames do not (below) |
@@ -166,9 +187,12 @@ to `num_envs=1`.
 
 ## Alternatives
 
-- **One connection carrying a batch of observations.** A new protocol message with a slot
-  index would need batch-aware session state in every model server; per-slot connections
-  reuse the existing per-session code and the server's batching.
+- **One connection per slot.** Every model server works unchanged, but each step is `num_envs`
+  messages each way, and the harness cost grows ~1 ms per environment (table above).  The
+  vector step keeps model servers unchanged too: the server gives each slot its own session.
+- **One benchmark view per slot behind a barrier** (each slot driven by the single-episode
+  runner, the views joined before each batched call).  It keeps one connection per slot and
+  adds barrier, departure and timeout handling the vector runner does not need.
 - **Threads around `StepBenchmark`.** GPU-parallel simulators step all environments in one
   call; one thread per environment cannot share that call.
 
@@ -187,8 +211,12 @@ to `num_envs=1`.
 - An idle slot staying inert is the adapter's job; the harness cannot check it.  The benchmark
   learns that a slot's episode ended early (`max_steps`, a model error) only from that slot's
   absence in `actions`.
-- One-scene simulators (Isaac Lab, a ManiSkill3 reconfigure) hold one task at a time; such an
-  adapter fails the episodes of any other task, so give each task its own entry or run.
+- With `partial_reset`, a chunking server's slots fall out of phase (each refill starts a new
+  chunk), so a step infers the slots whose chunk ran out rather than all of them every chunk
+  length: the same samples in more, smaller batches.  Not measured on a real model yet.
+- Per-slot observations and actions cost ~40-60 µs per environment-step in the harness; a
+  stacked-array path (observations and actions as `[num_envs, ...]` arrays end to end) would
+  remove most of it at the price of a batch-shaped benchmark and model API.
 - `Benchmark` and `VectorStepBenchmark` are siblings, so the orchestrator keeps two loops (they
   share the per-episode bookkeeping, `Orchestrator._episode_ended`).  A `StepBenchmark` wrapped as
   a one-slot vector benchmark would leave sync evaluation one runner and one loop; live mode

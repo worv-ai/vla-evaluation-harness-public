@@ -40,6 +40,8 @@ class StubVectorBenchmark(VectorStepBenchmark):
         self.misrouted: list[tuple[int, float]] = []
         self.reset_at: list[tuple[int, list[str]]] = []  # (env steps so far, task names started)
         self.threads: set[int] = set()
+        self.slot_task: dict[int, str] = {}
+        self.step_tasks: list[set[str]] = []  # the tasks of each step's slots
         StubVectorBenchmark.last = self
 
     def get_tasks(self) -> list[dict[str, Any]]:
@@ -52,11 +54,13 @@ class StubVectorBenchmark(VectorStepBenchmark):
         for slot, task in zip(slots, tasks):
             self.t[slot], self.length[slot] = 0, task["length"] + task["episode_idx"] % (self.jitter + 1)
             self.running.add(slot)
+            self.slot_task[slot] = task["name"]
         return list(slots)
 
     def step(self, actions):
         self.threads.add(threading.get_ident())
         self.steps.append(sorted(actions))
+        self.step_tasks.append({self.slot_task[s] for s in actions})
         out = {}
         for slot, action in actions.items():
             if float(action["actions"][0]) != slot + 1:
@@ -176,9 +180,10 @@ async def test_waves_run_every_item_and_reset_only_when_idle(echo_server, tmp_pa
         "task_0": {2},
         "task_1": {3},
     }
-    assert [len(slots) for slots, _ in bench.resets] == [3, 3, 2]
+    assert [len(slots) for slots, _ in bench.resets] == [3, 1, 3, 1]  # a task's tail runs before the next task
     assert all(running == [] for _, running in bench.resets)
     assert max(len(s) for s in bench.steps) == 3 and bench.misrouted == []
+    assert all(len(tasks) == 1 for tasks in bench.step_tasks)
 
 
 @pytest.mark.anyio
@@ -190,7 +195,7 @@ async def test_partial_reset_refills_a_slot_as_soon_as_it_frees(echo_server, tmp
     bench = StubVectorBenchmark.last
     assert len(_episodes(result)) == 8 and result["mean_success"] == pytest.approx(1.0)
     assert any(running for _, running in bench.resets)  # a slot started while others ran
-    assert bench.misrouted == []
+    assert bench.misrouted == [] and all(len(tasks) == 1 for tasks in bench.step_tasks)
     assert len(bench.steps) < len(waves.steps)  # 15 env steps in waves of three, fewer when slots refill
 
 
@@ -202,8 +207,9 @@ async def test_each_running_episode_has_its_own_session(log_server, tmp_path, no
     by_session: dict[str, set[float]] = {}
     for sid, value in server.seen:
         by_session.setdefault(sid, set()).add(value)
-    assert len(by_session) == 3 and all(len(v) == 1 for v in by_session.values())
-    if not no_save:  # the recording sid is the server's session id, one per slot
+    assert all(len(v) == 1 for v in by_session.values())  # a session never sees another slot's observations
+    assert len(by_session) == (3 if no_save else 12)  # one per slot, or one per episode (its recording sid)
+    if not no_save:  # the recording sid is the server's session id
         with sqlite3.connect(tmp_path / f"recording-ev-s{no_save}.sqlite") as db:
             sids = {row[0] for row in db.execute("SELECT sid FROM episode_results")}
         assert sids == set(by_session)
@@ -237,7 +243,7 @@ async def test_a_model_error_fails_only_its_episode(log_server, tmp_path):
     result = await _run(SlotTwoModelErrorStub, _config(url, tmp_path), no_save=True)
     episodes = _episodes(result)
     failed = [ep for _, ep in episodes if ep.get("failure_reason")]
-    assert len(episodes) == 8 and len(failed) == 3  # slot 1 runs one episode per wave
+    assert len(episodes) == 8 and len(failed) == 2  # slot 1 runs one episode in each wave of three
     assert {ep["failure_reason"] for ep in failed} == {"model_act"}
     assert all(ep["metrics"]["success"] for _, ep in episodes if not ep.get("failure_reason"))
 
@@ -291,60 +297,102 @@ async def test_unhealthy_shard_requeues_failed_and_in_flight_items(echo_server, 
     assert aggregate["num_episodes_total"] == 6 and aggregate["num_errors"] == 0
 
 
+def _echo(step: dict[str, Any]) -> dict[str, Any]:
+    return {"actions": [[s, {"actions": o["value"] * np.ones(7, dtype=np.float32)}] for s, o in step["observations"]]}
+
+
+class FakeConnection:
+    """Echoes vector steps; ``fail`` maps a call number to the exception that call raises."""
+
+    fail: dict[int, BaseException] = {}
+    reconnect_error: BaseException | None = None
+
+    def __init__(self, url="", **kwargs):
+        self.server_info: dict[str, Any] = {"capabilities": {"vector_step": True}}
+        self.calls = 0
+        self.steps: list[dict[str, Any]] = []
+
+    async def connect(self, **kwargs):
+        pass
+
+    async def close(self):
+        pass
+
+    async def exchange(self, step):
+        self.calls += 1
+        self.steps.append(step)
+        if self.calls in self.fail:
+            raise self.fail[self.calls]
+        return _echo(step)
+
+    async def reconnect(self):
+        if self.reconnect_error is not None:
+            raise self.reconnect_error
+
+
 @pytest.mark.anyio
 @pytest.mark.parametrize(
-    ("act_error", "first_reason"),
+    ("step_error", "reason"),
     [(websockets.exceptions.ConnectionClosed(None, None), "connection_closed"), (TimeoutError(), "timeout")],
 )
 @pytest.mark.parametrize(
     "reconnect_error",
     [ConnectionError("unreachable after retries"), TimeoutError("HELLO"), RuntimeError("Expected HELLO reply")],
 )
-@pytest.mark.parametrize("fail_at", [1, 8])  # the first act of the run (no episode succeeded yet), of the second wave
+@pytest.mark.parametrize("fail_at", [1, 5])  # the run's first round trip, or the first of task_1's first wave
 async def test_a_failed_reconnect_ends_every_running_episode_and_returns_partial(
-    tmp_path, act_error, first_reason, reconnect_error, fail_at
+    tmp_path, step_error, reason, reconnect_error, fail_at
 ):
-    calls = 0
-
-    class FlakyConnection:
-        def __init__(self, url, **kwargs):
-            self.server_info: dict[str, Any] = {}
-
-        async def connect(self, **kwargs):
-            pass
-
-        async def close(self):
-            pass
-
-        async def start_episode(self, cfg):
-            pass
-
-        async def end_episode(self, result):
-            pass
-
-        async def act(self, obs):
-            nonlocal calls
-            calls += 1
-            if calls == fail_at:
-                raise act_error
-            return {"actions": obs["value"] * np.ones(7, dtype=np.float32)}
-
-        async def reconnect(self):
-            raise reconnect_error
-
     config = _config("ws://fake:9999", tmp_path, name="a")
-    with patch("vla_eval.orchestrator.Connection", FlakyConnection):
+    with patch("vla_eval.orchestrator.Connection", FakeConnection), patch.object(
+        FakeConnection, "fail", {fail_at: step_error}
+    ), patch.object(FakeConnection, "reconnect_error", reconnect_error):
         result = await _run(StubVectorBenchmark, config, shard_id=0, num_shards=1, eval_id="ev-a")
     episodes = _episodes(result)
     assert result["partial"] is True
-    done = 3 if fail_at == 8 else 0  # wave 1 finished before the failure, or the failure was in it
+    done = 0 if fail_at == 1 else 4  # task_0's two waves (3 + 1 episodes) finished before the failure
     store = RecordingStore(tmp_path / "recording-ev-a.sqlite")
     assert store.queue_progress("ev-a-a") == (done, 8)  # the aborted wave stays for a rerun
     store.close()
-    # the aborted wave's three episodes ended with the server: the one that failed, two unreachable
-    assert len(episodes) == done + 3
-    reasons = sorted(ep.get("failure_reason") or "" for _, ep in episodes)
-    assert reasons == sorted([""] * done + [first_reason, "server_unreachable", "server_unreachable"])
+    assert sorted(ep.get("failure_reason") or "" for _, ep in episodes) == sorted([""] * done + [reason] * 3)
+
+
+@pytest.mark.anyio
+async def test_a_reconnect_fails_the_running_episodes_and_the_run_goes_on(tmp_path):
+    closed = websockets.exceptions.ConnectionClosed(None, None)
+    with patch("vla_eval.orchestrator.Connection", FakeConnection), patch.object(FakeConnection, "fail", {2: closed}):
+        result = await _run(StubVectorBenchmark, _config("ws://fake:9999", tmp_path), no_save=True)
+    episodes = _episodes(result)
+    assert len(episodes) == 8 and "partial" not in result
+    assert sorted(ep.get("failure_reason") or "" for _, ep in episodes) == [""] * 5 + ["connection_closed"] * 3
+
+
+@pytest.mark.anyio
+async def test_a_step_carries_ends_starts_and_observations(tmp_path):
+    conns: list[FakeConnection] = []
+
+    class Recording(FakeConnection):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            conns.append(self)
+
+    with patch("vla_eval.orchestrator.Connection", Recording), patch.object(FakeConnection, "fail", {}):
+        await _run(StubVectorBenchmark, _config("ws://fake:9999", tmp_path, num_tasks=1, episodes=4), no_save=True)
+    (conn,) = conns
+    shape = [(len(s["ends"]), len(s["starts"]), len(s["observations"])) for s in conn.steps]
+    # wave of 3 for 2 steps, then the fourth episode starts as the first wave's sessions end, then a final end
+    assert shape == [(0, 3, 3), (0, 0, 3), (3, 1, 1), (0, 0, 1), (1, 0, 0)]
+
+
+@pytest.mark.anyio
+async def test_a_server_without_vector_steps_is_refused(tmp_path):
+    class Old(FakeConnection):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.server_info = {"capabilities": {}}
+
+    with patch("vla_eval.orchestrator.Connection", Old), pytest.raises(RuntimeError, match="vector steps"):
+        await _run(StubVectorBenchmark, _config("ws://fake:9999", tmp_path), no_save=True)
 
 
 class StepTimeoutOnceStub(StubVectorBenchmark):
@@ -382,16 +430,6 @@ async def test_the_runner_asks_again_for_work_after_an_episode_ends():
     from vla_eval.recording import NullEpisodeRecorder
     from vla_eval.runners.vector_runner import VectorEpisode, VectorEpisodeRunner
 
-    class Echo:
-        async def start_episode(self, cfg):
-            pass
-
-        async def end_episode(self, result):
-            pass
-
-        async def act(self, obs):
-            return {"actions": obs["value"] * np.ones(7, dtype=np.float32)}
-
     supply = [0, 1, None, 2]  # the third item appears only after the first wave
     ended = []
 
@@ -407,7 +445,7 @@ async def test_the_runner_asks_again_for_work_after_an_episode_ends():
         ended.append((episode.ref, error))
 
     bench = StubVectorBenchmark(num_envs=3)
-    await VectorEpisodeRunner().run(bench, [Echo() for _ in range(3)], next_episode, on_end, max_steps=10)
+    await VectorEpisodeRunner().run(bench, FakeConnection(), next_episode, on_end, max_steps=10)
     assert ended == [(0, None), (1, None), (2, None)] and supply == []
 
 
@@ -437,17 +475,6 @@ def test_vector_benchmarks_validate_as_benchmarks():
     assert issubclass(StubVectorBenchmark, BenchmarkCommon)
     with pytest.raises(ValueError):
         StubVectorBenchmark(num_envs=0)
-
-
-@pytest.mark.anyio
-async def test_refill_every_starts_episodes_only_on_its_steps(echo_server, tmp_path):
-    config = _config(echo_server, tmp_path, jitter=3, episodes=6)
-    config["benchmarks"][0]["refill_every"] = 4
-    result = await _run(PartialResetStub, config, no_save=True)
-    bench = StubVectorBenchmark.last
-    assert len(_episodes(result)) == 12 and result["mean_success"] == pytest.approx(1.0)
-    refills = [at for (_, running), (at, _) in zip(bench.resets, bench.reset_at) if running]
-    assert refills and all(at % 4 == 0 for at in refills)  # chunks of 4 stay in phase across slots
 
 
 @pytest.mark.anyio

@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Callable
 
 import anyio
+import anyio.to_thread
 import websockets
 from websockets.protocol import State as WebSocketState
 
@@ -161,6 +162,23 @@ class Connection:
         if response.seq != seq:
             logger.warning("Seq mismatch: sent %d, received %d. Messages may be out of order.", seq, response.seq)
         return response.payload
+
+    async def exchange(self, step: dict[str, Any]) -> dict[str, Any]:
+        """A vector benchmark's step: send ``VECTOR_STEP``, return the ``VECTOR_RESULT`` payload.
+
+        Never reconnects: the server's slot sessions die with the socket, so the runner must know."""
+        if self._ws is None:
+            raise RuntimeError("Not connected")
+        seq = self._next_seq()
+        # one encode per step, off the event loop: a step can carry hundreds of images
+        data = await anyio.to_thread.run_sync(
+            pack_message, Message(type=MessageType.VECTOR_STEP, payload=step, seq=seq)
+        )
+        await self._ws.send(data)
+        reply = await self.recv(timeout=self.timeout)
+        if reply.type != MessageType.VECTOR_RESULT or reply.seq != seq:
+            raise RuntimeError(f"Expected VECTOR_RESULT for seq {seq}, got {reply.type.value} seq {reply.seq}")
+        return reply.payload
 
     async def send_observation(self, obs: Observation) -> None:
         """Send observation without waiting (live mode)."""

@@ -516,16 +516,18 @@ class Orchestrator:
         return self._finalize_benchmark(e.collector, e.cfg, e.safe_name, partial=False, server_info=conn.server_info)
 
     async def _run_vector(self, benchmark: VectorStepBenchmark, conn: Connection, e: _Entry) -> dict[str, Any]:
-        """Run the entry's items on a :class:`VectorStepBenchmark`, up to ``num_envs`` at once.
+        """Run the entry's items on a :class:`VectorStepBenchmark`, up to ``num_envs`` at once on ``conn``.
 
-        Slot ``i`` has its own connection and recording ``sid`` (slot 0 keeps the shard's),
-        so the model server keeps one session per running episode."""
-        sids = [self._sid] + [str(uuid.uuid4()) for _ in range(benchmark.num_envs - 1)]
-        conns = [conn] + [
-            Connection(self._server_cfg.url, timeout=self._server_cfg.timeout) for _ in range(benchmark.num_envs - 1)
-        ]
+        The running episodes share one task: a free slot takes an item of that task, and the next task
+        starts once they all ended.  Each episode has its own recording ``sid``, its server session's id."""
+        if not conn.server_info.get("capabilities", {}).get("vector_step"):
+            benchmark.cleanup()
+            await conn.close()
+            raise RuntimeError(f"{e.name}: the model server does not take vector steps (vla-eval too old, or CI mode)")
         claimed: set[int] = set()  # queue items in flight
-        last_task: int | None = None
+        held: tuple[int | None, tuple[int, Any, int]] | None = None  # the next task's first item, waiting
+        group: int | None = None  # the running episodes' task_idx
+        active = 0
         static_items = iter(e.work_items)
         ended = 0
         if e.dynamic:
@@ -538,7 +540,9 @@ class Orchestrator:
             *,
             aborted: bool = False,
         ) -> None:
+            nonlocal active
             item, ep, task_name = episode.ref
+            active -= 1
 
             def done() -> int:
                 nonlocal ended
@@ -554,28 +558,35 @@ class Orchestrator:
             if not aborted:  # the server went away: a partial result, as in the one-at-a-time loop
                 self._check_health(e.eval_id if e.dynamic else None, ended - 1 if item is None else item, claimed)
 
+        def take() -> tuple[int | None, tuple[int, Any, int]] | None:
+            nonlocal held
+            if held is not None:
+                nxt, held = held, None
+                return nxt
+            if not e.dynamic:
+                work = next(static_items, None)
+                return None if work is None else (None, work)
+            assert self.shard_id is not None and self.num_shards is not None
+            item = self._queue().claim(e.eval_id, self.shard_id, group, self.num_shards, exclude=claimed)
+            if item is None:
+                return None
+            claimed.add(item)
+            return item, e.work_items[item]
+
         def next_episode(slot: int) -> VectorEpisode | None:
-            nonlocal last_task
-            while True:
-                item: int | None = None
-                if e.dynamic:
-                    assert self.shard_id is not None and self.num_shards is not None
-                    item = self._queue().claim(e.eval_id, self.shard_id, last_task, self.num_shards, exclude=claimed)
-                    if item is None:
-                        return None
-                    claimed.add(item)
-                    task_idx, task, ep = e.work_items[item]
-                    last_task = task_idx
-                else:
-                    nxt = next(static_items, None)
-                    if nxt is None:
-                        return None
-                    task_idx, task, ep = nxt
+            nonlocal held, group, active
+            while (nxt := take()) is not None:
+                item, (task_idx, task, ep) = nxt
+                if active and task_idx != group:
+                    held = nxt  # leads the next group, once this one has ended
+                    return None
+                group = task_idx
                 task_name, task = self._episode_task(e, task, ep)
                 watchdog.pet(f"{e.safe_name} {task_name} ep{ep}")
+                active += 1
                 try:
                     recorder = self._build_recorder(
-                        e.rec_cfg, task, e.eval_id, e.safe_name, task_idx, ep, benchmark, sid=sids[slot]
+                        e.rec_cfg, task, e.eval_id, e.safe_name, task_idx, ep, benchmark, sid=str(uuid.uuid4())
                     )
                 except RecordingError:
                     raise
@@ -583,15 +594,12 @@ class Orchestrator:
                     end(VectorEpisode(task, NullEpisodeRecorder(), (item, ep, task_name)), None, exc)
                     continue
                 return VectorEpisode(task, recorder, (item, ep, task_name))
+            return None
 
         runner = VectorEpisodeRunner()
         try:
-            for c in conns[1:]:  # one after another: a task group would wrap a ConnectionError in a group
-                await c.connect(benchmark=e.cfg.benchmark)
             logger.info("%s: %d environments, one server session each", e.name, benchmark.num_envs)
-            await runner.run(
-                benchmark, conns, next_episode, end, max_steps=e.max_steps, refill_every=e.cfg.refill_every
-            )
+            await runner.run(benchmark, conn, next_episode, end, max_steps=e.max_steps)
         except ConnectionError:
             logger.error("%s: server unreachable, aborting benchmark", e.name)
             return self._finalize_benchmark(
@@ -600,8 +608,7 @@ class Orchestrator:
         finally:
             watchdog.pet(f"{e.safe_name} cleanup")
             await runner.cleanup(benchmark)
-            for c in conns:
-                await c.close()
+            await conn.close()
 
         return self._finalize_benchmark(e.collector, e.cfg, e.safe_name, partial=False, server_info=conn.server_info)
 

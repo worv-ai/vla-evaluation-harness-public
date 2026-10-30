@@ -1,16 +1,16 @@
-"""VectorEpisodeRunner: episodes over a VectorStepBenchmark's environments, one model-server session each."""
+"""VectorEpisodeRunner: episodes over a VectorStepBenchmark's environments, one server round trip per step."""
 
 from __future__ import annotations
 
+import logging
 import time
 from concurrent.futures import ThreadPoolExecutor
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Protocol, TypeVar
 
 import anyio
 import anyio.to_thread
-import websockets
 
 from vla_eval import watchdog
 from vla_eval.benchmarks.base import VectorStepBenchmark
@@ -25,6 +25,7 @@ from vla_eval.runners.base import (
 )
 from vla_eval.types import Action, EpisodeResult, Observation, Task
 
+logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
 
@@ -76,23 +77,23 @@ class _Running:
 
 
 class VectorEpisodeRunner:
-    """Runs episodes on the slots of a :class:`VectorStepBenchmark`, slot ``i`` talking to ``conns[i]``.
+    """Runs episodes on the slots of a :class:`VectorStepBenchmark` over one connection.
 
-    Each step sends every running slot's observation concurrently, so a batching model
-    server infers them together, then steps all environments once.  Free slots take the
-    next episode from ``next_episode(slot)`` (``None`` when there is none now): when the
-    benchmark has ``partial_reset``, at the next environment step that is a multiple of
-    ``refill_every`` (the model's chunk length keeps the slots' chunks in phase, so the
-    server infers them together), else when the whole wave has finished.  After
-    a ``None`` it asks again once an episode ends (a shared queue can get work back from
-    another shard), and returns when no episode runs and none comes.
+    A step is one round trip (``Connection.exchange``): the episodes ended since the last one,
+    the ones just started and one observation per running slot go out together, the server
+    infers them together, then every environment steps once.  Each slot's episode is its own
+    server session.  Free slots take the next episode from ``next_episode(slot)`` (``None``
+    when there is none now): at any step when the benchmark has ``partial_reset``, else when no
+    slot runs.  After a ``None`` it asks again once an episode ends, and returns when no
+    episode runs and none comes.
 
-    Failures stay with their episode, as in the sync runner: an environment error
-    (``reset`` fails every episode it starts, ``step`` every running one), a model error,
-    a closed connection or an ``act`` timeout (that slot reconnects) end that episode
-    through ``on_end`` and the rest go on.  ``ConnectionError`` (the server is unreachable,
-    or a reconnect failed) ends every episode the runner holds and is re-raised.
-    ``RecordingError`` and exceptions raised by ``on_end`` propagate at once.
+    Failures stay with their episode where they can: a per-slot exception returned by ``reset``
+    and a server error for a slot end that episode.  An exception raised by ``reset`` or
+    ``step`` ends every episode on the simulator, whose state is then unknown.  A failed round
+    trip (closed connection, timeout, bad reply) ends every running episode, then the runner
+    reconnects, with new sessions, and goes on.  When the reconnect fails or the server is
+    unreachable (``ConnectionError``), every episode it holds ends aborted and
+    ``ConnectionError`` is raised.  ``RecordingError`` and exceptions from ``on_end`` propagate.
     """
 
     def __init__(self) -> None:
@@ -113,25 +114,25 @@ class VectorEpisodeRunner:
     async def run(
         self,
         benchmark: VectorStepBenchmark,
-        conns: Sequence[Any],  # Connection, one per slot
+        conn: Any,  # Connection
         next_episode: Callable[[int], VectorEpisode | None],
         on_end: OnEnd,
         *,
         max_steps: int | None = None,
-        refill_every: int = 1,
     ) -> None:
-        if len(conns) < benchmark.num_envs:
-            raise ValueError(f"{benchmark.num_envs} environments need as many connections, got {len(conns)}")
-        if refill_every < 1:
-            raise ValueError(f"refill_every must be >= 1, got {refill_every}")
         running: dict[int, _Running] = {}
-        tick = 0  # environment steps so far; partial refills wait for a multiple of refill_every
+        ends: list[list[Any]] = []  # [slot, result] of the server sessions to end in the next round trip
+        exhausted = False
+
+        def ended(episode: VectorEpisode, result: Any, error: Any, *, aborted: bool = False) -> None:
+            nonlocal exhausted
+            exhausted = False  # the caller may have work again (a held task, a released queue item)
+            on_end(episode, result, error, aborted=aborted)
+
         try:
-            exhausted = False
             while True:
-                if not exhausted and (not running or (benchmark.partial_reset and tick % refill_every == 0)):
-                    if not running:
-                        tick = 0  # a new phase: later refills keep in step with these episodes
+                starts: list[list[Any]] = []
+                if not exhausted and (not running or benchmark.partial_reset):
                     new: list[tuple[int, VectorEpisode]] = []
                     for slot in range(benchmark.num_envs):
                         if slot in running:
@@ -142,31 +143,33 @@ class VectorEpisodeRunner:
                             break
                         new.append((slot, episode))
                     if new:
-                        await self._start(benchmark, conns, new, running, on_end)
+                        starts = await self._start(benchmark, new, running, ends, ended)
                 if not running:
                     if exhausted:
-                        return
+                        break
                     continue
-                before = len(running)
-                actions = await self._act(conns, running, on_end)
+                actions = await self._exchange(conn, starts, running, ends, ended)
                 if actions:
-                    await self._step(benchmark, conns, actions, running, on_end, max_steps)
-                    tick += 1
-                if len(running) < before:
-                    exhausted = False
+                    await self._step(benchmark, actions, running, ends, ended, max_steps)
         except ConnectionError as exc:
             for r in running.values():
                 on_end(r.episode, None, exc, aborted=True)
             raise
+        if ends:  # the last episodes' sessions; their results are booked already
+            try:
+                await conn.exchange({"ends": ends, "starts": [], "observations": []})
+            except Exception as exc:
+                logger.warning("Ending the last server sessions failed: %s: %s", type(exc).__name__, exc)
 
     async def _start(
         self,
         benchmark: VectorStepBenchmark,
-        conns: Sequence[Any],
         new: list[tuple[int, VectorEpisode]],
         running: dict[int, _Running],
+        ends: list[list[Any]],
         on_end: OnEnd,
-    ) -> None:
+    ) -> list[list[Any]]:
+        """Reset the new slots; return the ``EPISODE_START`` of each that started."""
         slots = [slot for slot, _ in new]
         episodes = [episode for _, episode in new]
         t0 = time.monotonic()
@@ -187,56 +190,52 @@ class VectorEpisodeRunner:
             observations = await self._call(reset)
         except RecordingError:
             raise
-        except Exception as exc:  # an EpisodeError, or a transport-type error phase() lets through
-            self._end_all(episodes, exc, on_end)
-            return
-        pending = list(zip(slots, episodes, observations))
-        while pending:
-            slot, episode, obs = pending.pop(0)
-            try:
-                if isinstance(obs, Exception):
-                    raise obs
-                await conns[slot].start_episode(episode_start_payload(episode.task, episode.recorder))
-            except RecordingError:
-                raise
-            except Exception as exc:
-                try:
-                    await self._fail(conns[slot], episode, exc, on_end)
-                except ConnectionError as abort:
-                    for _, rest, _ in pending:
-                        on_end(rest, None, abort, aborted=True)
-                    raise
+        except Exception as exc:
+            for episode in episodes:
+                on_end(episode, None, exc)
+            self._end_running(running, ends, exc, on_end)
+            return []
+        starts: list[list[Any]] = []
+        for slot, episode, obs in zip(slots, episodes, observations):
+            if isinstance(obs, Exception):
+                on_end(episode, None, obs)
                 continue
             running[slot] = _Running(episode, obs, t0)
+            starts.append([slot, episode_start_payload(episode.task, episode.recorder)])
+        return starts
 
-    async def _act(self, conns: Sequence[Any], running: dict[int, _Running], on_end: OnEnd) -> dict[int, Action]:
-        out: dict[int, Action | Exception] = {}
-
-        async def act(slot: int, obs: Observation) -> None:
-            try:
-                with phase(ModelActError):
-                    out[slot] = await conns[slot].act(obs)
-            except Exception as exc:
-                out[slot] = exc
-
-        async with anyio.create_task_group() as tg:
-            for slot, r in running.items():
-                tg.start_soon(act, slot, r.obs)
-        # ConnectionError last: it aborts the run, after the other failures are handled.
-        failed = sorted(
-            ((slot, x) for slot, x in out.items() if isinstance(x, Exception)),
-            key=lambda p: isinstance(p[1], ConnectionError),
-        )
-        for slot, exc in failed:
-            await self._fail(conns[slot], running.pop(slot).episode, exc, on_end)
-        return {slot: a for slot, a in out.items() if not isinstance(a, Exception)}
+    async def _exchange(
+        self,
+        conn: Any,
+        starts: list[list[Any]],
+        running: dict[int, _Running],
+        ends: list[list[Any]],
+        on_end: OnEnd,
+    ) -> dict[int, Action]:
+        """One round trip; return the running slots' actions.  A slot without one ends with the server's error."""
+        step = {"ends": list(ends), "starts": starts, "observations": [[s, r.obs] for s, r in running.items()]}
+        ends.clear()
+        try:
+            reply = await conn.exchange(step)
+        except (ConnectionError, RecordingError):
+            raise
+        except Exception as exc:  # closed, timed out or out of sync: the server's sessions are gone
+            await self._reconnect(conn, running, exc, on_end)
+            return {}
+        actions = {slot: action for slot, action in reply.get("actions", [])}
+        errors = {slot: detail for slot, detail in reply.get("errors", [])}
+        for slot in [s for s in running if s not in actions]:
+            r = running.pop(slot)
+            on_end(r.episode, None, ModelActError(f"Server error: {errors.get(slot, 'no action for this slot')}"))
+            ends.append([slot, {}])
+        return {slot: actions[slot] for slot in running}
 
     async def _step(
         self,
         benchmark: VectorStepBenchmark,
-        conns: Sequence[Any],
         actions: dict[int, Action],
         running: dict[int, _Running],
+        ends: list[list[Any]],
         on_end: OnEnd,
         max_steps: int | None,
     ) -> None:
@@ -267,55 +266,49 @@ class VectorEpisodeRunner:
         except RecordingError:
             raise
         except Exception as exc:
-            self._end_all([running.pop(slot).episode for slot in actions], exc, on_end)
+            self._end_running(running, ends, exc, on_end)
             return
         watchdog.pet()  # a slow simulator's episode can outlast the stall timeout
         for slot, outcome in outcomes.items():
             r = running[slot]
-            try:
-                if isinstance(outcome, Exception):
-                    raise outcome
-                ended, value = outcome
-                if not ended:
-                    r.obs = value
-                    continue
+            if isinstance(outcome, Exception):
                 del running[slot]
-                result: EpisodeResult = {
-                    "metrics": value,
-                    "steps": r.steps,
-                    "elapsed_sec": round(time.monotonic() - r.t0, 3),
-                }
-                await conns[slot].end_episode(result)
-            except RecordingError:
-                raise
-            except Exception as exc:
-                running.pop(slot, None)
-                await self._fail(conns[slot], r.episode, exc, on_end)
+                on_end(r.episode, None, outcome)
+                ends.append([slot, {}])
                 continue
+            ended, value = outcome
+            if not ended:
+                r.obs = value
+                continue
+            del running[slot]
+            result: EpisodeResult = {
+                "metrics": value,
+                "steps": r.steps,
+                "elapsed_sec": round(time.monotonic() - r.t0, 3),
+            }
             on_end(r.episode, result, None)
+            ends.append([slot, result])
 
     @staticmethod
-    def _end_all(episodes: list[VectorEpisode], exc: Exception, on_end: OnEnd) -> None:
-        aborted = isinstance(exc, ConnectionError)
-        for episode in episodes:
-            on_end(episode, None, exc, aborted=aborted)
-        if aborted:
-            raise exc
+    def _end_running(running: dict[int, _Running], ends: list[list[Any]], exc: Exception, on_end: OnEnd) -> None:
+        for slot, r in running.items():
+            on_end(r.episode, None, exc)
+            ends.append([slot, {}])
+        running.clear()
 
     @staticmethod
-    async def _fail(conn: Any, episode: VectorEpisode, exc: Exception, on_end: OnEnd) -> None:
-        """End ``episode`` with ``exc``; a closed connection or a timeout reconnects the slot first, and the
-        episode counts as aborted when that fails."""
-        if isinstance(exc, (websockets.exceptions.ConnectionClosed, TimeoutError)):
-            try:
-                await conn.reconnect()
-            except Exception as err:
-                on_end(episode, None, exc, aborted=True)
-                if isinstance(err, ConnectionError):
-                    raise
-                # e.g. a HELLO timeout: the server cannot take this slot's episodes
-                raise ConnectionError(f"reconnect failed: {type(err).__name__}: {err}") from err
-        aborted = isinstance(exc, ConnectionError)
-        on_end(episode, None, exc, aborted=aborted)
-        if aborted:
-            raise exc
+    async def _reconnect(conn: Any, running: dict[int, _Running], exc: Exception, on_end: OnEnd) -> None:
+        """End every running episode with ``exc`` after reconnecting; aborted when the reconnect fails."""
+        try:
+            await conn.reconnect()
+        except Exception as err:
+            for r in running.values():
+                on_end(r.episode, None, exc, aborted=True)
+            running.clear()
+            if isinstance(err, ConnectionError):
+                raise
+            # e.g. a HELLO timeout: the server cannot take this runner's episodes
+            raise ConnectionError(f"reconnect failed: {type(err).__name__}: {err}") from err
+        for r in running.values():
+            on_end(r.episode, None, exc)
+        running.clear()

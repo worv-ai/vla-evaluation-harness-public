@@ -5,6 +5,8 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any, Callable, Coroutine, Dict, Literal
 
+import anyio
+
 from vla_eval.specs import DimSpec
 from vla_eval.types import Action, Observation
 
@@ -114,6 +116,25 @@ class ModelServer(ABC):
     @abstractmethod
     async def on_observation(self, obs: Observation, ctx: SessionContext) -> None:
         """Called when an observation arrives. Run inference and call ctx.send_action()."""
+
+    async def on_observations(self, items: list[tuple[Observation, SessionContext]]) -> list[Exception | None]:
+        """One step of a vector benchmark: an observation per running slot, each with its slot's session.
+
+        Each ``ctx`` gets its action through ``ctx.send_action``, as in :meth:`on_observation`; returns the
+        exception that failed each item, or ``None``.  Default: :meth:`on_observation` per item, concurrently.
+        Override to infer the items together (see ``PredictModelServer``)."""
+        errors: list[Exception | None] = [None] * len(items)
+
+        async def one(i: int, obs: Observation, ctx: SessionContext) -> None:
+            try:
+                await self.on_observation(obs, ctx)
+            except Exception as exc:
+                errors[i] = exc
+
+        async with anyio.create_task_group() as tg:
+            for i, (obs, ctx) in enumerate(items):
+                tg.start_soon(one, i, obs, ctx)
+        return errors
 
     async def on_episode_start(self, config: dict[str, Any], ctx: SessionContext) -> None:
         """Called at episode start. Override to reset model state."""

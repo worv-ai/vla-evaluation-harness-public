@@ -94,6 +94,7 @@ async def _handle_connection(
     logger.info("Client connected: session=%s", session_id)
     _msg_count = 0
     in_episode = False
+    slots: dict[int, SessionContext] = {}  # a vector benchmark's running episodes, by slot
     try:
         async for raw_data in ws:
             _msg_count += 1
@@ -115,7 +116,8 @@ async def _handle_connection(
                     pass
                 reply_payload = make_hello_payload(
                     model_server=type(model_server).__name__,
-                    capabilities={},
+                    # continuous inference answers later than its observation: no lockstep vector step
+                    capabilities={"vector_step": not getattr(model_server, "continuous_inference", False)},
                     **extra,
                 )
                 reply = Message(type=MessageType.HELLO, payload=reply_payload, seq=msg.seq)
@@ -184,6 +186,14 @@ async def _handle_connection(
                     _inflight -= 1
                 ctx._increment_step()
 
+            elif msg.type == MessageType.VECTOR_STEP:
+                _inflight += 1
+                try:
+                    result = await _vector_step(msg.payload, slots, session_id, model_server)
+                finally:
+                    _inflight -= 1
+                await ws.send(pack_message(Message(type=MessageType.VECTOR_RESULT, payload=result, seq=msg.seq)))
+
             elif msg.type == MessageType.EPISODE_END:
                 logger.info("EPISODE_END session=%s", session_id[:8])
                 try:
@@ -210,11 +220,70 @@ async def _handle_connection(
     except Exception:
         logger.exception("Error handling session=%s msgs=%d", session_id[:8], _msg_count)
     finally:
-        if in_episode:
+        for c in ([ctx] if in_episode else []) + list(slots.values()):
             try:
-                await model_server.on_episode_end({}, ctx)
+                await model_server.on_episode_end({}, c)
             except Exception:
-                logger.exception("Error in cleanup on_episode_end session=%s", session_id[:8])
+                logger.exception("Error in cleanup on_episode_end session=%s", c.session_id[:8])
+
+
+async def _vector_step(
+    payload: dict[str, Any], slots: dict[int, SessionContext], session_id: str, model_server: ModelServer
+) -> dict[str, Any]:
+    """Handle one VECTOR_STEP: its episode ends, then starts, then one observation per running slot.
+
+    Each slot is its own session: its ``session_id`` is the episode's ``recording.sid``, else
+    ``<connection session>:<slot>``.  Returns the VECTOR_RESULT payload."""
+    errors: dict[int, str] = {}
+    for slot, result in payload.get("ends", []):
+        ended = slots.pop(slot, None)
+        if ended is not None:
+            try:
+                await model_server.on_episode_end(result, ended)
+            except Exception:
+                logger.exception("Error in on_episode_end session=%s", ended.session_id[:8])
+    actions: dict[int, Action] = {}
+    for slot, config in payload.get("starts", []):
+        rec = config.get("recording") or {}
+        ctx = SessionContext(
+            session_id=rec.get("sid") or f"{session_id}:{slot}",
+            episode_id=rec.get("eid") or str(uuid.uuid4()),
+            mode="sync",
+            eval_id=rec.get("eval_id") or "",
+            recording_db_path=rec.get("db_path") or "",
+        )
+        try:
+            await model_server.on_episode_start(config, ctx)
+        except Exception as exc:
+            logger.exception("Error in on_episode_start session=%s", ctx.session_id[:8])
+            errors[slot] = f"episode_start_failed: {type(exc).__name__}: {exc}"
+            continue
+        slots[slot] = ctx
+    items: list[tuple[int, Any, SessionContext]] = []
+    for slot, obs in payload.get("observations", []):
+        if slot in slots:
+            slots[slot]._send_action_fn = partial(_store_action, actions, slot)  # into this step's reply
+            items.append((slot, obs, slots[slot]))
+        else:
+            errors.setdefault(slot, f"observation_failed: slot {slot} has no running episode")
+    try:
+        failures: list[Exception | None] = await model_server.on_observations([(o, c) for _, o, c in items])
+    except Exception as exc:
+        logger.exception("Error in on_observations")
+        failures = [exc] * len(items)
+    for (slot, _, ctx), exc in zip(items, failures):
+        if exc is None and slot not in actions:
+            exc = RuntimeError("the model server sent no action")
+        if exc is not None:
+            errors[slot] = f"observation_failed: {type(exc).__name__}: {exc}"
+            actions.pop(slot, None)
+            continue
+        ctx._increment_step()
+    return {"actions": [[s, a] for s, a in actions.items()], "errors": [[s, e] for s, e in errors.items()]}
+
+
+async def _store_action(actions: dict[int, Action], slot: int, action: Action) -> None:
+    actions[slot] = action
 
 
 def _make_process_request(model_server: ModelServer) -> Any:

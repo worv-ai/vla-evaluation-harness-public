@@ -104,10 +104,9 @@ the GPU), subclass `VectorStepBenchmark` instead: `reset(slots, tasks, recorders
 `partial_reset = True` when environments can be reset individually while others run.
 `reset`, `step`, `make_obs` and `cleanup` run on one dedicated thread, so build the simulator
 lazily in the first `reset`.  An episode's outcome must depend only on its task (seed, layout), never on its slot or
-on the episodes running beside it.  The harness runs up to `num_envs` episodes at once, one
-model-server session each, so pair it with a model server whose `max_batch_size` covers
-`num_envs` (times the shards); with `partial_reset`, set `refill_every` to the model's chunk
-length.  Sync mode only; see [RFC-0009](docs/rfcs/0009-vector-benchmarks.md).
+on the episodes running beside it.  The harness runs up to `num_envs` episodes of one task at
+once, one model-server session each, so pair it with a model server whose `max_batch_size` covers
+`num_envs` (times the shards).  Sync mode only; see [RFC-0009](docs/rfcs/0009-vector-benchmarks.md).
 
 ### Render Backends
 

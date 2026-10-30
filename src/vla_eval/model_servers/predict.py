@@ -308,6 +308,51 @@ class PredictModelServer(ModelServer):
         result = self._normalize_result(result, ctx)
         await self._process_and_send(result, ctx)
 
+    async def on_observations(self, items: list[tuple[Observation, SessionContext]]) -> list[Exception | None]:
+        """A vector step: serve buffered chunks, infer the rest in batches of ``max_batch_size`` on the
+        inference thread.  A failed batch fails its items."""
+        if self.continuous_inference or type(self).on_observation is not PredictModelServer.on_observation:
+            return await super().on_observations(items)  # a subclass's own on_observation sees every item
+        errors: list[Exception | None] = [None] * len(items)
+        todo: list[int] = []
+        for i, (_, ctx) in enumerate(items):
+            buffered = self._try_serve_from_buffer(ctx)
+            if buffered is None:
+                todo.append(i)
+            else:
+                await ctx.send_action({"actions": buffered})
+        size = self.max_batch_size if self.max_batch_size > 1 else max(len(todo), 1)
+        for start in range(0, len(todo), size):
+            group = todo[start : start + size]
+            obs, ctxs = [items[i][0] for i in group], [items[i][1] for i in group]
+            try:
+                infer = self.predict_batch if self.max_batch_size > 1 else self._predict_each
+                results = await _run_in_thread(infer, obs, ctxs, limiter=self._thread_limiter)
+                if len(results) != len(group):
+                    raise RuntimeError(f"predict_batch returned {len(results)} results for {len(group)} inputs")
+            except Exception as exc:
+                for i in group:
+                    errors[i] = exc
+                continue
+            for i, ctx, result in zip(group, ctxs, results):
+                try:
+                    if isinstance(result, Exception):
+                        raise result
+                    await self._process_and_send(self._normalize_result(result, ctx), ctx)
+                except Exception as exc:
+                    errors[i] = exc
+        return errors
+
+    def _predict_each(self, obs_batch: list[Observation], ctx_batch: list[SessionContext]) -> list[Any]:
+        """``predict`` per item; an item's exception fails that item alone."""
+        out: list[Any] = []
+        for obs, ctx in zip(obs_batch, ctx_batch):
+            try:
+                out.append(self.predict(obs, ctx))
+            except Exception as exc:
+                out.append(exc)
+        return out
+
     # ------------------------------------------------------------------
     # Batch dispatch (queue + background loop)
     # ------------------------------------------------------------------
@@ -349,7 +394,7 @@ class PredictModelServer(ModelServer):
         With pipelining we overlap collection and inference:
             collect₀ → GPU₀ + collect₁ → GPU₁ + collect₂ → ...
         _collect continuously receives from the stream while _infer
-        processes batches.  Before each batch, if pending isn't full,
+        processes batches.  After GPU finishes, if pending isn't full
         we wait up to max_wait_time for more.
         """
         assert self._receive_stream is not None
@@ -384,13 +429,6 @@ class PredictModelServer(ModelServer):
                                 break
                             continue
 
-                        # Wait for a full batch, also when woken from idle by its first request:
-                        # concurrent clients (a vector benchmark's slots) send theirs together.
-                        if not stream_closed and len(pending) < self.max_batch_size:
-                            batch_full = anyio.Event()
-                            with anyio.move_on_after(self.max_wait_time):
-                                await batch_full.wait()
-
                         batch = pending[: self.max_batch_size]
                         pending = pending[self.max_batch_size :]
 
@@ -424,6 +462,12 @@ class PredictModelServer(ModelServer):
                             for req in batch:
                                 if not req.done:
                                     req.set_exception(exc)
+
+                        # Grace period AFTER GPU: accumulate items for next batch
+                        if not stream_closed and len(pending) < self.max_batch_size:
+                            batch_full = anyio.Event()
+                            with anyio.move_on_after(self.max_wait_time):
+                                await batch_full.wait()
 
                         if pending:
                             has_items.set()
