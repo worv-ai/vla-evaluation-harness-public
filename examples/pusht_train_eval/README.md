@@ -30,7 +30,7 @@ the same without a Docker daemon (it implies `--docker`). Metrics go to `outputs
 The two specs are compared before the first episode; a mismatch between what the policy emits
 and what the environment expects is warned about up front instead of showing up as a 0% run.
 
-`PolicyServer.on_episode_start` calls `policy.reset()` to clear observation history and queued
+`PolicyServer.reset_episodes` calls `policy.reset()` to clear observation history and queued
 actions between episodes. The policy's state is global, so the server passes `max_rows=1` and
 refuses a second concurrent episode; per-episode state would be keyed by `row.id` instead.
 

@@ -47,7 +47,7 @@ class PolicyServer(PredictModelServer):
             action = self.postprocess(self.policy.select_action(frame))
         return {"actions": action.squeeze(0).cpu().numpy().astype(np.float32)}
 
-    def on_episode_start(self, rows: Rows) -> None:
+    def reset_episodes(self, rows: Rows) -> None:
         self.policy.reset()  # clear the history/action queues between episodes
 
     def get_action_spec(self) -> dict[str, DimSpec]:

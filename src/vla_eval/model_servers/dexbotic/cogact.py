@@ -155,7 +155,7 @@ class CogACTModelServer(PredictModelServer):
             stats = stats["norm_stats"]
         return stats.get("default", default)
 
-    def on_episode_start(self, rows: Rows) -> dict[int, Exception] | None:
+    def reset_episodes(self, rows: Rows) -> dict[int, Exception] | None:
         """Resolve each episode's chunk_size from ``chunk_size_map`` if set; an unknown suite fails that row."""
         if self.chunk_size_map is None:
             return None

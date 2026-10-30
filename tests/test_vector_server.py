@@ -30,7 +30,7 @@ class CountingServer(PredictModelServer):
         n = self.chunk_size or 1
         return {"actions": np.asarray(obs["value"])[:, None, None] * np.ones((len(rows), n, 7), np.float32)}
 
-    def on_episode_start(self, rows: Rows):
+    def reset_episodes(self, rows: Rows):
         self.started.append(rows.ids.tolist())
         for e in rows.episodes:
             if "suite_chunk" in e.config.get("task", {}):
@@ -38,7 +38,7 @@ class CountingServer(PredictModelServer):
         broken = [i for i, e in enumerate(rows.episodes) if e.config.get("task", {}).get("broken")]
         return {i: ValueError("cannot load this task") for i in broken}
 
-    def on_episode_end(self, rows: Rows, results):
+    def finish_episodes(self, rows: Rows, results):
         self.ended.append(rows.ids.tolist())
 
 
@@ -112,7 +112,7 @@ async def test_each_row_has_its_own_chunk_buffer_and_counts_every_observation(fr
 
 
 @pytest.mark.anyio
-async def test_on_episode_start_sets_an_episodes_chunk_size(free_port):
+async def test_reset_episodes_sets_an_episodes_chunk_size(free_port):
     server = CountingServer(chunk_size=4, max_batch_size=None)
     task, conn = await _connect(server, free_port)
     try:

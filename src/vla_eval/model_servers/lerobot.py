@@ -406,7 +406,7 @@ class LeRobotModelServer(PredictModelServer):
         actions = chunk.squeeze(0).detach().to("cpu").numpy().astype(np.float32)
         return {"actions": actions}
 
-    def on_episode_start(self, rows: Rows) -> None:
+    def reset_episodes(self, rows: Rows) -> None:
         # Clear any per-policy observation-history queues between episodes (global: once per call).
         self._policy.reset()
 

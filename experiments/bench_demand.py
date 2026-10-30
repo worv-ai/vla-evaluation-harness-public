@@ -31,7 +31,6 @@ import shutil
 import subprocess
 import tempfile
 import time
-from collections.abc import Sequence
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -43,7 +42,7 @@ from tqdm import tqdm
 
 from vla_eval.docker_resources import _detect_runtime
 from vla_eval.types import Action, Batch, EpisodeResult, Observation
-from vla_eval.model_servers.base import Row
+from vla_eval.model_servers.base import Row, Rows
 from vla_eval.model_servers.predict import PredictModelServer
 from vla_eval.model_servers.serve import serve_async
 
@@ -257,12 +256,11 @@ class InstantServer(PredictModelServer):
     def predict(self, obs: Observation, row: Row) -> Action:
         return {"actions": np.zeros(self.action_dim, dtype=np.float32)}
 
-    async def act(self, obs: Batch, ids: Sequence[int]) -> tuple[Batch, dict[int, Exception]]:
+    def observe(self, obs: Batch, rows: Rows) -> None:
         if self._first_obs_time is None:
             self._first_obs_time = time.monotonic()
-        self.call_count += len(ids)
-        self._pbar.update(len(ids))
-        return await super().act(obs, ids)
+        self.call_count += len(rows)
+        self._pbar.update(len(rows))
 
     def reset(self) -> None:
         """Reset counters for the next measurement round."""

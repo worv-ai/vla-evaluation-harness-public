@@ -306,7 +306,7 @@ class GR00TModelServer(PredictModelServer):
             outputs.append({"actions": actions})
         return columns.stack(outputs)
 
-    def on_episode_start(self, rows: Rows) -> dict[int, Exception] | None:
+    def reset_episodes(self, rows: Rows) -> dict[int, Exception] | None:
         self._policy.reset()  # a no-op at the pinned rev (Gr00tPolicy keeps no state), so rows don't interfere
         return None
 

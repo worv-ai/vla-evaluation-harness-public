@@ -541,10 +541,13 @@ class ThreadLogServer(PredictModelServer):
             time.sleep(1.5)  # past the first client's timeout
         return {"actions": np.ones((2, 7), np.float32)}
 
-    def on_episode_start(self, rows):
+    def reset_episodes(self, rows):
         self.threads.add(threading.get_ident())
 
-    def on_episode_end(self, rows, results):
+    def observe(self, obs, rows):
+        self.threads.add(threading.get_ident())
+
+    def finish_episodes(self, rows, results):
         self.threads.add(threading.get_ident())
 
 

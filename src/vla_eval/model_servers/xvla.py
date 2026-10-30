@@ -437,7 +437,7 @@ class XVLAModelServer(PredictModelServer):
             self.benchmark_profile or "custom",
         )
 
-    def on_episode_start(self, rows: Rows) -> dict[int, Exception] | None:
+    def reset_episodes(self, rows: Rows) -> dict[int, Exception] | None:
         failed: dict[int, Exception] = {}
         for i, (rid, episode) in enumerate(zip(rows.ids.tolist(), rows.episodes)):
             self._last_raw_actions.pop(rid, None)
@@ -450,7 +450,7 @@ class XVLAModelServer(PredictModelServer):
                     failed[i] = exc
         return failed
 
-    def on_episode_end(self, rows: Rows, results: list[EpisodeResult]) -> None:
+    def finish_episodes(self, rows: Rows, results: list[EpisodeResult]) -> None:
         for rid in rows.ids.tolist():
             self._last_raw_actions.pop(rid, None)
             self._current_xyz.pop(rid, None)

@@ -32,13 +32,13 @@ from __future__ import annotations
 import logging
 import os
 import sys
-from collections import deque
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import torch
 
+from vla_eval import columns
 from vla_eval.model_servers.base import Row, Rows
 from vla_eval.model_servers.predict import PredictModelServer
 from vla_eval.specs import (
@@ -50,7 +50,7 @@ from vla_eval.specs import (
     STATE_EEF_POS_AA_GRIP,
     DimSpec,
 )
-from vla_eval.types import Action, EpisodeResult, Observation
+from vla_eval.types import Action, Batch, EpisodeResult, Observation
 
 logger = logging.getLogger(__name__)
 
@@ -122,15 +122,12 @@ class VLANeXtModelServer(PredictModelServer):
         chunk_size: int = 8,
         **kwargs: Any,
     ) -> None:
-        # Every observation must reach predict (dense state history), so the chunk is queued here.
-        super().__init__(chunk_size=None, **kwargs)
-        self.action_chunk_size = chunk_size
+        super().__init__(chunk_size=chunk_size, **kwargs)
         self.checkpoint = checkpoint
         self.suite = suite
         self.attn_implementation = attn_implementation
         self.center_crop_ratio = center_crop_ratio
         self._state_histories: dict[int, list[np.ndarray]] = {}
-        self._action_queues: dict[int, deque[np.ndarray]] = {}
 
         if suite not in ACTION_BOUNDS:
             raise ValueError(f"Unknown suite {suite!r}. Choose from {list(ACTION_BOUNDS)}")
@@ -148,28 +145,17 @@ class VLANeXtModelServer(PredictModelServer):
     def get_observation_spec(self) -> dict[str, DimSpec]:
         return {"image": IMAGE_RGB, "wrist": IMAGE_RGB, "language": LANGUAGE, "state": STATE_EEF_POS_AA_GRIP}
 
-    def on_episode_start(self, rows: Rows) -> None:
+    def reset_episodes(self, rows: Rows) -> None:
         for rid in rows.ids.tolist():
             self._state_histories[rid] = []
-            self._action_queues[rid] = deque()
 
-    def on_episode_end(self, rows: Rows, results: list[EpisodeResult]) -> None:
+    def finish_episodes(self, rows: Rows, results: list[EpisodeResult]) -> None:
         for rid in rows.ids.tolist():
             self._state_histories.pop(rid, None)
-            self._action_queues.pop(rid, None)
 
-    def predict(self, obs: Observation, row: Row) -> Action:
-        """Record this observation's state, then serve the queued chunk or infer a new one."""
-        self._record_state(obs, row)
-        queue = self._action_queues.setdefault(row.id, deque())
-        if queue:
-            return {"actions": queue.popleft()}
-        actions = np.asarray(self._predict_chunk(obs, row)["actions"], dtype=np.float32)
-        if self.action_chunk_size is None or actions.ndim != 2:
-            return {"actions": actions}
-        actions = actions[: self.action_chunk_size]
-        queue.extend(actions[1:])
-        return {"actions": actions[0]}
+    def observe(self, obs: Batch, rows: Rows) -> None:
+        for row_obs, row in zip(columns.split(obs, len(rows)), rows):
+            self._record_state(row_obs, row)
 
     def _record_state(self, obs: Observation, row: Row) -> None:
         """Capture proprioception from every observation (even buffered steps): VLANeXt needs dense
@@ -310,7 +296,7 @@ class VLANeXtModelServer(PredictModelServer):
         self._model = model
         logger.info("VLANeXt model loaded.")
 
-    def _predict_chunk(self, obs: Observation, row: Row) -> Action:
+    def predict(self, obs: Observation, row: Row) -> Action:
         from PIL import Image as PILImage
 
         device = self._device
