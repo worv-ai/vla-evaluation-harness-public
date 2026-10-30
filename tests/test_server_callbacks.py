@@ -1,4 +1,4 @@
-"""The callback contract: on_observation + send_action/send_error over Rows snapshots; observe sees every observation."""
+"""The callback contract: send_action/send_error over Rows snapshots; observe sees every observation."""
 
 from __future__ import annotations
 

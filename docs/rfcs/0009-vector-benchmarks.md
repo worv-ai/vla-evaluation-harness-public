@@ -93,7 +93,8 @@ VECTOR_RESULT {"actions": Batch, "errors": [[slot, detail]]}   # action rows: th
 
 The server handles a step in that order: it ends the slots' episodes, starts new ones (one
 `on_episode_start(rows)` for all of them; a position it fails is that slot's error), then hands the
-observation columns to the model.  Every running episode is a row of the model server, a vector slot as much as
+observation columns to `on_observation(obs, rows)` and replies once every row is answered (`send_action` /
+`send_error`).  `ends` carry `EPISODE_END` payloads with `status` and `failure_reason`.  Every running episode is a row of the model server, a vector slot as much as
 a single-episode connection: `rows.ids` are stable while an episode runs (reused after), so a policy keeps
 per-episode state in arrays indexed by them, and the lifecycle and inference are batched alike.  The model
 implements `predict(obs, row)` (one observation) or `predict_batch(obs, rows)` (columns in, columns out); the
@@ -123,7 +124,7 @@ Failures stay with their episode:
 | `reset` raises | every one on the simulator: those it was starting (`env_start`) and the running ones, as the shared state is unknown | next items |
 | `step` raises | every running one (`env_step`) | next items |
 | `result(slot)` raises | that slot's (`env_step`) | next items |
-| a slot's error in `VECTOR_RESULT` (`on_episode_start`, the model) | that slot's (`model_act`) | continue |
+| a slot's error in `VECTOR_RESULT` (a failed start, the model) | that slot's (`model_act`) | continue |
 | round trip fails (connection closed, timeout, bad reply) | every running one, after the reconnect succeeded | new sessions; if the reconnect fails, as below |
 | server unreachable, failed reconnect | every one the runner holds | partial result; their items stay for a rerun |
 

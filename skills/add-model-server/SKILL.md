@@ -49,7 +49,8 @@ Inspect upstream processors before adding transforms they already perform.
 | `get_observation_spec()` / `get_action_spec()` | Declare input/output semantics; shape checks alone cannot establish compatibility. |
 | `predict(obs, row)` | One observation of one episode (`row.id`, `row.step`, `row.is_first`, `row.episode`); return `{"actions": array}` shaped `(action_dim,)` or `(chunk_size, action_dim)`. |
 | `predict_batch(obs, rows)` | Optional: observation columns (a row per episode) to action columns; implement when the model infers a batch faster than rows one by one, and set `max_batch_size`. |
-| `on_episode_start(rows)` / `on_episode_end(rows, results)` | Batched, blocking; `rows.episodes[i].config` is the `EPISODE_START` payload. |
+| `reset_episodes(rows)` / `finish_episodes(rows, results)` | Batched, blocking; `rows.episodes[i].config` is the `EPISODE_START` payload; `results[i]["status"]` says how it ended. |
+| `observe(obs, rows)` | Optional: every observation once, in order, buffered steps included (e.g. state history). |
 
 Read current contracts in `src/vla_eval/model_servers/base.py` and `predict.py`;
 `cogact.py` provides a concrete server/batching example. Do not fabricate or pad
@@ -60,8 +61,8 @@ missing inputs unless that behavior belongs to the upstream policy.
 - Identify ownership of history, recurrent state, action queues, and ensembling.
   Preserve replanning frequency; cached chunks may bypass observations needed by
   policies that update on every executed step.
-- Keep mutable state keyed by `row.id` (ids are reused): reset it in `on_episode_start`.
-  Global state → `max_rows=1`; a policy that must see every observation leaves `chunk_size` unset.
+- Keep mutable state keyed by `row.id` (ids are reused): reset it in `reset_episodes`.
+  Global state → `max_rows=1`; a policy that must see every observation records it in `observe`.
 - Verify batching with mixed episodes, episode lengths, and resets. Compare single
   and batched behavior with controlled inputs/randomness, allowing justified
   stochastic or numerical differences rather than requiring bitwise identity.

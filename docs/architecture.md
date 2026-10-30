@@ -131,14 +131,17 @@ Observations and actions are `dict[str, Any]`; the framework imposes **no fixed 
 ## Model Server
 
 ```
-ModelServer (ABC)            ← contract driven by serve.py: start_episodes / act / end_episodes
-└── PredictModelServer       ← subclass this: predict(obs, row) or predict_batch(obs, rows)
+ModelServer (ABC)            ← async callbacks: on_episode_start / on_observation / on_episode_end,
+│                              answered with send_action / send_error
+└── PredictModelServer       ← subclass this: predict(obs, row) or predict_batch(obs, rows);
+                               hooks reset_episodes / observe / finish_episodes on the model thread
 ```
 
 Every running episode is a **row** of the model server (a connection's episode, or a vector slot); `row.id` keys
 per-episode state. Hooks and options: see [CONTRIBUTING.md](../CONTRIBUTING.md#adding-a-model-server).
 
-One call into the model runs at a time, on a worker thread.
+One call into the model runs at a time, on one model thread. The harness ends every episode the server started
+with `EPISODE_END {status, failure_reason}`; the server ends those a client dropped as `aborted`.
 
 The server runner (`model_servers/serve.py`) wraps any `ModelServer` into a WebSocket server with `serve(model_server, host, port)`.
 

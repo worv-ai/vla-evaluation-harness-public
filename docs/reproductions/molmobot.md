@@ -45,7 +45,7 @@ The base `PredictModelServer` assumes stateless per-call inference, but MolmoBot
 - **Action buffer**: Predicts a 16-step action chunk, executes `execute_horizon=8` actions before re-querying.
 - **Per-step safety clamp**: Per-action clipping of joint deltas relative to the current `qpos` (absolute-joint mode) uses the latest observation, not the observation at chunk prediction time.
 
-To preserve this behavior the harness subclasses `ModelServer` directly and keys per-episode state by `ctx.session_id`, reset in `on_episode_start`.
+To preserve this behavior the server keeps its own action buffer per `row.id` (`chunk_size` unset), reset in `reset_episodes`.
 
 **Future refactor: move the per-step clamp into the benchmark.**
 Of the three pieces of state above, only the per-step safety clamp actually requires knowing the env's latest `qpos` — and the benchmark's `step()` method already has that information. If the clamp is moved into `MolmoSpacesBenchmark.step()` (it reads `self._task`'s current `qpos`, subtracts the incoming absolute target, scales the delta, adds it back), the model server becomes a stateless chunk producer that can inherit from `PredictModelServer`. That enables three wins currently left on the table:
