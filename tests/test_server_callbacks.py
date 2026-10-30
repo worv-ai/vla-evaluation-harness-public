@@ -12,6 +12,7 @@ import pytest
 from vla_eval.connection import Connection
 from vla_eval.model_servers.base import ModelServer, Row, Rows
 from vla_eval.model_servers.predict import PredictModelServer
+from vla_eval.protocol.messages import MessageType
 
 from tests.conftest import start_server, stop_server
 
@@ -241,6 +242,33 @@ async def test_ci_observes_every_observation_before_the_episode_ends(free_port):
             await conn.start_episode(LIVE)  # waits for the end: an inference was in flight
             assert _value(await conn.act({"value": 3.0})) == 3.0
         assert server.finished[0] == [1.0, 2.0]
+    finally:
+        await stop_server(task)
+
+
+class FailObserveServer(HistoryServer):
+    def observe(self, obs, rows: Rows) -> None:
+        if float(np.asarray(obs["value"])[0]) == 2.0:
+            raise ValueError("cannot observe 2")
+        super().observe(obs, rows)
+
+
+@pytest.mark.anyio
+async def test_ci_reports_a_skipped_observations_failure_as_its_own(free_port):
+    """Observations 2 and 3 arrive during an inference; observe(2) fails: 2 gets the error, 3 is still inferred."""
+    server = FailObserveServer(delay=0.3, continuous_inference=True)
+    task = await start_server(server, free_port)
+    try:
+        async with Connection(f"ws://127.0.0.1:{free_port}") as conn:
+            await conn.start_episode(LIVE)
+            await conn.send_observation({"value": 1.0})
+            await anyio.sleep(0.1)
+            seq2 = await conn.send(MessageType.OBSERVATION, {"value": 2.0})
+            seq3 = await conn.send(MessageType.OBSERVATION, {"value": 3.0})
+            got = [await conn.recv(timeout=2.0) for _ in range(3)]
+            await conn.end_episode({})
+        assert [(m.type, m.seq) for m in got[1:]] == [(MessageType.ERROR, seq2), (MessageType.ACTION, seq3)]
+        assert "cannot observe 2" in got[1].payload["error"] and _value(got[2].payload) == 3.0
     finally:
         await stop_server(task)
 

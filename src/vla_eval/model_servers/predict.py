@@ -8,7 +8,7 @@ import time
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, NamedTuple
 
 import anyio
 import numpy as np
@@ -25,11 +25,21 @@ _ENDED = RuntimeError("the episode ended")
 _HERE = np.zeros(1, np.int64)
 
 
+class _Pre(NamedTuple):
+    """An observation to ``observe`` first: ``where``, its rows' positions in the request; ``own``: it is the
+    request's (else one continuous inference skipped, whose failure is reported through its own rows)."""
+
+    obs: Batch
+    rows: Rows
+    where: np.ndarray
+    own: bool = True
+
+
 @dataclass(eq=False)
 class _Request:
     obs: Batch
     rows: Rows
-    pre: list[tuple[Batch, Rows, np.ndarray]]  # observe these first: (obs, rows, their positions in this request)
+    pre: list[_Pre]  # observe these first
     wait: bool  # may wait max_wait_time for other connections' requests
     done: anyio.Event = field(default_factory=anyio.Event)
     actions: Batch = field(default_factory=dict)
@@ -170,7 +180,7 @@ class PredictModelServer(ModelServer):
                 stream.wake.set()
             return
         idx = rows.ids
-        here = [(obs, rows, np.arange(len(rows)))] if self._observes else []
+        here = [_Pre(obs, rows, np.arange(len(rows)))] if self._observes else []
         if self._chunked[idx].all() and all(self._buffers.get(i) for i in idx.tolist()):  # no inference to wait for
             if not here:
                 await self.send_action(
@@ -241,7 +251,7 @@ class PredictModelServer(ModelServer):
                 if s.stopped or s.latest is None:
                     return
                 obs, rows, t = s.latest
-                pre, s.unobserved = [(o, r, _HERE) for o, r in s.unobserved], []
+                pre, s.unobserved = [_Pre(o, r, _HERE, o is obs) for o, r in s.unobserved], []
                 req = _Request(obs, rows, pre, wait=True)
                 await self._submit(req)
                 if s.stopped:
@@ -310,7 +320,7 @@ class PredictModelServer(ModelServer):
             rows = _merge([r.rows for r in batch])
             pre, start = [], 0
             for r in batch:
-                pre += [(o, rs, where + start) for o, rs, where in r.pre]
+                pre += [p._replace(where=p.where + start) for p in r.pre]
                 start += len(r.rows)
         else:
             obs, rows, pre = batch[0].obs, batch[0].rows, batch[0].pre
@@ -332,9 +342,7 @@ class PredictModelServer(ModelServer):
             for r in batch:
                 r.done.set()
 
-    async def _infer(
-        self, obs: Batch, rows: Rows, pre: list[tuple[Batch, Rows, np.ndarray]]
-    ) -> tuple[Batch, dict[int, Exception]]:
+    async def _infer(self, obs: Batch, rows: Rows, pre: list[_Pre]) -> tuple[Batch, dict[int, Exception]]:
         """Observe ``pre``, then the actions of every position that did not fail, in order, and the failures by
         position.  One model-thread call."""
         n = len(rows)
@@ -353,8 +361,10 @@ class PredictModelServer(ModelServer):
         todo = [i for i in range(n) if i not in served and i not in errors] if served or errors else list(range(n))
         parts: list[tuple[list[int], Batch]] = []
         if todo or pre:
-            failed, parts = await self._call(self._work, obs, rows, todo, pre)
+            failed, parts, skipped = await self._call(self._work, obs, rows, todo, pre)
             errors.update(failed)
+            for r, exc in skipped:
+                await self.send_error(r, exc)
         if not chunked:
             return columns.concat([p for _, p in parts]), errors
         # A chunked row returns its chunk's first action and keeps the rest; every row returns "actions" only.
@@ -377,18 +387,22 @@ class PredictModelServer(ModelServer):
         return columns.stack([{"actions": action[i]} for i in range(n) if i not in errors]), errors
 
     def _work(
-        self, obs: Batch, rows: Rows, todo: list[int], pre: list[tuple[Batch, Rows, np.ndarray]]
-    ) -> tuple[dict[int, Exception], list[tuple[list[int], Batch]]]:
+        self, obs: Batch, rows: Rows, todo: list[int], pre: list[_Pre]
+    ) -> tuple[dict[int, Exception], list[tuple[list[int], Batch]], list[tuple[Rows, Exception]]]:
         """On the model thread: ``observe`` each of ``pre`` in order, then predict the ``todo`` positions it did not
         fail, in slices of ``max_batch_size``."""
         errors: dict[int, Exception] = {}
-        for o, r, where in pre:
+        skipped: list[tuple[Rows, Exception]] = []  # failures of observations not inferred: their own rows fail
+        for p in pre:
             try:
-                bad = self.observe(o, r) or {}
+                bad = self.observe(p.obs, p.rows) or {}
             except Exception as exc:
-                bad = dict.fromkeys(range(len(r)), exc)
+                bad = dict.fromkeys(range(len(p.rows)), exc)
             for j, exc in bad.items():
-                errors.setdefault(int(where[j]), exc)
+                if p.own:
+                    errors.setdefault(int(p.where[j]), exc)
+                else:
+                    skipped.append((p.rows.take([j]), exc))
         if errors:
             todo = [i for i in todo if i not in errors]
         n = len(rows)
@@ -414,7 +428,7 @@ class PredictModelServer(ModelServer):
                 continue
             errors.update({group[j]: exc for j, exc in failed.items()})
             parts.append(([i for j, i in enumerate(group) if j not in failed], out))
-        return errors, parts
+        return errors, parts, skipped
 
     def _predict_rows(self, obs: Batch, rows: Rows) -> tuple[Batch, dict[int, Exception]]:
         """:meth:`predict` per row; a row's exception fails it alone."""
@@ -441,15 +455,15 @@ def _merge(parts: list[Rows]) -> Rows:
     )
 
 
-def _without(pre: list[tuple[Batch, Rows, np.ndarray]], skip: set[int]) -> list[tuple[Batch, Rows, np.ndarray]]:
+def _without(pre: list[_Pre], skip: set[int]) -> list[_Pre]:
     """``pre`` without the rows at positions in ``skip``."""
     out = []
-    for o, r, where in pre:
-        keep = [j for j, w in enumerate(where.tolist()) if w not in skip]
-        if len(keep) == len(where):
-            out.append((o, r, where))
+    for p in pre:
+        keep = [j for j, w in enumerate(p.where.tolist()) if w not in skip]
+        if len(keep) == len(p.where):
+            out.append(p)
         elif keep:
-            out.append((columns.take(o, keep), r.take(keep), where[keep]))
+            out.append(_Pre(columns.take(p.obs, keep), p.rows.take(keep), p.where[keep], p.own))
     return out
 
 
