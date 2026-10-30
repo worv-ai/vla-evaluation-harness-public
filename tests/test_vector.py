@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 import websockets.exceptions
 
-from vla_eval.benchmarks.base import BenchmarkCommon, StepResult, VectorStepBenchmark
+from vla_eval.benchmarks.base import BenchmarkCommon, VectorStepBenchmark
 from vla_eval.model_servers.base import SessionContext
 from vla_eval.model_servers.predict import PredictModelServer
 from vla_eval.orchestrator import Orchestrator, UnhealthyShardError
@@ -42,6 +42,7 @@ class StubVectorBenchmark(VectorStepBenchmark):
         self.threads: set[int] = set()
         self.slot_task: dict[int, str] = {}
         self.step_tasks: list[set[str]] = []  # the tasks of each step's slots
+        self.finished = [False] * num_envs
         StubVectorBenchmark.last = self
 
     def get_tasks(self) -> list[dict[str, Any]]:
@@ -55,29 +56,37 @@ class StubVectorBenchmark(VectorStepBenchmark):
             self.t[slot], self.length[slot] = 0, task["length"] + task["episode_idx"] % (self.jitter + 1)
             self.running.add(slot)
             self.slot_task[slot] = task["name"]
-        return list(slots)
+            self.finished[slot] = False
+        return self.obs(slots)
 
-    def step(self, actions):
+    def obs(self, slots):
+        return {
+            "value": np.array([self.value(s) for s in slots]),
+            "task_description": [self.slot_task[s] for s in slots],
+        }
+
+    def value(self, slot):
+        return float(slot + 1)
+
+    def step(self, slots, actions):
         self.threads.add(threading.get_ident())
-        self.steps.append(sorted(actions))
-        self.step_tasks.append({self.slot_task[s] for s in actions})
-        out = {}
-        for slot, action in actions.items():
-            if float(action["actions"][0]) != slot + 1:
-                self.misrouted.append((slot, float(action["actions"][0])))
+        self.steps.append(sorted(slots))
+        self.step_tasks.append({self.slot_task[s] for s in slots})
+        done = []
+        for slot, action in zip(slots, actions["actions"]):
+            got = float(np.asarray(action).reshape(-1)[0])
+            if got != slot + 1:
+                self.misrouted.append((slot, got))
             self.t[slot] += 1
-            done = self.t[slot] >= self.length[slot]
-            if done:
+            self.finished[slot] = self.t[slot] >= self.length[slot]
+            if self.finished[slot]:
                 self.running.discard(slot)
-            out[slot] = StepResult(obs=slot, reward=float(done), done=done, info={})
-        return out
+            done.append(self.finished[slot])
+        return self.obs(slots), np.array(done)
 
-    def make_obs(self, raw_obs, slot, task):
+    def result(self, slot):
         self.threads.add(threading.get_ident())
-        return {"value": float(slot + 1), "task_description": task["name"]}
-
-    def get_step_result(self, slot, step_result):
-        return {"success": step_result.done}
+        return {"success": self.finished[slot]}
 
     def get_metadata(self) -> dict[str, Any]:
         return {"max_steps": 50}
@@ -91,8 +100,8 @@ class PartialResetStub(StubVectorBenchmark):
 
 
 class NeverDoneStub(StubVectorBenchmark):
-    def step(self, actions):
-        return {slot: StepResult(obs=slot, reward=0.0, done=False, info={}) for slot in actions}
+    def step(self, slots, actions):
+        return self.obs(slots), np.zeros(len(slots), bool)
 
 
 class BrokenResetStub(StubVectorBenchmark):
@@ -100,19 +109,28 @@ class BrokenResetStub(StubVectorBenchmark):
         raise RuntimeError("Failed to find a supported physical device")
 
 
-class UnstableSlotStub(StubVectorBenchmark):
-    """Slot 1's environment cannot start its episodes."""
+class TaskShapedStub(StubVectorBenchmark):
+    """Task ``i`` observes ``i + 1`` state numbers, as OCBench's tasks differ."""
 
-    def reset(self, slots, tasks, recorders):
-        raws = super().reset(slots, tasks, recorders)
-        return [RuntimeError("unstable layout") if s == 1 else raw for s, raw in zip(slots, raws)]
+    def obs(self, slots):
+        dims = {s: int(self.slot_task[s].split("_")[1]) + 1 for s in slots}
+        return {**super().obs(slots), "state": np.stack([np.zeros(dims[s]) for s in slots])}
+
+
+class SlotOneResultErrorStub(StubVectorBenchmark):
+    """Slot 1's results cannot be read."""
+
+    def result(self, slot):
+        if slot == 1:
+            raise RuntimeError("score unavailable")
+        return super().result(slot)
 
 
 class SlotTwoModelErrorStub(StubVectorBenchmark):
     """Slot 1 sends a value the error server rejects."""
 
-    def make_obs(self, raw_obs, slot, task):
-        return {"value": -1.0 if slot == 1 else float(slot + 1), "task_description": task["name"]}
+    def value(self, slot):
+        return -1.0 if slot == 1 else float(slot + 1)
 
 
 class SessionLogServer(PredictModelServer):
@@ -298,7 +316,8 @@ async def test_unhealthy_shard_requeues_failed_and_in_flight_items(echo_server, 
 
 
 def _echo(step: dict[str, Any]) -> dict[str, Any]:
-    return {"actions": [[s, {"actions": o["value"] * np.ones(7, dtype=np.float32)}] for s, o in step["observations"]]}
+    values = step["observations"].get("value", [])
+    return {"actions": {"actions": [v * np.ones(7, dtype=np.float32) for v in values]} if len(values) else {}}
 
 
 class FakeConnection:
@@ -379,7 +398,7 @@ async def test_a_step_carries_ends_starts_and_observations(tmp_path):
     with patch("vla_eval.orchestrator.Connection", Recording), patch.object(FakeConnection, "fail", {}):
         await _run(StubVectorBenchmark, _config("ws://fake:9999", tmp_path, num_tasks=1, episodes=4), no_save=True)
     (conn,) = conns
-    shape = [(len(s["ends"]), len(s["starts"]), len(s["observations"])) for s in conn.steps]
+    shape = [(len(s["ends"]), len(s["starts"]), len(s["slots"])) for s in conn.steps]
     # wave of 3 for 2 steps, then the fourth episode starts as the first wave's sessions end, then a final end
     assert shape == [(0, 3, 3), (0, 0, 3), (3, 1, 1), (0, 0, 1), (1, 0, 0)]
 
@@ -396,11 +415,11 @@ async def test_a_server_without_vector_steps_is_refused(tmp_path):
 
 
 class StepTimeoutOnceStub(StubVectorBenchmark):
-    def step(self, actions):
+    def step(self, slots, actions):
         if not self.steps:
-            self.steps.append(sorted(actions))
+            self.steps.append(sorted(slots))
             raise TimeoutError("simulator stalled")
-        return super().step(actions)
+        return super().step(slots, actions)
 
 
 @pytest.mark.anyio
@@ -478,10 +497,10 @@ def test_vector_benchmarks_validate_as_benchmarks():
 
 
 @pytest.mark.anyio
-async def test_benchmark_runs_on_one_thread_off_the_event_loop(echo_server, tmp_path):
+async def test_benchmark_runs_on_the_orchestrators_thread(echo_server, tmp_path):
     await _run(StubVectorBenchmark, _config(echo_server, tmp_path), no_save=True)
     threads = StubVectorBenchmark.last.threads
-    assert len(threads) == 1 and threading.get_ident() not in threads
+    assert threads == {threading.get_ident()}
 
 
 @pytest.mark.anyio
@@ -500,12 +519,18 @@ async def test_a_lockstep_step_is_one_full_batch(free_port, tmp_path):
 
 
 @pytest.mark.anyio
-async def test_a_slot_reset_returns_as_an_exception_fails_alone(echo_server, tmp_path):
-    result = await _run(UnstableSlotStub, _config(echo_server, tmp_path, episodes=3), no_save=True)
+async def test_the_next_task_may_observe_other_columns(echo_server, tmp_path):
+    result = await _run(TaskShapedStub, _config(echo_server, tmp_path), no_save=True)
+    assert result["mean_success"] == pytest.approx(1.0) and len(_episodes(result)) == 8
+
+
+@pytest.mark.anyio
+async def test_a_result_error_fails_only_its_episode(echo_server, tmp_path):
+    result = await _run(SlotOneResultErrorStub, _config(echo_server, tmp_path, episodes=3), no_save=True)
     episodes = [ep for _, ep in _episodes(result)]
     failed = [ep for ep in episodes if ep.get("failure_reason")]
     assert len(episodes) == 6 and len(failed) == 2  # slot 1 took one episode in each of the two waves
-    assert {ep["failure_reason"] for ep in failed} == {"env_start"}
+    assert {ep["failure_reason"] for ep in failed} == {"env_step"}
     assert all(ep["metrics"]["success"] for ep in episodes if not ep.get("failure_reason"))
 
 

@@ -607,7 +607,7 @@ class Orchestrator:
             )
         finally:
             watchdog.pet(f"{e.safe_name} cleanup")
-            await runner.cleanup(benchmark)
+            benchmark.cleanup()
             await conn.close()
 
         return self._finalize_benchmark(e.collector, e.cfg, e.safe_name, partial=False, server_info=conn.server_info)

@@ -453,6 +453,11 @@ class EpisodeRecorder:
         return True
 
     @property
+    def records_steps(self) -> bool:
+        """Whether ``record_step`` keeps anything (a benchmark can skip building rows otherwise)."""
+        return self._record_step
+
+    @property
     def sid(self) -> str:
         return self._sid
 
@@ -563,6 +568,10 @@ class NullEpisodeRecorder(EpisodeRecorder):
 
     @property
     def is_active(self) -> bool:  # type: ignore[override]
+        return False
+
+    @property
+    def records_steps(self) -> bool:  # type: ignore[override]
         return False
 
     @property

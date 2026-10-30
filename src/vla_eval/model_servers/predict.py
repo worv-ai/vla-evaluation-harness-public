@@ -23,7 +23,7 @@ from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStre
 from anyio.abc import TaskGroup, TaskStatus
 from anyio.to_thread import run_sync as _run_in_thread
 
-from vla_eval.model_servers.base import ModelServer, SessionContext
+from vla_eval.model_servers.base import ModelServer, SessionContext, _collect, _columns, _split_rows
 from vla_eval.model_servers.chunking import ActionChunkBuffer, get_ensemble_fn
 from vla_eval.types import Action, Observation
 
@@ -308,14 +308,29 @@ class PredictModelServer(ModelServer):
         result = self._normalize_result(result, ctx)
         await self._process_and_send(result, ctx)
 
-    async def on_observations(self, items: list[tuple[Observation, SessionContext]]) -> list[Exception | None]:
-        """A vector step: serve buffered chunks, infer the rest in batches of ``max_batch_size`` on the
-        inference thread.  A failed batch fails its items."""
+    def predict_stacked(self, obs: dict[str, Any], ctx_batch: list[SessionContext]) -> dict[str, Any]:
+        """Optional: batched inference on column batches (``obs[key]`` has a row per item), returning
+        action columns (``"actions"``: ``[n, ...]``).  Blocking.  A vector benchmark's steps skip the
+        per-item dicts when this is overridden and no session chunks its actions."""
+        raise NotImplementedError
+
+    async def on_observations(
+        self, obs: dict[str, Any], ctxs: list[SessionContext]
+    ) -> tuple[dict[str, Any], dict[int, Exception]]:
+        """A vector step: :meth:`predict_stacked` in slices of ``max_batch_size`` when overridden and no
+        session chunks; else per item, buffered chunks served and the rest inferred in batches of
+        ``max_batch_size`` on the inference thread.  A failed batch fails its items."""
         if self.continuous_inference or type(self).on_observation is not PredictModelServer.on_observation:
-            return await super().on_observations(items)  # a subclass's own on_observation sees every item
-        errors: list[Exception | None] = [None] * len(items)
+            return await super().on_observations(obs, ctxs)  # a subclass's own on_observation sees every item
+        unchunked = self.chunk_size is None and (
+            not self._session_chunk_sizes or all(self._get_chunk_size(c) is None for c in ctxs)
+        )
+        if unchunked and type(self).predict_stacked is not PredictModelServer.predict_stacked:
+            return await self._observe_stacked(obs, ctxs)
+        items, sent = _split_rows(obs, len(ctxs)), _collect(ctxs)
+        errors: dict[int, Exception] = {}
         todo: list[int] = []
-        for i, (_, ctx) in enumerate(items):
+        for i, ctx in enumerate(ctxs):
             buffered = self._try_serve_from_buffer(ctx)
             if buffered is None:
                 todo.append(i)
@@ -324,24 +339,53 @@ class PredictModelServer(ModelServer):
         size = self.max_batch_size if self.max_batch_size > 1 else max(len(todo), 1)
         for start in range(0, len(todo), size):
             group = todo[start : start + size]
-            obs, ctxs = [items[i][0] for i in group], [items[i][1] for i in group]
+            group_obs, group_ctxs = [items[i] for i in group], [ctxs[i] for i in group]
             try:
                 infer = self.predict_batch if self.max_batch_size > 1 else self._predict_each
-                results = await _run_in_thread(infer, obs, ctxs, limiter=self._thread_limiter)
+                results = await _run_in_thread(infer, group_obs, group_ctxs, limiter=self._thread_limiter)
                 if len(results) != len(group):
                     raise RuntimeError(f"predict_batch returned {len(results)} results for {len(group)} inputs")
             except Exception as exc:
                 for i in group:
                     errors[i] = exc
                 continue
-            for i, ctx, result in zip(group, ctxs, results):
+            for i, ctx, result in zip(group, group_ctxs, results):
                 try:
                     if isinstance(result, Exception):
                         raise result
                     await self._process_and_send(self._normalize_result(result, ctx), ctx)
                 except Exception as exc:
                     errors[i] = exc
-        return errors
+        return _columns(sent, errors, len(ctxs))
+
+    async def _observe_stacked(
+        self, obs: dict[str, Any], ctxs: list[SessionContext]
+    ) -> tuple[dict[str, Any], dict[int, Exception]]:
+        n = len(ctxs)
+        size = self.max_batch_size if self.max_batch_size > 1 else n
+        parts: list[dict[str, Any]] = []
+        errors: dict[int, Exception] = {}
+        for start in range(0, n, size):
+            stop = min(start + size, n)
+            part = {k: v[start:stop] for k, v in obs.items()}
+            try:
+                out = await _run_in_thread(self.predict_stacked, part, ctxs[start:stop], limiter=self._thread_limiter)
+                if "actions" in out:
+                    out = {**out, "actions": np.asarray(out["actions"], np.float32)}
+                if any(len(v) != stop - start for v in out.values()):
+                    raise RuntimeError(f"predict_stacked returned other than {stop - start} rows")
+            except Exception as exc:
+                errors.update(dict.fromkeys(range(start, stop), exc))
+                continue
+            parts.append(out)
+        if not parts:
+            return {}, errors
+        if len(parts) == 1:
+            return parts[0], errors
+        return {
+            k: np.concatenate([p[k] for p in parts]) if isinstance(v, np.ndarray) else [x for p in parts for x in p[k]]
+            for k, v in parts[0].items()
+        }, errors
 
     def _predict_each(self, obs_batch: list[Observation], ctx_batch: list[SessionContext]) -> list[Any]:
         """``predict`` per item; an item's exception fails that item alone."""

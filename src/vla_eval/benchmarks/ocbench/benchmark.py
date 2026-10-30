@@ -4,12 +4,12 @@ OCBench (arXiv:2610.07056, ``pip install "ocbench[mjwarp]"``) has 28 manipulatio
 state observations.  The protocol follows OCBench's ``evaluate_mjwarp``: an episode ends when
 its world terminates or after the task's step limit, and succeeds when ``info["success"]`` is set
 then; bowling, which never flags success, scores its return (``score``, the paper's metric, is
-the return x 100).  Episode ``i`` of a task resets its world with seed
-``SeedSequence([seed, 10]).generate_state(i + 1)[i]``, the seeds OCBench evaluations draw
-for a seed root, so an episode is the same whatever world or ``num_envs`` runs it.
+the return x 100).  Episode ``i`` of a task resets with the seed ``evaluate_mjwarp`` gives its
+``i``-th world, ``make_collection_seeds(seed, 0, 10, ·)[i]`` for the seed root ``seed``, so an
+episode is the same whatever world or ``num_envs`` runs it.
 
-Observation: ``{"state": float32[D]}``.  Action: ``{"actions": float[7]}``, OCBench's joint
-action (six arm deltas and the gripper, in [-1, 1]).
+Observation columns: ``state`` ``float32[n, D]``, ``task_description``.  Action column:
+``actions`` ``[n, 7]``, OCBench's joint action (six arm deltas and the gripper, in [-1, 1]).
 """
 
 from __future__ import annotations
@@ -18,10 +18,10 @@ from typing import Any, ClassVar
 
 import numpy as np
 
-from vla_eval.benchmarks.base import StepResult, VectorStepBenchmark
+from vla_eval.benchmarks.base import Batch, VectorStepBenchmark
 from vla_eval.recording import EpisodeRecorder
 from vla_eval.specs import RAW, DimSpec
-from vla_eval.types import Action, EpisodeResult, Observation, Task
+from vla_eval.types import EpisodeResult, Task
 
 TASKS = [
     *(f"block-{v}-v0" for v in ("single-task1", "double-task1", "double-task2", "triple-task1", "triple-task2")),
@@ -32,6 +32,18 @@ TASKS = [
     *(f"hanoi-{d}-task{i}-v0" for d in ("single", "double", "triple") for i in (1, 2)),
     "bowling-task1-v0",
 ]
+
+
+def episode_seed(root: int, episode_idx: int) -> int:
+    """``make_collection_seeds(root, 0, 10, n)[episode_idx]`` of OCBench's ``impls/envs/streaming_data.py``
+    (not in the ocbench package), the reset seed of world ``episode_idx`` in ``evaluate_mjwarp``."""
+    mask = int(np.random.SeedSequence([int(root)]).generate_state(1, dtype=np.uint32)[0])
+    v = ((10 << 18) | episode_idx) ^ mask  # split 10, collection 0
+    v ^= v >> 16
+    v = (v * 0x7FEB352D) & 0xFFFFFFFF
+    v ^= v >> 15
+    v = (v * 0x846CA68B) & 0xFFFFFFFF
+    return v ^ (v >> 16)
 
 
 class OCBenchBenchmark(VectorStepBenchmark):
@@ -49,20 +61,19 @@ class OCBenchBenchmark(VectorStepBenchmark):
         self._limit = 0
         self._steps = np.zeros(num_envs, np.int64)
         self._returns = np.zeros(num_envs)
-        self._obs: np.ndarray | None = None
-        self._recorders: dict[int, EpisodeRecorder] = {}
+        self._success = np.zeros(num_envs, bool)
+        self._failure = np.zeros(num_envs, bool)
+        self._recorders: list[EpisodeRecorder | None] = [None] * num_envs
+        self._action = np.zeros((num_envs, 7))
 
     def get_tasks(self) -> list[Task]:
         return [{"name": name} for name in self.task_names]
 
-    def _episode_seed(self, episode_idx: int) -> int:
-        return int(np.random.SeedSequence([self.seed, 10]).generate_state(episode_idx + 1, dtype=np.uint32)[-1])
-
-    def reset(self, slots: list[int], tasks: list[Task], recorders: list[EpisodeRecorder]) -> list[Any]:
+    def reset(self, slots: list[int], tasks: list[Task], recorders: list[EpisodeRecorder]) -> Batch:
         import ocbench
 
         name = str(tasks[0]["name"])  # the harness runs one task at a time
-        seeds = np.array([self._episode_seed(int(t["episode_idx"])) for t in tasks], np.uint32)
+        seeds = np.array([episode_seed(self.seed, int(t["episode_idx"])) for t in tasks], np.uint32)
         if name != self._env_name:
             if self._env is not None:
                 self._env.close()
@@ -76,43 +87,39 @@ class OCBenchBenchmark(VectorStepBenchmark):
         else:
             obs, _ = self._env.reset_worlds(np.asarray(slots, np.int32), seeds=seeds)
         # only the reset worlds' rows: reset_worlds recomputes the other worlds' observations, not as step() does
-        self._obs = np.asarray(obs, np.float32)
         self._steps[slots] = 0
         self._returns[slots] = 0.0
-        self._recorders.update(zip(slots, recorders))
-        return [self._obs[slot] for slot in slots]
+        self._success[slots] = self._failure[slots] = False
+        for slot, recorder in zip(slots, recorders):
+            self._recorders[slot] = recorder if recorder.records_steps else None
+        return {"state": np.asarray(obs, np.float32)[slots], "task_description": [name] * len(slots)}
 
-    def step(self, actions: dict[int, Action]) -> dict[int, StepResult]:
-        slots = np.fromiter(actions, np.int64, len(actions))
-        action = np.zeros((self.num_envs, 7))  # idle worlds hold still, as in evaluate_mjwarp
-        action[slots] = np.stack([np.asarray(actions[s]["actions"], np.float64).reshape(7) for s in slots])
-        obs, reward, terminated, _, info = self._env.step(action)
-        self._obs = np.asarray(obs, np.float32)
-        self._steps[slots] += 1
-        self._returns[slots] += np.asarray(reward, np.float64)[slots]
-        done = np.asarray(terminated, bool) | (self._steps >= self._limit)
-        success = np.asarray(info["success"], bool)
-        failure = np.asarray(info.get("failure", np.zeros(self.num_envs, bool)), bool)
-        for s in slots:
-            self._recorders[int(s)].record_step(reward=float(reward[s]), done=bool(done[s]), success=bool(success[s]))
-        return {
-            int(s): StepResult(
-                obs=self._obs[s],
-                reward=float(reward[s]),
-                done=bool(done[s]),
-                info={"success": bool(success[s]), "failure": bool(failure[s]), "return": float(self._returns[s])},
-            )
-            for s in slots
+    def step(self, slots: list[int], actions: Batch) -> tuple[Batch, np.ndarray]:
+        idx = np.asarray(slots, np.int64)
+        self._action[:] = 0.0  # idle worlds hold still, as in evaluate_mjwarp
+        self._action[idx] = np.asarray(actions["actions"], np.float64).reshape(len(slots), 7)
+        obs, reward, terminated, _, info = self._env.step(self._action)
+        reward = np.asarray(reward, np.float64)
+        self._steps[idx] += 1
+        self._returns[idx] += reward[idx]
+        self._success[idx] = np.asarray(info["success"], bool)[idx]
+        self._failure[idx] = np.asarray(info["failure"], bool)[idx] if "failure" in info else False
+        done = (np.asarray(terminated, bool) | (self._steps >= self._limit))[idx]
+        for i, slot in enumerate(slots):
+            recorder = self._recorders[slot]
+            if recorder is not None:
+                recorder.record_step(reward=float(reward[slot]), done=bool(done[i]), success=bool(self._success[slot]))
+        n = len(slots)
+        return {"state": np.asarray(obs, np.float32)[idx], "task_description": [self._env_name] * n}, done
+
+    def result(self, slot: int) -> EpisodeResult:
+        out: EpisodeResult = {
+            "success": bool(self._success[slot]),
+            "failure": bool(self._failure[slot]),
+            "return": float(self._returns[slot]),
         }
-
-    def make_obs(self, raw_obs: Any, slot: int, task: Task) -> Observation:
-        return {"state": raw_obs, "task_description": task["name"]}
-
-    def get_step_result(self, slot: int, step_result: StepResult) -> EpisodeResult:
-        info = step_result.info
-        out: EpisodeResult = {"success": info["success"], "failure": info["failure"], "return": info["return"]}
         if self._env_name.startswith("bowling"):
-            out["score"] = 100.0 * info["return"]
+            out["score"] = 100.0 * out["return"]
         return out
 
     def get_metric_keys(self) -> dict[str, str]:

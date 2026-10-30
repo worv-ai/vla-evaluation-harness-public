@@ -117,24 +117,27 @@ class ModelServer(ABC):
     async def on_observation(self, obs: Observation, ctx: SessionContext) -> None:
         """Called when an observation arrives. Run inference and call ctx.send_action()."""
 
-    async def on_observations(self, items: list[tuple[Observation, SessionContext]]) -> list[Exception | None]:
-        """One step of a vector benchmark: an observation per running slot, each with its slot's session.
+    async def on_observations(
+        self, obs: dict[str, Any], ctxs: list[SessionContext]
+    ) -> tuple[dict[str, Any], dict[int, Exception]]:
+        """One step of a vector benchmark: ``obs`` holds a row per running slot (columns: arrays whose
+        first axis is the row, or lists), ``ctxs[i]`` is row ``i``'s session.
 
-        Each ``ctx`` gets its action through ``ctx.send_action``, as in :meth:`on_observation`; returns the
-        exception that failed each item, or ``None``.  Default: :meth:`on_observation` per item, concurrently.
-        Override to infer the items together (see ``PredictModelServer``)."""
-        errors: list[Exception | None] = [None] * len(items)
+        Returns the actions of the rows that did not fail, in row order, as columns, and the
+        exception of each row that did.  Default: :meth:`on_observation` per row, concurrently."""
+        rows, sent = _split_rows(obs, len(ctxs)), _collect(ctxs)
+        errors: dict[int, Exception] = {}
 
-        async def one(i: int, obs: Observation, ctx: SessionContext) -> None:
+        async def one(i: int) -> None:
             try:
-                await self.on_observation(obs, ctx)
+                await self.on_observation(rows[i], ctxs[i])
             except Exception as exc:
                 errors[i] = exc
 
         async with anyio.create_task_group() as tg:
-            for i, (obs, ctx) in enumerate(items):
-                tg.start_soon(one, i, obs, ctx)
-        return errors
+            for i in range(len(rows)):
+                tg.start_soon(one, i)
+        return _columns(sent, errors, len(rows))
 
     async def on_episode_start(self, config: dict[str, Any], ctx: SessionContext) -> None:
         """Called at episode start. Override to reset model state."""
@@ -176,3 +179,36 @@ class ModelServer(ABC):
         an explicit ``observation_params`` dict to ``PredictModelServer``.
         """
         return {}
+
+
+def _split_rows(batch: dict[str, Any], n: int) -> list[Observation]:
+    """Row dicts of a column batch."""
+    return [{k: v[i] for k, v in batch.items()} for i in range(n)]
+
+
+def _collect(ctxs: list[SessionContext]) -> dict[int, Action]:
+    """Route each ``ctxs[i].send_action`` into the returned dict, under ``i``."""
+    sent: dict[int, Action] = {}
+    for i, ctx in enumerate(ctxs):
+
+        async def send(action: Action, i: int = i) -> None:
+            sent[i] = action
+
+        ctx._send_action_fn = send
+    return sent
+
+
+def _columns(
+    sent: dict[int, Action], errors: dict[int, Exception], n: int
+) -> tuple[dict[str, Any], dict[int, Exception]]:
+    """The sent actions of the rows that did not fail, as columns (lists); a row that sent none, or other
+    keys than the first row, fails."""
+    for i in range(n):
+        if i not in errors and i not in sent:
+            errors[i] = RuntimeError("the model server sent no action")
+    ok = [i for i in range(n) if i not in errors]
+    keys = list(sent[ok[0]]) if ok else []
+    for i in ok:
+        if set(sent[i]) != set(keys):
+            errors[i] = RuntimeError(f"action keys {sorted(sent[i])} differ from the batch's {sorted(keys)}")
+    return {k: [sent[i][k] for i in range(n) if i not in errors] for k in keys}, errors

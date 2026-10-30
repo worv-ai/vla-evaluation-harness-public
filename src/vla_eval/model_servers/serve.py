@@ -37,6 +37,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 import anyio
+import numpy as np
 from anyio.abc import TaskStatus
 from anyio.to_thread import run_sync as _run_in_thread
 import websockets
@@ -230,10 +231,11 @@ async def _handle_connection(
 async def _vector_step(
     payload: dict[str, Any], slots: dict[int, SessionContext], session_id: str, model_server: ModelServer
 ) -> dict[str, Any]:
-    """Handle one VECTOR_STEP: its episode ends, then starts, then one observation per running slot.
+    """Handle one VECTOR_STEP: its episode ends, then starts, then the running slots' observations.
 
     Each slot is its own session: its ``session_id`` is the episode's ``recording.sid``, else
-    ``<connection session>:<slot>``.  Returns the VECTOR_RESULT payload."""
+    ``<connection session>:<slot>``.  Returns the VECTOR_RESULT payload: the actions of the slots that
+    did not fail, in request order, and an error for each that did."""
     errors: dict[int, str] = {}
     for slot, result in payload.get("ends", []):
         ended = slots.pop(slot, None)
@@ -242,7 +244,6 @@ async def _vector_step(
                 await model_server.on_episode_end(result, ended)
             except Exception:
                 logger.exception("Error in on_episode_end session=%s", ended.session_id[:8])
-    actions: dict[int, Action] = {}
     for slot, config in payload.get("starts", []):
         rec = config.get("recording") or {}
         ctx = SessionContext(
@@ -259,31 +260,34 @@ async def _vector_step(
             errors[slot] = f"episode_start_failed: {type(exc).__name__}: {exc}"
             continue
         slots[slot] = ctx
-    items: list[tuple[int, Any, SessionContext]] = []
-    for slot, obs in payload.get("observations", []):
-        if slot in slots:
-            slots[slot]._send_action_fn = partial(_store_action, actions, slot)  # into this step's reply
-            items.append((slot, obs, slots[slot]))
-        else:
-            errors.setdefault(slot, f"observation_failed: slot {slot} has no running episode")
-    try:
-        failures: list[Exception | None] = await model_server.on_observations([(o, c) for _, o, c in items])
-    except Exception as exc:
-        logger.exception("Error in on_observations")
-        failures = [exc] * len(items)
-    for (slot, _, ctx), exc in zip(items, failures):
-        if exc is None and slot not in actions:
-            exc = RuntimeError("the model server sent no action")
-        if exc is not None:
-            errors[slot] = f"observation_failed: {type(exc).__name__}: {exc}"
-            actions.pop(slot, None)
-            continue
-        ctx._increment_step()
-    return {"actions": [[s, a] for s, a in actions.items()], "errors": [[s, e] for s, e in errors.items()]}
-
-
-async def _store_action(actions: dict[int, Action], slot: int, action: Action) -> None:
-    actions[slot] = action
+    order: list[int] = payload.get("slots", [])
+    obs: dict[str, Any] = payload.get("observations", {})
+    ctxs: list[Any] = [slots.get(slot) for slot in order]
+    if None in ctxs:
+        rows = [i for i, c in enumerate(ctxs) if c is not None]
+        for slot, c in zip(order, ctxs):
+            if c is None:
+                errors.setdefault(slot, f"observation_failed: slot {slot} has no running episode")
+        obs = {k: v[rows] if isinstance(v, np.ndarray) else [v[i] for i in rows] for k, v in obs.items()}
+        order = [order[i] for i in rows]
+        ctxs = [ctxs[i] for i in rows]
+    served: list[int] = order
+    actions: dict[str, Any] = {}
+    failures: dict[int, Exception] = {}
+    if ctxs:
+        try:
+            actions, failures = await model_server.on_observations(obs, ctxs)
+        except Exception as exc:
+            logger.exception("Error in on_observations")
+            failures = dict.fromkeys(range(len(ctxs)), exc)
+    for i, exc in failures.items():
+        errors[served[i]] = f"observation_failed: {type(exc).__name__}: {exc}"
+    for i, ctx in enumerate(ctxs):
+        if i not in failures:
+            ctx._increment_step()
+    if len(failures) == len(ctxs):
+        actions = {}
+    return {"actions": actions, "errors": [[s, e] for s, e in errors.items()]}
 
 
 def _make_process_request(model_server: ModelServer) -> Any:

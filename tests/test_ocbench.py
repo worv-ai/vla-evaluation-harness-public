@@ -8,7 +8,7 @@ import types
 import numpy as np
 import pytest
 
-from vla_eval.benchmarks.ocbench.benchmark import OCBenchBenchmark
+from vla_eval.benchmarks.ocbench.benchmark import OCBenchBenchmark, episode_seed
 from vla_eval.recording import NullEpisodeRecorder
 
 
@@ -70,19 +70,29 @@ def _reset(bench, slots, name, idxs):
     return bench.reset(slots, [{"name": name, "episode_idx": i} for i in idxs], [NullEpisodeRecorder()] * len(slots))
 
 
+def _act(slots, value):
+    return {"actions": np.full((len(slots), 7), value)}
+
+
 def test_episodes_reset_with_their_own_seeds_and_end_at_the_limit(envs):
     bench = OCBenchBenchmark(num_envs=3, tasks=["block-single-task1-v0"], seed=7)
-    seeds = np.asarray(np.random.SeedSequence([7, 10]).generate_state(5, dtype=np.uint32), np.float32)
+    seeds = np.asarray([episode_seed(7, i) for i in range(5)], np.float32)  # as the fake state holds them
     obs = _reset(bench, [0, 1], "block-single-task1-v0", [0, 1])
-    assert [o[0] for o in obs] == [seeds[0], seeds[1]] and envs[0].calls == [("reset", [0, 1, 2])]
-    out = bench.step({0: {"actions": np.ones(7)}, 1: {"actions": np.ones(7)}})
+    assert obs["state"][:, 0].tolist() == seeds[:2].tolist() and envs[0].calls == [("reset", [0, 1, 2])]
+    bench.step([0, 1], _act([0, 1], 1.0))
     assert np.all(envs[0].actions[-1][2] == 0) and np.all(envs[0].actions[-1][0] == 1)  # the idle world holds
     obs = _reset(bench, [2], "block-single-task1-v0", [4])  # a refill while slots 0 and 1 run
-    assert obs[0][0] == seeds[4] and obs[0][1] == 0 and envs[0].calls[-1] == ("reset_worlds", [2])
+    assert obs["state"].tolist() == [[seeds[4], 0.0]] and envs[0].calls[-1] == ("reset_worlds", [2])
     for _ in range(4):
-        out = bench.step({0: {"actions": np.zeros(7)}, 1: {"actions": np.zeros(7)}})
-    assert out[0].done and out[1].done  # the task's limit of 5 steps (or success)
-    assert bench.get_step_result(0, out[0])["success"] == bool(envs[0].state[0, 0] % 2)
+        obs, done = bench.step([1, 0], _act([1, 0], 0.0))
+    assert done.tolist() == [True, True]  # the task's limit of 5 steps (or success)
+    assert obs["state"][:, 1].tolist() == [5.0, 5.0] and obs["task_description"] == ["block-single-task1-v0"] * 2
+    assert bench.result(0)["success"] == bool(envs[0].state[0, 0] % 2)
+
+
+def test_seeds_are_ocbench_evaluate_mjwarp_s():
+    # make_collection_seeds(7, 0, 10, n)[0] in OCBench's impls/envs/streaming_data.py
+    assert episode_seed(7, 0) == 631529809 and episode_seed(0, 0) == 4197554498
 
 
 def test_a_new_task_builds_its_env(envs):
@@ -90,5 +100,5 @@ def test_a_new_task_builds_its_env(envs):
     _reset(bench, [0, 1], "block-single-task1-v0", [0, 1])
     _reset(bench, [0], "bowling-task1-v0", [0])
     assert len(envs) == 2 and envs[1].calls == [("reset", [0, 1])]
-    out = bench.step({0: {"actions": np.zeros(7)}})
-    assert "score" in bench.get_step_result(0, out[0]) and "score" in bench.get_metric_keys()
+    bench.step([0], _act([0], 0.0))
+    assert "score" in bench.result(0) and "score" in bench.get_metric_keys()

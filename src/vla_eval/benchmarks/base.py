@@ -16,7 +16,7 @@ from __future__ import annotations
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Dict
 
 from vla_eval.specs import DimSpec
 
@@ -291,43 +291,40 @@ class StepBenchmark(Benchmark, ABC):
 # ---------------------------------------------------------------------------
 
 
+Batch = Dict[str, Any]
+"""Rows of several slots, one column per key: an array whose first axis is the row, or a list (images as
+``{camera: HWC array}``, strings, actions of different lengths).  Row ``i`` belongs to ``slots[i]``."""
+
+
 class VectorStepBenchmark(BenchmarkCommon):
     """Sync benchmark over ``num_envs`` environments stepped together.
 
     For simulators that step many environments per call (MuJoCo Warp / mjlab, ManiSkill3
     on the GPU, Isaac Lab): one process holds them all, and the harness runs up to
-    ``num_envs`` episodes at once.  Each running episode has its own model-server
-    session (its own connection), and their observations go out concurrently, so a
-    batching model server (``PredictModelServer``) infers them in one batch.  Sync mode
-    only: the environments step when every running episode has its action.
+    ``num_envs`` episodes of one task at once.  Observations and actions travel as
+    :data:`Batch` columns, so a step costs the harness the same whatever ``num_envs``.
+    Sync mode only.  Slots are the environment indices ``0 .. num_envs - 1``.
 
-    Slots are the environment indices ``0 .. num_envs - 1``.  Subclasses implement:
-
-        - ``reset(slots, tasks, recorders)`` → the first raw observation of each slot:
+        - ``reset(slots, tasks, recorders)`` → the model's first observation of each slot:
           start the episode ``tasks[i]`` in environment ``slots[i]``, recording through
-          ``recorders[i]`` (never None; Null when recording is off).  An exception in place
-          of a slot's observation fails that episode alone (e.g. an unstable layout).
-        - ``step(actions)`` → ``{slot: StepResult}``: advance every environment one step.
-          ``actions`` maps each running slot to its action and the result holds those
-          slots.  A slot missing from ``actions`` is idle: keep it inert (hold its targets,
-          or ignore it); its state does not matter until it is reset.
-        - ``make_obs(raw_obs, slot, task)`` → observation dict for the model server.
-        - ``get_step_result(slot, step_result)`` → EpisodeResult (at least ``success``).
-        - ``check_done(step_result)`` → bool (default: ``step_result.done``).
+          ``recorders[i]`` (Null when recording is off).  The other slots' episodes go on as
+          if nothing happened.
+        - ``step(slots, actions)`` → ``(observations, done)``: advance every environment one
+          step, ``actions`` row ``i`` for ``slots[i]``; the slots not in ``slots`` are idle
+          (keep them inert).  ``done[i]`` ends ``slots[i]``'s episode; the observation rows of
+          ended slots are not used.
+        - ``result(slot)`` → EpisodeResult (at least ``success``) of the episode that just
+          ended in ``slot``: done, or stopped at the harness's ``max_steps``.  Called before
+          the slot is reset again.
 
     ``partial_reset``: ``True`` when ``reset`` may start some slots while others are
-    mid-episode (per-environment resets), so a finished slot takes the next episode at
-    once.  ``False`` (the default) when the environments start together: the harness
-    resets only when no slot is running and runs the episodes in waves of up to
-    ``num_envs``; a slot that finishes early idles until its wave ends.
+    mid-episode, so a finished slot takes the next episode at once.  ``False`` (the
+    default): the harness resets only when no slot is running and runs the episodes in
+    waves of up to ``num_envs``.
 
     The harness counts steps and ``max_steps`` per episode, and measures each episode's
-    ``elapsed_sec`` as wall time from its reset.
-
-    ``reset``, ``step``, ``make_obs``, ``get_step_result``, ``check_done`` and ``cleanup`` run on
-    one dedicated thread; the constructor, ``get_tasks`` and ``get_metadata`` run
-    on the orchestrator's thread.  Build thread-bound state (a simulator, GL/Vulkan contexts, Isaac
-    Sim's Kit) lazily in the first ``reset``.
+    ``elapsed_sec`` as wall time from its reset.  Every call, the constructor included, runs on
+    the orchestrator's thread.
     """
 
     partial_reset: ClassVar[bool] = False
@@ -339,21 +336,13 @@ class VectorStepBenchmark(BenchmarkCommon):
         self.num_envs = num_envs
 
     @abstractmethod
-    def reset(self, slots: list[int], tasks: list[Task], recorders: list[EpisodeRecorder]) -> list[Any]:
-        """Start ``tasks[i]`` in environment ``slots[i]``; return the first raw observation of each."""
+    def reset(self, slots: list[int], tasks: list[Task], recorders: list[EpisodeRecorder]) -> Batch:
+        """Start ``tasks[i]`` in environment ``slots[i]``; return the first observation of each."""
 
     @abstractmethod
-    def step(self, actions: dict[int, Action]) -> dict[int, StepResult]:
-        """Advance every environment one step; return a result for each slot in ``actions``."""
+    def step(self, slots: list[int], actions: Batch) -> tuple[Batch, np.ndarray]:
+        """Advance every environment one step; return ``slots``' observations and ``done`` flags."""
 
     @abstractmethod
-    def make_obs(self, raw_obs: Any, slot: int, task: Task) -> Observation:
-        """Convert slot ``slot``'s raw observation to the model server's :class:`Observation` format."""
-
-    @abstractmethod
-    def get_step_result(self, slot: int, step_result: StepResult) -> EpisodeResult:
-        """Extract the episode result of slot ``slot`` from its final :class:`StepResult`."""
-
-    def check_done(self, step_result: StepResult) -> bool:
-        """Check if a slot's episode should terminate. Default: ``step_result.done``."""
-        return step_result.done
+    def result(self, slot: int) -> EpisodeResult:
+        """The result of the episode that just ended in ``slot``."""

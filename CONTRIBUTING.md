@@ -98,15 +98,16 @@ See `benchmarks/libero/` for a complete reference implementation.
 ### Vectorized Benchmarks
 
 When the simulator steps many environments per call (MuJoCo Warp / mjlab, ManiSkill3 on
-the GPU), subclass `VectorStepBenchmark` instead: `reset(slots, tasks, recorders)`,
-`step({slot: action}) -> {slot: StepResult}`, `make_obs(raw_obs, slot, task)` and
-`get_step_result(slot, step_result)`, with `num_envs` as a constructor parameter.  Set
-`partial_reset = True` when environments can be reset individually while others run.
-`reset`, `step`, `make_obs` and `cleanup` run on one dedicated thread, so build the simulator
-lazily in the first `reset`.  An episode's outcome must depend only on its task (seed, layout), never on its slot or
-on the episodes running beside it.  The harness runs up to `num_envs` episodes of one task at
-once, one model-server session each, so pair it with a model server whose `max_batch_size` covers
-`num_envs` (times the shards).  Sync mode only; see [RFC-0009](docs/rfcs/0009-vector-benchmarks.md).
+the GPU), subclass `VectorStepBenchmark` instead, with `num_envs` as a constructor parameter:
+`reset(slots, tasks, recorders) -> Batch`, `step(slots, actions) -> (Batch, done)` and
+`result(slot) -> EpisodeResult`.  A `Batch` holds a column per key, an array with a row per slot
+(or a list, for images as `{camera: frame}`, strings, ragged actions), so a step never builds a
+dict per slot.  Set `partial_reset = True` when environments can be reset individually while
+others run.  An episode's outcome must depend only on its task (seed,
+layout), never on its slot or on the episodes running beside it.  The harness runs up to
+`num_envs` episodes of one task at once, one model-server session each, so pair it with a model
+server whose `max_batch_size` covers `num_envs` (times the shards); a `PredictModelServer` that
+overrides `predict_stacked(obs, ctxs)` takes the columns without per-row dicts.  Sync mode only; see [RFC-0009](docs/rfcs/0009-vector-benchmarks.md).
 
 ### Render Backends
 

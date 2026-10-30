@@ -84,15 +84,15 @@ Orchestrator          SyncEpisodeRunner        Connection         Model Server
 A `VectorStepBenchmark` holds `num_envs` environments in one process (GPU-parallel
 simulators such as MuJoCo Warp or ManiSkill3).  `VectorEpisodeRunner` runs up to
 `num_envs` episodes of one task at once over one connection: each step is one `VECTOR_STEP`
-round trip carrying every running slot's observation (and the episodes ending and starting),
-which the server, holding one session per slot, infers as a batch; then `step()` runs once, on
-the runner's simulator thread.  Sync mode only.
+round trip carrying the running slots' observations as columns (and the episodes ending and
+starting), which the server, holding one session per slot, infers as a batch; then `step()` runs
+once.  Sync mode only.
 See [RFC-0009](rfcs/0009-vector-benchmarks.md).
 
 ```
 Orchestrator ── VectorEpisodeRunner ── Connection ──► Model Server
                  │ reset(slots, ...)   VECTOR_STEP     (one session per slot,
-                 │ step({slot: act})  ◄─VECTOR_RESULT   on_observations → predict_batch)
+                 │ step(slots, acts) ◄─VECTOR_RESULT   on_observations → predict_stacked)
                  ▼
           VectorStepBenchmark (num_envs environments)
 ```
