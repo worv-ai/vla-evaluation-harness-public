@@ -188,8 +188,8 @@ async def _handle_connection(ws: Any, model_server: ModelServer, tg: TaskGroup) 
                         continue
                     pending = _Pending(1)
                     await model_server._observe(obs, ids, pending)
-                    if not await wait(pending):
-                        return
+                    if not await wait(pending):  # closed: still read what arrived, e.g. its EPISODE_END
+                        continue
                 finally:
                     _inflight -= 1
                 if pending.errors:
@@ -201,7 +201,7 @@ async def _handle_connection(ws: Any, model_server: ModelServer, tg: TaskGroup) 
                 try:
                     await reply(MessageType.ACTION, columns.split(pending.result(), 1)[0], msg.seq)
                 except websockets.exceptions.ConnectionClosed:
-                    return
+                    continue
 
             elif msg.type == MessageType.VECTOR_STEP:
                 _inflight += 1
@@ -210,7 +210,7 @@ async def _handle_connection(ws: Any, model_server: ModelServer, tg: TaskGroup) 
                 finally:
                     _inflight -= 1
                 if result is None:
-                    return
+                    continue
                 await reply(MessageType.VECTOR_RESULT, result, msg.seq)
 
             elif msg.type == MessageType.EPISODE_END:

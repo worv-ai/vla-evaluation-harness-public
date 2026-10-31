@@ -154,6 +154,28 @@ async def test_a_disconnect_ends_an_episode_waiting_for_a_reply(free_port):
         await stop_server(task)
 
 
+@pytest.mark.anyio
+async def test_an_episode_end_sent_before_a_disconnect_still_counts(free_port):
+    """The harness times out, sends EPISODE_END with its status, then closes: the status reaches the server."""
+    server = ReplayServer()
+    server.mode = "silent"
+    task = await start_server(server, free_port)
+    try:
+        conn = Connection(f"ws://127.0.0.1:{free_port}", timeout=0.2)
+        await conn.connect()
+        await conn.start_episode({"task": {"name": "t"}})
+        with pytest.raises(TimeoutError):
+            await conn.act({"value": 1.0})
+        await conn.end_episode({"status": "error", "failure_reason": "timeout"})
+        await conn.close()
+        with anyio.fail_after(3):
+            while not server.ended:
+                await anyio.sleep(0.02)
+        assert server.ended == [{"status": "error", "failure_reason": "timeout"}]
+    finally:
+        await stop_server(task)
+
+
 def _vstep(slots: list[int], starts: list, values: Any) -> dict[str, Any]:
     v = np.broadcast_to(np.asarray(values, np.float64), (len(slots),)).copy()
     return {"ends": [], "starts": starts, "slots": slots, "observations": {"value": v}}
