@@ -138,11 +138,11 @@ ModelServer (ABC)            ← async callbacks: on_episode_start / on_observat
 ├── PredictModelServer       ← subclass this: predict(obs, row) or predict_batch(obs, rows), batched across
 │                              rows and connections (PredictionEngine); hooks reset_episodes / finish_episodes
 └── DaemonModelServer        ← run(ep) per episode (EpisodeDaemons): the loop decides when to infer, reply or
-    │                          publish, and advances its clock (SimClock when sync, WallClock when live)
-    ├── LiveModelServer      ← continuous inference: each episode's latest observation in a loop,
-    │                          select(action, latency, row) the action to send (LAAS); batch 1
-    └── RTCServer            ← streams each chunk on a 1/hz grid (PUBLISH), refilling ahead; live only
+                               publish, and advances its clock (SimClock when sync, WallClock when live)
 ```
+
+Execution policies are loops on these primitives, not core classes: continuous inference is a few lines of
+`run` (see `DaemonModelServer`'s docstring); RTC streaming is [an example](../examples/live_servers/rtc.py).
 
 Every running episode is a **row** of the model server (a connection's episode, or a vector slot); `row.id` keys
 per-episode state. Hooks and options: see [CONTRIBUTING.md](../CONTRIBUTING.md#adding-a-model-server).

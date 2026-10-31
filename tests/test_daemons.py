@@ -26,7 +26,6 @@ from vla_eval.model_servers.daemons import (
     MailboxOverflow,
     ObservationRequest,
     episode_daemon,
-    run_predict,
 )
 from vla_eval.model_servers.engine import PredictionEngine
 from vla_eval.protocol.messages import MessageType
@@ -867,28 +866,22 @@ async def test_a_stopped_engine_refuses_and_fails_whats_queued():
 
 
 # ---------------------------------------------------------------------------
-# run_predict over a real socket
+# A plain-function run over a real socket
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.anyio
-async def test_run_predict_as_a_plain_function_server(free_port):
-    from functools import partial
-
-    def predict(obs, row):
-        return {"actions": np.full(3, float(obs["value"]) * 10, np.float64)}
-
-    server = DaemonModelServer(run=partial(run_predict, predict=predict))
+async def test_a_plain_function_run_serves_sync_and_live(free_port):
+    server = DaemonModelServer(run=echo)
     task = await start_server(server, free_port)
     try:
         async with Connection(f"ws://127.0.0.1:{free_port}") as conn:
             await conn.start_episode({"task": {}})
-            action = await conn.act({"value": 2.0})
-            assert action["actions"].dtype == np.float64 and action["actions"].tolist() == [20.0] * 3
+            assert (await conn.act({"value": 2.0}))["actions"].tolist() == [2.0, 2.0]
             await conn.start_episode(LIVE)
             await conn.send(MessageType.OBSERVATION, {"value": 3.0})
             msg = await conn.recv(timeout=2)
-            assert msg.type == MessageType.ACTION and msg.payload["actions"].tolist() == [30.0] * 3
+            assert msg.type == MessageType.ACTION and msg.payload["actions"].tolist() == [3.0, 3.0]
             await conn.end_episode({})
     finally:
         await stop_server(task)

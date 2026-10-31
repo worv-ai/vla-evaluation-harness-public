@@ -1,5 +1,7 @@
 # RFC-0003: Model Server Hierarchy
 
+> **Note:** the CI/LAAS design (`continuous_inference`, `LiveModelServer`) is superseded by episode daemons (#97).
+
 - **Author:** @MilkClouds
 - **Status:** Implemented
 - **Type:** Standards Track

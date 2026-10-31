@@ -1,6 +1,7 @@
-"""Live model servers on episode daemons.  ``LiveModelServer``: each episode's latest observation is inferred in a
-loop, one row at a time, and its action sent as soon as it is ready; observations that arrive meanwhile coalesce.
-``RTCServer``: streams a chunk's actions on a time grid (``PUBLISH``), refilling it ahead of time."""
+"""Real-time chunking (RTC) on episode daemons: an execution policy built from vla-eval's core primitives.
+
+``RTCServer`` streams a chunk's actions on a time grid (``PUBLISH``), refilling it ahead of time.  Subclass it and
+override ``predict``; ``tests/test_example_rtc.py`` covers it."""
 
 from __future__ import annotations
 
@@ -9,60 +10,16 @@ from collections import deque
 
 import numpy as np
 
-from vla_eval.types import Action, Observation
 from vla_eval.model_servers.base import Row, Rows
-from vla_eval.model_servers.daemons import (
-    DaemonModelServer,
-    EpisodeClosed,
-    EpisodeContext,
-    ObservationRequest,
-    run_predict,
-    select_action,
-)
-
-
-class LiveModelServer(DaemonModelServer):
-    """Args:
-    chunk_size: Actions of each ``[T, D]`` chunk to choose from; the rest is dropped (no buffer).
-    laas: Send the action ``int(latency * hz)`` steps into the chunk, latency counted from the observation's
-        arrival (else the first).
-    hz: The control rate LAAS assumes.
-
-    Override ``predict`` (and ``select`` to choose the action otherwise).  The hooks run on one model thread;
-    one inference at a time, across episodes; no batching.
-    """
-
-    def __init__(self, *, chunk_size: int | None = None, laas: bool = False, hz: float = 10.0) -> None:
-        rate = hz if math.isfinite(hz) and hz > 0 else None
-        super().__init__(backlog="latest", control_hz=rate, warn_unadvanced=False)  # never reads its clock
-        self.chunk_size = chunk_size
-        self.laas = laas
-        self.hz = hz
-
-    def predict(self, obs: Observation, row: Row) -> Action:
-        """One observation of the episode in ``row``; ``"actions"``, if any, is ``[T, D]`` or ``[D]``.  Blocking."""
-        raise NotImplementedError(f"{type(self).__name__} must override predict()")
-
-    def select(self, action: Action, latency: float, row: Row) -> Action:
-        """The action to send from ``predict``'s output, ``latency`` seconds after its observation arrived:
-        the chunk trimmed to ``chunk_size``, float32, its LAAS step ``int(latency * hz)`` (else its first)."""
-        hz = self.hz if self.laas and self.hz > 0 else None
-        return select_action(action, latency, chunk_size=row.episode.chunk_size, hz=hz)
-
-    async def on_episode_start(self, rows: Rows) -> dict[int, Exception] | None:
-        for episode in rows.episodes:
-            episode.chunk_size = self.chunk_size
-        return await super().on_episode_start(rows)
-
-    async def run(self, ep: EpisodeContext) -> None:
-        await run_predict(ep, self.predict, select=self.select)
+from vla_eval.model_servers.daemons import DaemonModelServer, EpisodeClosed, EpisodeContext, ObservationRequest
+from vla_eval.types import Observation
 
 
 class RTCServer(DaemonModelServer):
     """Streams each chunk on a ``1/hz`` grid anchored at its observation's admission: slot ``k`` is published only
     within ``[t0 + k/hz, t0 + (k+1)/hz)`` (at a tick, or as its chunk lands after a tick that sent nothing), expired
     slots are skipped, and the newest observation is inferred once ``refill_at`` or fewer actions remain.  Live clients
-    with ``publish`` and ``episode_error`` only.
+    with ``publish`` and ``episode_error`` only.  Skipping the slots its latency outlived is LAAS-style selection.
 
     Override ``predict`` to return a ``[T, D]`` chunk (model thread).  ``warmup_obs``: predicted once before the first
     episode starts; a cold inference longer than the chunk's horizon (``chunk_size / hz``) is dropped unpublished.

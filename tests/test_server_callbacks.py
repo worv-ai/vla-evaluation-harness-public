@@ -14,12 +14,11 @@ from anyio.lowlevel import checkpoint
 import pytest
 
 from vla_eval.connection import Connection
-from vla_eval.model_servers.base import Episode, ModelServer, Row, Rows
-from vla_eval.model_servers.live import LiveModelServer
+from vla_eval.model_servers.base import ModelServer, Rows
 from vla_eval.model_servers.predict import PredictModelServer
 from vla_eval.protocol.messages import MessageType
 
-from tests.conftest import EMPTY, LiveLogServer, LogServer, start_server, stop_server
+from tests.conftest import LogServer, LoopLogServer, start_server, stop_server
 
 LIVE = {"task": {"name": "t"}, "mode": "live"}
 
@@ -334,11 +333,11 @@ async def test_a_row_ending_before_the_model_call_is_not_inferred():
 
 
 # ---------------------------------------------------------------------------
-# LiveModelServer: the latest observation of each episode, inferred in a loop
+# An episode loop on the latest observation (continuous inference)
 # ---------------------------------------------------------------------------
 
 
-async def _live(server: LiveModelServer, port: int, values: list[float], gap: float = 0.0) -> list[Any]:
+async def _live(server: ModelServer, port: int, values: list[float], gap: float = 0.0) -> list[Any]:
     """Send ``values`` in one live episode (``gap`` apart), then collect the replies until they stop."""
     task = await start_server(server, port)
     try:
@@ -364,91 +363,23 @@ async def _live(server: LiveModelServer, port: int, values: list[float], gap: fl
 
 @pytest.mark.anyio
 async def test_live_coalesces_to_the_latest_observation_and_counts_every_step(free_port):
-    server = LiveLogServer(delay=0.3)
+    server = LoopLogServer(delay=0.3)
     got = await _live(server, free_port, [1.0, 2.0, 3.0])
     assert [(t, i, _value(p)) for t, i, p in got] == [(MessageType.ACTION, 0, 1.0), (MessageType.ACTION, 2, 3.0)]
     assert server.predicted == [(1.0, 0), (3.0, 2)]
 
 
 @pytest.mark.anyio
-async def test_live_laas_counts_latency_from_admission(free_port):
-    server = LiveLogServer(delay=0.25, out="ramp", chunk_size=4, laas=True, hz=10.0)
-    got = await _live(server, free_port, [1.0])
-    chunk = 1.0 + np.arange(42).reshape(6, 7)
-    assert any(np.array_equal(got[0][2]["actions"], chunk[k]) for k in (2, 3))  # never past chunk_size=4
-
-
-def test_laas_selects_the_step_its_latency_reached():
-    server = LiveLogServer(laas=True, hz=10.0, chunk_size=4)
-    row = Row(0, 0, True, Episode(config={}, episode_id="e", session_id="s", chunk_size=4))
-    chunk = {"actions": np.arange(42, dtype=np.float64).reshape(6, 7)}
-    assert np.array_equal(server.select({"actions": np.ones(7)}, 0.0, row)["actions"], np.ones(7))
-    assert np.array_equal(server.select(chunk, 0.25, row)["actions"], chunk["actions"][2])
-    assert np.array_equal(server.select(chunk, 9.0, row)["actions"], chunk["actions"][3])  # trimmed first
-    assert server.select(chunk, 0.0, row)["actions"].dtype == np.float32
-    assert server.select({"foo": 1.0}, 0.0, row) == {"foo": 1.0}
-    row.episode.chunk_size = None
-    assert np.array_equal(server.select(chunk, 9.0, row)["actions"], chunk["actions"][5])
-    server.laas = False
-    assert np.array_equal(server.select(chunk, 0.25, row)["actions"], chunk["actions"][0])
-
-
-@pytest.mark.anyio
-async def test_live_passes_an_action_without_actions_through(free_port):
-    got = await _live(LiveLogServer(out="noactions"), free_port, [1.0, 2.0], gap=0.2)
-    assert [(i, p) for _, i, p in got] == [(0, {"foo": 1.0}), (1, {"foo": 2.0})]
-
-
-class SendFailsOnceServer(LiveLogServer):
-    async def send_action(self, rows: Rows, actions: Any) -> None:
-        if not self.predicted[1:]:
-            raise RuntimeError("send failed")
-        await super().send_action(rows, actions)
-
-
-@pytest.mark.parametrize(
-    ("cls", "first", "error"),
-    [
-        (LiveLogServer, -1.0, "bad observation"),
-        (LiveLogServer, EMPTY, "empty action chunk"),
-        (SendFailsOnceServer, 1.0, "send failed"),
-    ],
-)
-@pytest.mark.anyio
-async def test_live_a_failure_errors_its_observation_and_the_loop_goes_on(free_port, cls, first, error):
-    got = await _live(cls(), free_port, [first, 2.0], gap=0.2)
+async def test_live_a_failure_errors_its_observation_and_the_loop_goes_on(free_port):
+    got = await _live(LoopLogServer(), free_port, [-1.0, 2.0], gap=0.2)
     assert [(t, i) for t, i, _ in got] == [(MessageType.ERROR, 0), (MessageType.ACTION, 1)]
-    assert error in got[0][2]["error"] and _value(got[1][2]) == 2.0
-
-
-class SelectLastServer(LiveModelServer):
-    """Overrides predict and select only: the default reset and finish hooks run."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.latencies: list[float] = []
-
-    def predict(self, obs, row):
-        time.sleep(0.2)
-        return {"actions": float(obs["value"]) + np.arange(42, dtype=np.float64).reshape(6, 7)}
-
-    def select(self, action, latency, row):
-        self.latencies.append(latency)
-        return {"actions": np.asarray(action["actions"][-1], np.float32)}
-
-
-@pytest.mark.anyio
-async def test_live_select_chooses_the_action_after_the_inference(free_port):
-    server = SelectLastServer()
-    got = await _live(server, free_port, [1.0])
-    assert np.array_equal(got[0][2]["actions"], 1.0 + np.arange(35, 42))
-    assert server.latencies[0] >= 0.2
+    assert "bad observation" in got[0][2]["error"] and _value(got[1][2]) == 2.0
 
 
 @pytest.mark.anyio
 async def test_live_episode_end_waits_for_the_inference_in_flight(free_port):
     """The in-flight action is dropped, and the next episode on the connection gets a loop of its own."""
-    server = LiveLogServer(delay=0.3)
+    server = LoopLogServer(delay=0.3)
     task = await start_server(server, free_port)
     try:
         async with Connection(f"ws://127.0.0.1:{free_port}") as conn:
@@ -466,7 +397,7 @@ async def test_live_episode_end_waits_for_the_inference_in_flight(free_port):
 
 @pytest.mark.anyio
 async def test_a_server_without_vector_step_refuses_it(free_port):
-    task = await start_server(LiveLogServer(), free_port)
+    task = await start_server(LoopLogServer(), free_port)
     conn = Connection(f"ws://127.0.0.1:{free_port}")
     await conn.connect()
     try:

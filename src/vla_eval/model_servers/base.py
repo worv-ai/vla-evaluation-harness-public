@@ -1,7 +1,7 @@
 """Model-server contract: every running episode is a row.  ``serve`` calls the async callbacks with batches of rows;
 the server replies with ``send_action`` / ``send_error``.  ``PredictModelServer`` (predict.py, batched
-request/response) and ``DaemonModelServer`` (daemons.py, a loop per episode; ``LiveModelServer`` in live.py) build
-on it."""
+request/response) and ``DaemonModelServer`` (daemons.py, a loop per episode) build on it.  Execution policies such
+as RTC streaming are examples on top (``examples/live_servers/``)."""
 
 from __future__ import annotations
 

@@ -9,7 +9,6 @@ terminal failure (``ep.fail``) for any ordinary exception escaping an episode ta
 
 from __future__ import annotations
 
-import contextlib
 import logging
 import math
 import time
@@ -19,7 +18,6 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, TypeVar
 
 import anyio
-import numpy as np
 from anyio.lowlevel import checkpoint
 from chrono_daemon import Clock, SimClock, WallClock
 
@@ -51,8 +49,6 @@ __all__ = [
     "SimClock",
     "WallClock",
     "episode_daemon",
-    "run_predict",
-    "select_action",
 ]
 
 logger = logging.getLogger(__name__)
@@ -427,7 +423,7 @@ class EpisodeDaemons:
 
     async def on_observation(self, obs: Batch, rows: Rows) -> None:
         seq = rows._pending.seq if rows._pending is not None else None
-        wall = time.monotonic()  # admission: LAAS counts the model queue too
+        wall = time.monotonic()  # admission: latency counts the model queue too
         n = len(rows)
         for i in range(n):
             one, batch = (rows, obs) if n == 1 else (rows.take([i]), columns.take(obs, [i]))
@@ -534,7 +530,16 @@ def _check_rate(hz: Any) -> float:
 
 class DaemonModelServer(ModelServer):
     """A ``ModelServer`` whose episodes each run ``run(ep)`` (override it, or pass ``run=``) with ``EpisodeDaemons``;
-    ``reset_episodes`` / ``finish_episodes`` run on the model thread.  ``requires``: client capabilities needed."""
+    ``reset_episodes`` / ``finish_episodes`` run on the model thread.  ``requires``: client capabilities needed.
+
+    Continuous inference is a few lines (``backlog="latest"``: each inference takes the newest observation)::
+
+        async def run(self, ep):
+            async for request in ep.observations():
+                await request.reply(await ep.call(self.predict, request.obs, request.row))
+
+    Streaming a chunk on a time grid (RTC): ``examples/live_servers/rtc.py``.
+    """
 
     supports_vector_step = False
     requires: frozenset[str] = frozenset()
@@ -601,61 +606,3 @@ class DaemonModelServer(ModelServer):
 
     async def on_episode_end(self, rows: Rows, results: list[EpisodeResult]) -> None:
         await self.daemons.on_episode_end(rows, results)
-
-
-# ---------------------------------------------------------------------------
-# Plain-function parts
-# ---------------------------------------------------------------------------
-
-
-def select_action(action: Action, latency: float, *, chunk_size: int | None = None, hz: float | None = None) -> Action:
-    """The action to send from a model output: without ``"actions"`` as is; ``[D]`` as float32; ``[T, D]`` trimmed
-    to ``chunk_size``, float32, its row ``int(latency * hz)`` (clamped to the last) when ``hz`` is given, else 0."""
-    if "actions" not in action:
-        return action
-    a = np.asarray(action["actions"])
-    if a.ndim != 2:
-        return {**action, "actions": np.asarray(a, np.float32)}
-    a = np.asarray(a[:chunk_size], np.float32)
-    if not len(a):
-        raise ValueError("an empty action chunk")
-    steps = 0
-    if hz is not None:
-        steps = int(latency * hz)
-        if steps >= len(a):
-            logger.warning("LAAS: %d steps late for a %d-step chunk; sending its last action", steps, len(a))
-    return {**action, "actions": a[min(steps, len(a) - 1)]}
-
-
-async def run_predict(
-    ep: EpisodeContext,
-    predict: Callable[[Observation, Row], Action],
-    *,
-    select: Callable[[Action, float, Row], Action] | None = None,
-) -> None:
-    """Reply to each observation the loop reaches with ``select(predict(obs, row), latency, row)`` (one model-thread
-    call; latency: wall seconds since admission).  A failure errors that observation and the loop goes on."""
-    async for request in ep.observations():
-        try:
-            action = await ep.call(_predict_select, predict, select, request)
-        except EpisodeClosed:
-            return
-        except Exception as exc:
-            with contextlib.suppress(Exception):
-                await request.error(exc)
-            continue
-        try:
-            await request.reply(action)
-        except Exception as exc:
-            ep.logger.warning("reply failed step=%d: %r", request.step, exc)
-            with contextlib.suppress(Exception):
-                await request.error(exc)
-
-
-def _predict_select(
-    predict: Callable[[Observation, Row], Action],
-    select: Callable[[Action, float, Row], Action] | None,
-    request: ObservationRequest,
-) -> Action:
-    action = predict(request.obs, request.row)
-    return select(action, time.monotonic() - request.admitted_wall, request.row) if select else action
