@@ -162,7 +162,9 @@ class PredictionEngine:
             raise EpisodeClosed("the episode ended")
         if rid in server._failed:
             raise EpisodeClosed("the episode failed")
-        result = await self.infer(columns.stack([obs]), server._rows([rid]), wait_for_batch=wait_for_batch)
+        idx = np.asarray([rid], np.int64)  # this incarnation, at the row's own step
+        rows = Rows(idx, np.asarray([row.step], np.int64), server._table[idx], server._gen[idx])
+        result = await self.infer(columns.stack([obs]), rows, wait_for_batch=wait_for_batch)
         if result.errors:
             error = result.errors[0]
             raise EpisodeClosed(str(error)) if error is _ENDED else error

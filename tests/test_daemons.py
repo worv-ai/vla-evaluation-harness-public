@@ -745,10 +745,12 @@ class Raw(Daemon):
     def __init__(self, **kw: Any) -> None:
         super().__init__(**kw)
         self.batches: list[tuple[list[int], str]] = []
+        self.steps: list[list[int]] = []
         self.engine = PredictionEngine(self, predict_batch=self._forward, max_batch_size=8, max_wait_time=0.2)
 
     def _forward(self, obs, rows):
         self.batches.append((rows.ids.tolist(), threading.current_thread().name))
+        self.steps.append(rows.step.tolist())
         v = np.asarray(obs["value"], np.float32)
         return {"actions": v[:, None, None] + np.arange(6, dtype=np.float32).reshape(1, 3, 2)}  # full chunks
 
@@ -776,6 +778,7 @@ async def test_infer_one_batches_episodes_on_the_model_thread_and_returns_full_c
             tg.start_soon(_observe, server, a, 1.0)
             tg.start_soon(_observe, server, b, 2.0)
     assert server.batches == [([a, b], "model_0")] and server.shapes == [(3, 2), (3, 2)]
+    assert server.steps == [[0, 0]]  # each observation's own step
 
 
 @pytest.mark.anyio
