@@ -599,9 +599,17 @@ async def _rtc(server: RTCServer, wakes: list[float], arrivals: list[tuple[float
 
 @pytest.mark.anyio
 async def test_rtc_publishes_the_current_slot_once_and_never_a_future_one():
-    """hz=1, admitted at 0.3: ticks at 2.8 and 3.0 give slot 2 once; slot 3 waits for 3.3."""
+    """hz=1, admitted at 0.3: slot 0 as the chunk lands; ticks at 2.8 and 3.0 give slot 2 once; slot 3 waits for
+    3.3."""
     ep = await _rtc(Chunker(hz=1.0), [0.3, 2.8, 3.0, 3.3, 4.0], [(0.3, 0.3, 1.0)])
-    assert ep.published == [(2.8, 102.0), (3.3, 103.0)]
+    assert ep.published == [(0.3, 100.0), (2.8, 102.0), (3.3, 103.0)]
+
+
+@pytest.mark.anyio
+async def test_rtc_publishes_a_landing_chunk_whose_tick_had_nothing_to_send():
+    """chunk_size=1: each chunk lands after its tick and its only slot expires at the next one."""
+    ep = await _rtc(Chunker(chunk=1, hz=1.0), [0.0, 1.0, 2.0], [(0.0, 0.0, 1.0), (1.0, 1.0, 2.0), (2.0, 2.0, 3.0)])
+    assert ep.published == [(0.0, 100.0), (1.0, 200.0), (2.0, 300.0)]
 
 
 @pytest.mark.anyio
@@ -609,7 +617,7 @@ async def test_rtc_skips_expired_slots_and_discards_a_fully_expired_chunk():
     ep = await _rtc(Chunker(chunk=2, hz=1.0), [5.0, 5.5, 6.0], [(5.0, 0.0, 1.0)])  # admitted 5 s before
     assert ep.published == []
     ep = await _rtc(Chunker(hz=10.0), [0.0, 0.1, 0.35, 0.4], [(0.0, 0.0, 1.0)])
-    assert ep.published == [(0.1, 101.0), (0.35, 103.0), (0.4, 104.0)]  # slot 2 expired unseen
+    assert ep.published == [(0.0, 100.0), (0.1, 101.0), (0.35, 103.0), (0.4, 104.0)]  # slot 2 expired unseen
 
 
 @pytest.mark.anyio
@@ -651,15 +659,16 @@ async def test_rtc_warms_up_on_warmup_obs_once_before_the_first_episode(free_por
 @pytest.mark.parametrize("blocked", [False, True])
 @pytest.mark.anyio
 async def test_rtc_refills_ahead_and_a_replacement_during_a_blocked_publish_keeps_its_cursor(blocked):
-    """Plan 1 (admitted 0.0) streams slots 1, 2; at 2.0 two slots are left, so the observation admitted at 1.0 is
-    inferred; its plan (anchored at 1.0, slot 0 expired) takes over at slot 2 even if it lands mid-publish."""
+    """Plan 1 (admitted 0.0) streams slots 0 (as it lands), 1, 2; at 2.0 two slots are left, so the observation
+    admitted at 1.0 is inferred; its plan (anchored at 1.0, slot 0 expired) takes over at slot 2 even mid-publish."""
     server = Chunker(chunk=4, hz=1.0, refill_at=2)
     ep = FakeEp(server, ScriptClock([0.0, 1.0, 2.0, 3.0, 4.0]), [(0.0, 0.0, 1.0), (1.0, 1.0, 2.0)])
     ep.block = anyio.Event() if blocked else None
     async with anyio.create_task_group() as tg:
         ep.tg = tg
         await server.run(cast(Any, ep))
-    assert ep.published == [(1.0, 101.0), (2.0, 102.0), (3.0, 202.0), (4.0, 203.0)] and ep.calls == 2
+    expected = [(0.0, 100.0), (1.0, 101.0), (2.0, 102.0), (3.0, 202.0), (4.0, 203.0)]
+    assert ep.published == expected and ep.calls == 2
 
 
 @pytest.mark.parametrize("shape", [(0, 2), (2,)])

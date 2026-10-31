@@ -60,8 +60,9 @@ class LiveModelServer(DaemonModelServer):
 
 class RTCServer(DaemonModelServer):
     """Streams each chunk on a ``1/hz`` grid anchored at its observation's admission: slot ``k`` is published only
-    within ``[t0 + k/hz, t0 + (k+1)/hz)``, expired slots are skipped, and the newest observation is inferred once
-    ``refill_at`` or fewer actions remain.  Live clients with ``publish`` and ``episode_error`` only.
+    within ``[t0 + k/hz, t0 + (k+1)/hz)`` (at a tick, or as its chunk lands after a tick that sent nothing), expired
+    slots are skipped, and the newest observation is inferred once ``refill_at`` or fewer actions remain.  Live clients
+    with ``publish`` and ``episode_error`` only.
 
     Override ``predict`` to return a ``[T, D]`` chunk (model thread).  ``warmup_obs``: predicted once before the first
     episode starts; a cold inference longer than the chunk's horizon (``chunk_size / hz``) is dropped unpublished.
@@ -90,9 +91,22 @@ class RTCServer(DaemonModelServer):
         plan: deque[np.ndarray] = deque()
         plan_t0, consumed, busy = 0.0, 0, False  # the plan's anchor; slots passed; one refill at a time
         warned = False  # a dropped chunk warns once per episode
+        sent = False  # this tick published; else a chunk landing before the next tick publishes its current slot
+
+        def current() -> np.ndarray | None:
+            """Drop expired slots (each at most once); take the current interval's slot, never a future one."""
+            nonlocal consumed
+            due = math.floor((ep.clock.now() - plan_t0) * self.hz)
+            while consumed < due and plan:
+                plan.popleft()
+                consumed += 1
+            if plan and consumed == due:
+                consumed += 1  # committed before any await
+                return plan.popleft()
+            return None
 
         async def infer(request: ObservationRequest) -> None:
-            nonlocal busy, plan_t0, consumed, warned
+            nonlocal busy, plan_t0, consumed, warned, sent
             try:
                 chunk = np.asarray(await ep.call(self.predict, request.obs, request.row), np.float32)
                 chunk = chunk[: self.chunk_size]
@@ -116,20 +130,22 @@ class RTCServer(DaemonModelServer):
                 return
             except Exception as exc:
                 await request.error(exc)  # this observation failed; the episode goes on
+                return
             finally:
                 busy = False
+            if not sent and (action := current()) is not None:
+                sent = True
+                await ep.publish({"actions": action})
 
         async for _ in ep.clock.every(1.0 / self.hz, first="now"):
             if ep.closing:
                 return
-            due = math.floor((ep.clock.now() - plan_t0) * self.hz)
-            while consumed < due and plan:  # expired slots, each at most once
-                plan.popleft()
-                consumed += 1
-            if not busy and len(plan) <= self.refill_at and (request := ep.receive_nowait()) is not None:
-                busy = True
-                ep.start_soon(infer, request)
-            if plan and consumed == due:  # the current interval's slot, never a future one
-                action = plan.popleft()
-                consumed += 1  # committed before the await
+            sent = False
+            action = current()
+            if not busy and len(plan) + (action is not None) <= self.refill_at:
+                if (request := ep.receive_nowait()) is not None:
+                    busy = True
+                    ep.start_soon(infer, request)
+            if action is not None:
+                sent = True
                 await ep.publish({"actions": action})
