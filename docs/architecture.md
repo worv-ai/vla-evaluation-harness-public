@@ -101,7 +101,7 @@ Every message is a msgpack binary frame:
 
 ```python
 {
-    "type": "observation" | "action" | "episode_start" | "episode_end" | "error",
+    "type": "observation" | "action" | "episode_start" | "episode_end" | "error" | ...,
     "payload": dict[str, Any],   # benchmark-specific, no fixed schema
     "seq": int,                  # monotonically increasing sequence number
     "timestamp": float,          # wall-clock Unix epoch
@@ -132,11 +132,14 @@ Observations and actions are `dict[str, Any]`; the framework imposes **no fixed 
 
 ```
 ModelServer (ABC)            ← async callbacks: on_episode_start / on_observation / on_episode_end,
-│                              answered with send_action / send_error
+│                              answered with send_action / send_error; fail_episode ends one as failed
 ├── PredictModelServer       ← subclass this: predict(obs, row) or predict_batch(obs, rows), batched across
-│                              rows and connections; hooks reset_episodes / finish_episodes
-└── LiveModelServer          ← continuous inference: predict each episode's latest observation in a loop,
-                               select(action, latency, row) the action to send (LAAS); batch 1
+│                              rows and connections (PredictionEngine); hooks reset_episodes / finish_episodes
+└── DaemonModelServer        ← run(ep) per episode (EpisodeDaemons): the loop decides when to infer, reply or
+    │                          publish, and advances its clock (SimClock when sync, WallClock when live)
+    ├── LiveModelServer      ← continuous inference: each episode's latest observation in a loop,
+    │                          select(action, latency, row) the action to send (LAAS); batch 1
+    └── RTCServer            ← streams each chunk on a 1/hz grid (PUBLISH), refilling ahead; live only
 ```
 
 Every running episode is a **row** of the model server (a connection's episode, or a vector slot); `row.id` keys
@@ -144,6 +147,13 @@ per-episode state. Hooks and options: see [CONTRIBUTING.md](../CONTRIBUTING.md#a
 
 One call into the model runs at a time, on one model thread. The harness ends every episode the server started
 with `EPISODE_END {status, failure_reason}`; the server ends those a client dropped as `aborted`.
+
+Live episodes may get server-initiated messages, each negotiated in HELLO (`capabilities: {"publish": true,
+"episode_error": true}`) and bound to the episode's `EPISODE_START` seq: `PUBLISH {action, index, source_seq}`
+(applied latest-wins with replies; a stale index drops) and `EPISODE_ERROR {error, failure_reason: "model_act"}`
+(the client ends the episode `model_act`). A server that `requires` a capability refuses an old client's start and
+closes its socket. `EPISODE_START` may carry `control_hz` (the live runner's `hz`, else
+`BenchmarkCommon.control_hz`): a `DaemonModelServer` loop's `ep.sim_dt`.
 
 The server runner (`model_servers/serve.py`) wraps any `ModelServer` into a WebSocket server with `serve(model_server, host, port)`.
 
