@@ -10,6 +10,7 @@ from typing import Any
 
 import anyio
 import numpy as np
+from anyio.lowlevel import checkpoint
 import pytest
 
 from vla_eval.connection import Connection
@@ -627,9 +628,11 @@ async def _requests(server: PredictModelServer, obs: list[dict[str, Any]]) -> li
     from vla_eval.model_servers.predict import _Request
 
     ids = await server._start_episodes([({}, "s")] * len(obs))
-    return [
-        _Request({k: np.asarray([v]) for k, v in o.items()}, server._rows([i]), wait=False) for o, i in zip(obs, ids)
-    ]
+    requests = []
+    for o, i in zip(obs, ids):
+        assert isinstance(i, int)
+        requests.append(_Request({k: np.asarray([v]) for k, v in o.items()}, server._rows([i]), wait=False))
+    return requests
 
 
 @pytest.mark.anyio
@@ -658,6 +661,6 @@ async def test_a_row_ending_before_the_model_call_is_not_inferred():
     (req,) = await _requests(server, [{"value": 1.0}])
     async with anyio.create_task_group() as tg:
         tg.start_soon(server._run, [req])
-        await anyio.lowlevel.checkpoint()  # the dispatcher runs to its first checkpoint
+        await checkpoint()  # the dispatcher runs to its first checkpoint
         server._gen[0] += 1
     assert server.predicted == [] and set(req.errors) == {0}
