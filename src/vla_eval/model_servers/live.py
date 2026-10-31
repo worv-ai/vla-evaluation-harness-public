@@ -63,16 +63,24 @@ class RTCServer(DaemonModelServer):
     within ``[t0 + k/hz, t0 + (k+1)/hz)``, expired slots are skipped, and the newest observation is inferred once
     ``refill_at`` or fewer actions remain.  Live clients with ``publish`` and ``episode_error`` only.
 
-    Override ``predict`` to return a ``[T, D]`` chunk (model thread).
+    Override ``predict`` to return a ``[T, D]`` chunk (model thread).  ``warmup_obs``: predicted once before the first
+    episode starts; a cold inference longer than the chunk's horizon (``chunk_size / hz``) is dropped unpublished.
     """
 
     requires = frozenset({"publish", "episode_error"})
 
-    def __init__(self, *, chunk_size: int = 8, hz: float = 10.0, refill_at: int = 3) -> None:
+    def __init__(
+        self, *, chunk_size: int = 8, hz: float = 10.0, refill_at: int = 3, warmup_obs: Observation | None = None
+    ) -> None:
         if not (math.isfinite(hz) and hz > 0 and chunk_size >= 1 and refill_at >= 0):
             raise ValueError("RTCServer needs a finite hz > 0, chunk_size >= 1 and refill_at >= 0")
         super().__init__(backlog="latest", control_hz=hz)
         self.chunk_size, self.hz, self.refill_at = chunk_size, hz, refill_at
+        self.warmup_obs = warmup_obs
+
+    def warmup(self, rows: Rows) -> None:
+        if self.warmup_obs is not None:
+            self.predict(self.warmup_obs, rows[0])
 
     def predict(self, obs: Observation, row: Row) -> np.ndarray:
         """A ``[T, D]`` action chunk for one observation.  Blocking."""
@@ -81,17 +89,26 @@ class RTCServer(DaemonModelServer):
     async def run(self, ep: EpisodeContext) -> None:
         plan: deque[np.ndarray] = deque()
         plan_t0, consumed, busy = 0.0, 0, False  # the plan's anchor; slots passed; one refill at a time
+        warned = False  # a dropped chunk warns once per episode
 
         async def infer(request: ObservationRequest) -> None:
-            nonlocal busy, plan_t0, consumed
+            nonlocal busy, plan_t0, consumed, warned
             try:
                 chunk = np.asarray(await ep.call(self.predict, request.obs, request.row), np.float32)
                 chunk = chunk[: self.chunk_size]
                 if chunk.ndim != 2 or not len(chunk):
                     raise ValueError(f"predict must return a [T, D] chunk, got shape {chunk.shape}")
-                skip = max(0, math.floor((ep.clock.now() - request.admitted_at) * self.hz))
-                if skip >= len(chunk):
-                    return  # every slot expired: discarded
+                late = ep.clock.now() - request.admitted_at
+                skip = max(0, math.floor(late * self.hz))
+                if skip >= len(chunk):  # every slot expired: discarded
+                    log = ep.logger.debug if warned else ep.logger.warning
+                    warned = True
+                    log(
+                        "inference %.0f ms exceeds the chunk horizon %.0f ms; chunk dropped",
+                        late * 1e3,
+                        len(chunk) / self.hz * 1e3,
+                    )
+                    return
                 plan.clear()
                 plan.extend(chunk[skip:])
                 plan_t0, consumed = request.admitted_at, skip

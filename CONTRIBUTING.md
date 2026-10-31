@@ -179,13 +179,15 @@ Every running episode is a row; inference and the episode hooks are batched over
 Continuous inference (real-time, live mode): subclass `LiveModelServer` (`model_servers/live.py`) with the same
 `predict` / `reset_episodes` / `finish_episodes`. Each episode's latest observation is inferred in a loop, one at a
 time, and `select(action, latency, row)` picks what to send (default: the first action, or with `laas=True, hz=...`
-the one `latency * hz` steps in). No batching and no `VECTOR_STEP`. `RTCServer` streams chunks instead (`PUBLISH`).
+the one `latency * hz` steps in). No batching and no `VECTOR_STEP`. `RTCServer` streams chunks instead (`PUBLISH`);
+pass `warmup_obs` (or override `warmup`), since a cold chunk outlasting its `chunk_size / hz` horizon is dropped.
 
 Your own real-time loop: subclass `DaemonModelServer` (`model_servers/daemons.py`) and write `run(self, ep)`, once
 per episode: answer `ep.observations()` with `req.reply(action)`, call the model via `ep.call` (or a shared
 `PredictionEngine.infer_one` to batch episodes), stream with `ep.publish` (live only). `ep.clock` is a fresh `SimClock`
 per sync episode that the loop advances (by `ep.sim_dt`), else `WallClock`. An exception escaping the loop fails the
-episode (`model_act`); `EPISODE_END` drains its tasks and model calls before `finish_episodes`.
+episode (`model_act`); `EPISODE_END` drains its tasks and model calls before `finish_episodes`. `warmup(rows)` runs
+once on the model thread before the first `reset_episodes`, so `EPISODE_READY` implies steady-state latency.
 
 Anything else (async producers, streaming, a policy that must see every observation, as `vlanext.py` does): subclass
 `ModelServer` and implement `on_observation(obs, rows)`, answering each row once with

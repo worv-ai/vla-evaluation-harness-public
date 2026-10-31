@@ -552,13 +552,14 @@ class DaemonModelServer(ModelServer):
         super().__init__()
         self.max_rows = max_rows
         self._run_fn = run
+        self._warmed = False
         self.daemons = EpisodeDaemons(
             self,
             self.run,
             backlog=backlog,
             clock=clock,
             control_hz=control_hz,
-            reset=self.reset_episodes,
+            reset=self._reset,
             finish=self.finish_episodes,
             requires=self.requires,
             warn_unadvanced=warn_unadvanced,
@@ -569,6 +570,16 @@ class DaemonModelServer(ModelServer):
         if self._run_fn is None:
             raise NotImplementedError(f"{type(self).__name__} must override run() or pass run=")
         await self._run_fn(ep)
+
+    def warmup(self, rows: Rows) -> None:
+        """Runs once before the first ``reset_episodes`` (same thread and ``rows``), so an episode's first inference
+        after ``EPISODE_READY`` runs at steady-state latency.  Raising fails that start; the next one retries."""
+
+    def _reset(self, rows: Rows) -> dict[int, Exception] | None:
+        if not self._warmed:
+            self.warmup(rows)
+            self._warmed = True
+        return self.reset_episodes(rows)
 
     def reset_episodes(self, rows: Rows) -> dict[int, Exception] | None:
         """Reset the state of ``rows`` (``episode.config``: the ``EPISODE_START`` payload).  Blocking.

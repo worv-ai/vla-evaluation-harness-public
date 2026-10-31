@@ -426,6 +426,32 @@ async def test_a_missing_capability_never_resets():
     assert server.log == [] and server._running() == 0
 
 
+class Warm(Daemon):
+    def __init__(self, fail: int = 0, **kwargs: Any) -> None:
+        super().__init__(echo, **kwargs)
+        self.fail = fail  # warmups to fail
+
+    def warmup(self, rows: Rows) -> None:
+        self.threads.add(threading.current_thread().name)
+        self.log.append(("warmup", rows.ids.tolist()))
+        if self.fail:
+            self.fail -= 1
+            raise RuntimeError("cold")
+
+
+@pytest.mark.anyio
+async def test_warmup_runs_once_before_the_first_reset_after_validation_and_a_failure_retries():
+    server = Warm(fail=1)
+    async with serving(server):
+        (bad,) = await server._start_episodes([({"control_hz": 0}, "s")])  # refused: no warmup
+        (cold,) = await server._start_episodes([({}, "s")])
+        (a,) = await _start(server)
+        (b,) = await _start(server)
+    assert isinstance(bad, ValueError) and isinstance(cold, RuntimeError) and "cold" in str(cold)
+    assert server.log == [("warmup", [0]), ("warmup", [a]), ("reset", [a]), ("reset", [b])]
+    assert server.threads == {"model_0"}
+
+
 @pytest.mark.anyio
 async def test_reset_runs_for_accepted_positions_only_and_failures_keep_their_positions():
     server = Daemon(echo)

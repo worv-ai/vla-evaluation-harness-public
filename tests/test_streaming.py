@@ -3,6 +3,7 @@ capability negotiation and old-client refusal; RTCServer's time-grid streaming."
 
 from __future__ import annotations
 
+import logging
 import math
 import time
 from types import SimpleNamespace
@@ -126,10 +127,13 @@ async def test_a_ready_capable_client_lacking_publish_fails_an_rtc_start_model_s
 
 
 @pytest.mark.anyio
-async def test_episode_ready_follows_the_daemons_reset_with_the_run_installed(free_port):
+async def test_episode_ready_follows_warmup_and_reset_with_the_run_installed(free_port):
     class Slow(Daemon):
+        def warmup(self, rows: Rows) -> None:
+            time.sleep(0.2)
+
         def reset_episodes(self, rows: Rows) -> dict[int, Exception] | None:
-            time.sleep(0.3)
+            time.sleep(0.1)
             return super().reset_episodes(rows)
 
     server = Slow(echo)
@@ -548,6 +552,7 @@ class FakeEp:
 
     def __init__(self, server: RTCServer, clock: ScriptClock, arrivals: list[tuple[float, float, float]]) -> None:
         self.server, self.clock, self.arrivals = server, clock, list(arrivals)  # (arrival, admitted_at, value)
+        self.logger = logging.getLogger("tests.rtc")
         self.closing = False
         self.published: list[tuple[float, float]] = []
         self.errors: list[str] = []
@@ -605,6 +610,42 @@ async def test_rtc_skips_expired_slots_and_discards_a_fully_expired_chunk():
     assert ep.published == []
     ep = await _rtc(Chunker(hz=10.0), [0.0, 0.1, 0.35, 0.4], [(0.0, 0.0, 1.0)])
     assert ep.published == [(0.1, 101.0), (0.35, 103.0), (0.4, 104.0)]  # slot 2 expired unseen
+
+
+@pytest.mark.anyio
+async def test_rtc_warns_once_per_episode_when_a_chunk_is_dropped(caplog):
+    caplog.set_level(logging.DEBUG, logger="tests.rtc")
+    arrivals = [(5.0, 0.0, 1.0), (9.0, 3.0, 2.0)]  # inferred 5 s and 6 s after admission; horizon 2 s
+    ep = await _rtc(Chunker(chunk=2, hz=1.0), [5.0, 5.5, 6.0, 9.0, 9.5], arrivals)
+    drops = [(r.levelno, r.getMessage()) for r in caplog.records if "chunk dropped" in r.getMessage()]
+    assert ep.published == [] and drops == [
+        (logging.WARNING, "inference 5000 ms exceeds the chunk horizon 2000 ms; chunk dropped"),
+        (logging.DEBUG, "inference 6000 ms exceeds the chunk horizon 2000 ms; chunk dropped"),
+    ]
+
+
+@pytest.mark.anyio
+async def test_rtc_warms_up_on_warmup_obs_once_before_the_first_episode(free_port):
+    class Logged(Chunker):
+        def __init__(self, **kw: Any) -> None:
+            super().__init__(**kw)
+            self.values: list[float] = []
+
+        def predict(self, obs, row):
+            self.values.append(float(obs["value"]))
+            return super().predict(obs, row)
+
+    server = Logged(hz=20.0, warmup_obs={"value": 7.0})
+    task = await start_server(server, free_port)
+    try:
+        for _ in range(2):
+            async with Connection(f"ws://127.0.0.1:{free_port}") as conn:
+                await LiveEpisodeRunner(hz=20.0).run_episode(
+                    StubBenchmark(done_at_step=5), {"name": "t"}, conn, max_steps=5
+                )
+    finally:
+        await stop_server(task)
+    assert server.values[0] == 7.0 and server.values.count(7.0) == 1 and len(server.values) > 1
 
 
 @pytest.mark.parametrize("blocked", [False, True])
