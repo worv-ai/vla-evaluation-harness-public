@@ -9,7 +9,7 @@ cd "$HARNESS"
 RESULTS_BASE="./results/pace1_experiments"
 SLURM_ARGS="--partition=h100 --gres=gpu:1 --cpus-per-task=8 --mem=32G --time=04:00:00"
 EP=50
-BENCH_CONFIG="experiments/realtime/kinetix_realtime_wait.yaml"
+BENCH_CONFIG="experiments/realtime/kinetix_realtime.yaml"
 VOLUME_MOUNT="${HARNESS}/src/vla_eval:/opt/conda/envs/kinetix/lib/python3.11/site-packages/vla_eval"
 JOB_ID=""
 NODE=""
