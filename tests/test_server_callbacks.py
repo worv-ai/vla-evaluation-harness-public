@@ -292,7 +292,7 @@ async def test_a_cancelled_episode_end_still_finishes_the_episode():
 
 
 async def _requests(server: PredictModelServer, obs: list[dict[str, Any]]) -> list[Any]:
-    from vla_eval.model_servers.predict import _Request
+    from vla_eval.model_servers.engine import _Request
 
     ids = await server._start_episodes([({}, "s")] * len(obs))
     requests = []
@@ -308,7 +308,7 @@ async def test_a_cancelled_dispatch_fails_its_requests():
     (req,) = await _requests(server, [{"value": 1.0}])
     with anyio.CancelScope() as scope:
         scope.cancel()
-        await server._run([req])
+        await server._engine._run([req])
     assert req.done.is_set() and set(req.errors) == {0} and "stopped" in str(req.errors[0])
 
 
@@ -317,7 +317,7 @@ async def test_a_dispatch_cancelled_one_request_at_a_time_completes_every_reques
     server = LogServer(delay=0.2)
     first, second = await _requests(server, [{"value": 1.0}, {"other": 2.0}])  # different keys: one at a time
     with anyio.move_on_after(0.05):
-        await server._run([first, second])
+        await server._engine._run([first, second])
     assert first.done.is_set() and not first.errors and _value(first.actions) == 1.0
     assert second.done.is_set() and set(second.errors) == {0}
 
@@ -327,7 +327,7 @@ async def test_a_row_ending_before_the_model_call_is_not_inferred():
     server = LogServer()
     (req,) = await _requests(server, [{"value": 1.0}])
     async with anyio.create_task_group() as tg:
-        tg.start_soon(server._run, [req])
+        tg.start_soon(server._engine._run, [req])
         await checkpoint()  # the dispatcher runs to its first checkpoint
         server._gen[0] += 1
     assert server.predicted == [] and set(req.errors) == {0}
@@ -410,7 +410,7 @@ class SendFailsOnceServer(LiveLogServer):
     ("cls", "first", "error"),
     [
         (LiveLogServer, -1.0, "bad observation"),
-        (LiveLogServer, EMPTY, "IndexError"),  # an empty chunk
+        (LiveLogServer, EMPTY, "empty action chunk"),
         (SendFailsOnceServer, 1.0, "send failed"),
     ],
 )
@@ -470,7 +470,7 @@ async def test_a_server_without_vector_step_refuses_it(free_port):
     conn = Connection(f"ws://127.0.0.1:{free_port}")
     await conn.connect()
     try:
-        assert conn.server_info["capabilities"] == {"vector_step": False}
+        assert conn.server_info["capabilities"]["vector_step"] is False
         step = {"ends": [], "starts": [[0, {"task": {"name": "t"}}]], "slots": [0], "observations": {"v": [1.0]}}
         with pytest.raises(RuntimeError, match="vector_step_unsupported"):
             await conn.exchange(step)

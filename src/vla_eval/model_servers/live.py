@@ -1,32 +1,27 @@
-"""LiveModelServer: continuous inference for real-time episodes.  Each episode's latest observation is inferred in
-a loop, one row at a time, and its action sent as soon as it is ready; observations that arrive meanwhile coalesce."""
+"""Live model servers on episode daemons.  ``LiveModelServer``: each episode's latest observation is inferred in a
+loop, one row at a time, and its action sent as soon as it is ready; observations that arrive meanwhile coalesce.
+``RTCServer``: streams a chunk's actions on a time grid (``PUBLISH``), refilling it ahead of time."""
 
 from __future__ import annotations
 
-import logging
-import time
-import anyio
+import math
+from collections import deque
+
 import numpy as np
-from anyio.abc import TaskGroup
 
-from vla_eval import columns
-from vla_eval.types import Action, Batch, EpisodeResult, Observation
-from vla_eval.model_servers.base import ModelServer, Row, Rows
-
-logger = logging.getLogger(__name__)
-
-
-class _Loop:
-    """One episode's inference loop: its latest observation not inferred yet, with its arrival time."""
-
-    def __init__(self) -> None:
-        self.latest: tuple[Batch, Rows, float] | None = None
-        self.wake = anyio.Event()
-        self.stopped = False
-        self.exited = anyio.Event()
+from vla_eval.types import Action, Observation
+from vla_eval.model_servers.base import Row, Rows
+from vla_eval.model_servers.daemons import (
+    DaemonModelServer,
+    EpisodeClosed,
+    EpisodeContext,
+    ObservationRequest,
+    run_predict,
+    select_action,
+)
 
 
-class LiveModelServer(ModelServer):
+class LiveModelServer(DaemonModelServer):
     """Args:
     chunk_size: Actions of each ``[T, D]`` chunk to choose from; the rest is dropped (no buffer).
     laas: Send the action ``int(latency * hz)`` steps into the chunk, latency counted from the observation's
@@ -37,27 +32,12 @@ class LiveModelServer(ModelServer):
     one inference at a time, across episodes; no batching.
     """
 
-    supports_vector_step = False
-
     def __init__(self, *, chunk_size: int | None = None, laas: bool = False, hz: float = 10.0) -> None:
-        super().__init__()
+        rate = hz if math.isfinite(hz) and hz > 0 else None
+        super().__init__(backlog="latest", control_hz=rate, warn_unadvanced=False)  # never reads its clock
         self.chunk_size = chunk_size
         self.laas = laas
         self.hz = hz
-        self._loops: dict[int, _Loop] = {}  # by row id
-        self._tg: TaskGroup | None = None
-
-    # ------------------------------------------------------------------
-    # Override these
-    # ------------------------------------------------------------------
-
-    def reset_episodes(self, rows: Rows) -> dict[int, Exception] | None:
-        """Reset the state of ``rows`` (``episode.config``: the ``EPISODE_START`` payload).  Blocking.
-        Return ``{position: exception}`` for starts that failed, or raise to fail them all."""
-        return None
-
-    def finish_episodes(self, rows: Rows, results: list[EpisodeResult]) -> None:
-        """Episodes in ``rows`` ended (``results[i]``: the ``EPISODE_END`` payload).  Blocking."""
 
     def predict(self, obs: Observation, row: Row) -> Action:
         """One observation of the episode in ``row``; ``"actions"``, if any, is ``[T, D]`` or ``[D]``.  Blocking."""
@@ -66,82 +46,73 @@ class LiveModelServer(ModelServer):
     def select(self, action: Action, latency: float, row: Row) -> Action:
         """The action to send from ``predict``'s output, ``latency`` seconds after its observation arrived:
         the chunk trimmed to ``chunk_size``, float32, its LAAS step ``int(latency * hz)`` (else its first)."""
-        if "actions" not in action:
-            return action
-        a = np.asarray(action["actions"])
-        if a.ndim != 2:
-            return {**action, "actions": np.asarray(a, np.float32)}
-        a = np.asarray(a[: row.episode.chunk_size], np.float32)
-        steps = 0
-        if self.laas and self.hz > 0:
-            steps = int(latency * self.hz)
-            if steps >= len(a):
-                logger.warning("LAAS: %d steps late for a %d-step chunk; sending its last action", steps, len(a))
-        return {**action, "actions": a[min(steps, len(a) - 1)]}
-
-    # ------------------------------------------------------------------
-    # ModelServer callbacks
-    # ------------------------------------------------------------------
-
-    async def on_serve_start(self, tg: TaskGroup) -> None:
-        await super().on_serve_start(tg)
-        self._tg = tg
+        hz = self.hz if self.laas and self.hz > 0 else None
+        return select_action(action, latency, chunk_size=row.episode.chunk_size, hz=hz)
 
     async def on_episode_start(self, rows: Rows) -> dict[int, Exception] | None:
         for episode in rows.episodes:
             episode.chunk_size = self.chunk_size
-        failed = await self.run_on_model_thread(self.reset_episodes, rows) or {}
-        assert self._tg is not None, "serve_async calls on_serve_start first"
-        for i, rid in enumerate(rows.ids.tolist()):
-            if i not in failed:
-                self._loops[rid] = loop = _Loop()
-                self._tg.start_soon(self._run, loop, rid)
-        return failed
+        return await super().on_episode_start(rows)
 
-    async def on_observation(self, obs: Batch, rows: Rows) -> None:
-        t = time.monotonic()  # admission: LAAS counts the model queue too
-        for i in range(len(rows)):
-            o, r = (obs, rows) if len(rows) == 1 else (columns.take(obs, [i]), rows.take([i]))
-            loop = self._loops[int(r.ids[0])]
-            loop.latest = (o, r, t)
-            loop.wake.set()
+    async def run(self, ep: EpisodeContext) -> None:
+        await run_predict(ep, self.predict, select=self.select)
 
-    async def on_episode_end(self, rows: Rows, results: list[EpisodeResult]) -> None:
-        loops = [loop for rid in rows.ids.tolist() if (loop := self._loops.pop(rid, None)) is not None]
-        for loop in loops:
-            loop.stopped = True
-            loop.wake.set()
-        for loop in loops:  # an inference in flight finishes before finish_episodes; its action is dropped
-            await loop.exited.wait()
-        await self.run_on_model_thread(self.finish_episodes, rows, results)
 
-    # ------------------------------------------------------------------
+class RTCServer(DaemonModelServer):
+    """Streams each chunk on a ``1/hz`` grid anchored at its observation's admission: slot ``k`` is published only
+    within ``[t0 + k/hz, t0 + (k+1)/hz)``, expired slots are skipped, and the newest observation is inferred once
+    ``refill_at`` or fewer actions remain.  Live clients with ``publish`` and ``episode_error`` only.
 
-    async def _run(self, loop: _Loop, rid: int) -> None:
-        """Infer the row's latest observation, send its action, repeat."""
-        try:
-            while True:
-                await loop.wake.wait()
-                loop.wake = anyio.Event()  # before inferring: an observation arriving meanwhile wakes the next
-                if loop.stopped:
-                    return
-                if loop.latest is None:
-                    continue
-                (obs, rows, t), loop.latest = loop.latest, None
-                try:
-                    action = await self.run_on_model_thread(self._infer, columns.split(obs, 1)[0], rows[0], t)
-                    if loop.stopped:
-                        return
-                    await self.send_action(rows, columns.stack([action]))
-                except Exception as exc:  # inference or send: this observation fails; the loop goes on
-                    if loop.stopped:
-                        return
-                    await self.send_error(rows, exc)
-        except Exception:
-            logger.exception("continuous inference stopped row=%d", rid)
-        finally:
-            loop.exited.set()
+    Override ``predict`` to return a ``[T, D]`` chunk (model thread).
+    """
 
-    def _infer(self, obs: Observation, row: Row, t: float) -> Action:
-        action = self.predict(obs, row)
-        return self.select(action, time.monotonic() - t, row)
+    requires = frozenset({"publish", "episode_error"})
+
+    def __init__(self, *, chunk_size: int = 8, hz: float = 10.0, refill_at: int = 3) -> None:
+        if not (math.isfinite(hz) and hz > 0 and chunk_size >= 1 and refill_at >= 0):
+            raise ValueError("RTCServer needs a finite hz > 0, chunk_size >= 1 and refill_at >= 0")
+        super().__init__(backlog="latest", control_hz=hz)
+        self.chunk_size, self.hz, self.refill_at = chunk_size, hz, refill_at
+
+    def predict(self, obs: Observation, row: Row) -> np.ndarray:
+        """A ``[T, D]`` action chunk for one observation.  Blocking."""
+        raise NotImplementedError(f"{type(self).__name__} must override predict()")
+
+    async def run(self, ep: EpisodeContext) -> None:
+        plan: deque[np.ndarray] = deque()
+        plan_t0, consumed, busy = 0.0, 0, False  # the plan's anchor; slots passed; one refill at a time
+
+        async def infer(request: ObservationRequest) -> None:
+            nonlocal busy, plan_t0, consumed
+            try:
+                chunk = np.asarray(await ep.call(self.predict, request.obs, request.row), np.float32)
+                chunk = chunk[: self.chunk_size]
+                if chunk.ndim != 2 or not len(chunk):
+                    raise ValueError(f"predict must return a [T, D] chunk, got shape {chunk.shape}")
+                skip = max(0, math.floor((ep.clock.now() - request.admitted_at) * self.hz))
+                if skip >= len(chunk):
+                    return  # every slot expired: discarded
+                plan.clear()
+                plan.extend(chunk[skip:])
+                plan_t0, consumed = request.admitted_at, skip
+            except EpisodeClosed:
+                return
+            except Exception as exc:
+                await request.error(exc)  # this observation failed; the episode goes on
+            finally:
+                busy = False
+
+        async for _ in ep.clock.every(1.0 / self.hz, first="now"):
+            if ep.closing:
+                return
+            due = math.floor((ep.clock.now() - plan_t0) * self.hz)
+            while consumed < due and plan:  # expired slots, each at most once
+                plan.popleft()
+                consumed += 1
+            if not busy and len(plan) <= self.refill_at and (request := ep.receive_nowait()) is not None:
+                busy = True
+                ep.start_soon(infer, request)
+            if plan and consumed == due:  # the current interval's slot, never a future one
+                action = plan.popleft()
+                consumed += 1  # committed before the await
+                await ep.publish({"actions": action})
