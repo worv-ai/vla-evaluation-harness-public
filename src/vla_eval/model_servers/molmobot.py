@@ -100,7 +100,7 @@ class MolmoBotModelServer(PredictModelServer):
 
     # -- lifecycle --------------------------------------------------------
 
-    def on_episode_start(self, rows: Rows) -> None:
+    def reset_episodes(self, rows: Rows) -> None:
         # Reset per-episode state.
         from collections import deque
 
@@ -113,7 +113,7 @@ class MolmoBotModelServer(PredictModelServer):
                 "step_count": 0,
             }
 
-    def on_episode_end(self, rows: Rows, results: list[EpisodeResult]) -> None:
+    def finish_episodes(self, rows: Rows, results: list[EpisodeResult]) -> None:
         for rid in rows.ids.tolist():
             self._sessions.pop(rid, None)
 

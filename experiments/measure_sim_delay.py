@@ -16,7 +16,6 @@ Or run this script directly inside the container:
 from __future__ import annotations
 
 import time
-from collections.abc import Sequence
 
 import anyio
 
@@ -46,7 +45,7 @@ class InstantServer(PredictModelServer):
             return {"actions": np.zeros((self.chunk_size, 7), dtype=np.float32)}
         return {"actions": np.zeros(7, dtype=np.float32)}
 
-    def on_episode_start(self, rows: Rows) -> None:
+    def reset_episodes(self, rows: Rows) -> None:
         config = rows.episodes[0].config
         self._episode_start_time = time.monotonic()
         self.call_count = 0
@@ -54,11 +53,11 @@ class InstantServer(PredictModelServer):
         self.step_timestamps = []
         print(f"\n=== Episode started: {config.get('task', {}).get('name', '?')} ===")
 
-    async def act(self, obs: Batch, ids: Sequence[int]) -> tuple[Batch, dict[int, Exception]]:
+    async def on_observation(self, obs: Batch, rows: Rows) -> None:
         self.step_timestamps.append(time.monotonic())
-        return await super().act(obs, ids)
+        await super().on_observation(obs, rows)
 
-    def on_episode_end(self, rows: Rows, results: list[EpisodeResult]) -> None:
+    def finish_episodes(self, rows: Rows, results: list[EpisodeResult]) -> None:
         if not self.step_timestamps:
             return
         total_steps = len(self.step_timestamps)

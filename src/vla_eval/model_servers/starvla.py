@@ -487,13 +487,13 @@ class StarVLAModelServer(PredictModelServer):
             outputs.append({"actions": actions})
         return columns.stack(outputs)
 
-    def on_episode_start(self, rows: Rows) -> dict[int, Exception] | None:
+    def reset_episodes(self, rows: Rows) -> dict[int, Exception] | None:
         if self._ensemble_horizon is not None:
             for rid in rows.ids.tolist():
                 self._ensemblers[rid] = _AdaptiveEnsembler(self._ensemble_horizon, self._ensemble_alpha)
         return None
 
-    def on_episode_end(self, rows: Rows, results: list[EpisodeResult]) -> None:
+    def finish_episodes(self, rows: Rows, results: list[EpisodeResult]) -> None:
         for rid in rows.ids.tolist():
             self._ensemblers.pop(rid, None)
 

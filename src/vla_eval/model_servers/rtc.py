@@ -251,7 +251,7 @@ class RTCModelServer(PredictModelServer):
 
         logger.info("All %d models loaded.", len(self._models))
 
-    def on_episode_start(self, rows: Rows) -> dict[int, Exception] | None:
+    def reset_episodes(self, rows: Rows) -> dict[int, Exception] | None:
         """Select the correct per-level model based on task metadata."""
         import jax
 
@@ -324,7 +324,7 @@ class RTCModelServer(PredictModelServer):
 
         jit_action = self._row_jit_action.get(row.id)
         if jit_action is None:
-            raise RuntimeError("No model selected — on_episode_start must be called first")
+            raise RuntimeError("No model selected — reset_episodes must be called first")
 
         obs_vec = self._get_obs_with_history(obs, row)
 
@@ -349,7 +349,7 @@ class RTCModelServer(PredictModelServer):
 
         return {"actions": actions}
 
-    def on_episode_end(self, rows: Rows, results: list[EpisodeResult]) -> None:
+    def finish_episodes(self, rows: Rows, results: list[EpisodeResult]) -> None:
         """Clear observation history buffer, RNG state and policy on episode end."""
         for rid in rows.ids.tolist():
             self._obs_buffer.pop(rid, None)

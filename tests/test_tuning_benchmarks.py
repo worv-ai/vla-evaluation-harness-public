@@ -216,21 +216,26 @@ def _row() -> Row:
 
 
 @pytest.mark.anyio
-async def test_instant_server_counts_observations():
-    """InstantServer.act() should count every observation, each row of a batch included."""
-    import anyio
+async def test_instant_server_counts_observations(free_port):
+    """InstantServer counts every observation, each row of a vector step included."""
     import numpy as np
 
+    from vla_eval.connection import Connection
+
+    def step(slots: list[int], starts: list) -> dict:
+        return {"ends": [], "starts": starts, "slots": slots, "observations": {"value": np.zeros(len(slots))}}
+
     server = InstantServer()
-    async with anyio.create_task_group() as tg:
-        await server.on_serve_start(tg)
-        rows = [r for r in await server.start_episodes([({}, "a"), ({}, "b")]) if isinstance(r, int)]
-        assert len(rows) == 2
-        for i in range(3):
-            actions, errors = await server.act({"value": np.full(1, float(i))}, rows[:1])
-            assert not errors and actions["actions"].shape == (1, 7)
-        await server.act({"value": np.zeros(2)}, rows)
-        tg.cancel_scope.cancel()
+    task = await start_server(server, free_port)
+    try:
+        async with Connection(f"ws://127.0.0.1:{free_port}") as conn:
+            reply = await conn.exchange(step([0], [[0, {}], [1, {}]]))
+            assert not reply["errors"] and np.asarray(reply["actions"]["actions"]).shape == (1, 7)
+            for _ in range(2):
+                await conn.exchange(step([0], []))
+            await conn.exchange(step([0, 1], []))
+    finally:
+        await stop_server(task)
     assert server.call_count == 5
 
 

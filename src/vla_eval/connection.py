@@ -65,6 +65,8 @@ class Connection:
         self.backoff_base = backoff_base
         self._ws: Any = None
         self._seq: int = 0
+        self._episode_seq: int = 0  # the last EPISODE_START's: replies before it belong to an earlier episode
+        self._action_seq: int = 0  # the live listener's last applied ACTION: an older one is stale
         self._action_callback: Callable[[Action], None] | None = None
         self._benchmark: str | None = None
         self.server_info: dict[str, Any] = {}
@@ -111,6 +113,8 @@ class Connection:
             raise RuntimeError("Not connected")
         seq = self._next_seq()
         await self._ws.send(pack_message(Message(type=msg_type, payload=payload, seq=seq)))
+        if msg_type == MessageType.EPISODE_START:
+            self._episode_seq = seq
         return seq
 
     async def recv(self, *, timeout: float | None = None) -> Message:
@@ -156,7 +160,11 @@ class Connection:
         to detect message ordering issues.
         """
         seq = await self.send(MessageType.OBSERVATION, obs)
-        response = await self.recv(timeout=self.timeout)
+        with anyio.fail_after(self.timeout):
+            response = await self.recv()
+            while response.seq < self._episode_seq:  # a late reply of an earlier episode
+                logger.debug("Dropped %s seq %d from before EPISODE_START", response.type.value, response.seq)
+                response = await self.recv()
         if response.type == MessageType.ERROR:
             raise RuntimeError(f"Server error: {response.payload}")
         if response.seq != seq:
@@ -264,7 +272,10 @@ class Connection:
                 try:
                     msg = await self.recv()
                     _recv_count += 1
-                    if msg.type == MessageType.ACTION and self._action_callback is not None:
+                    if msg.seq < self._episode_seq or (msg.type == MessageType.ACTION and msg.seq <= self._action_seq):
+                        logger.debug("Dropped stale %s seq %d", msg.type.value, msg.seq)  # earlier episode or action
+                    elif msg.type == MessageType.ACTION and self._action_callback is not None:
+                        self._action_seq = msg.seq
                         self._action_callback(msg.payload)
                         if _recv_count <= 3:
                             logger.info("Listener received ACTION #%d (seq=%s)", _recv_count, msg.seq)

@@ -274,7 +274,7 @@ class MmeVlaModelServer(PredictModelServer):
     # Episode lifecycle
     # ------------------------------------------------------------------
 
-    def on_episode_start(self, rows: Rows) -> None:
+    def reset_episodes(self, rows: Rows) -> None:
         if self.use_history and self._policy is not None and hasattr(self._policy, "reset"):
             self._policy.reset()
 

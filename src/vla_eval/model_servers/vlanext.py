@@ -39,8 +39,8 @@ from typing import Any
 import numpy as np
 import torch
 
-from vla_eval.model_servers.base import Row, Rows
-from vla_eval.model_servers.predict import PredictModelServer
+from vla_eval import columns
+from vla_eval.model_servers.base import ModelServer, Row, Rows
 from vla_eval.specs import (
     GRIPPER_CLOSE_POS,
     IMAGE_RGB,
@@ -50,7 +50,7 @@ from vla_eval.specs import (
     STATE_EEF_POS_AA_GRIP,
     DimSpec,
 )
-from vla_eval.types import Action, EpisodeResult, Observation
+from vla_eval.types import Action, Batch, EpisodeResult, Observation
 
 logger = logging.getLogger(__name__)
 
@@ -105,11 +105,12 @@ ACTION_BOUNDS: dict[str, tuple[list[float], list[float]]] = {
 }
 
 
-class VLANeXtModelServer(PredictModelServer):
+class VLANeXtModelServer(ModelServer):
     """VLANeXt model server (DravenALG/VLANeXt).
 
     Loads a VLANeXt checkpoint (Qwen3-VL-2B + SigLIP2 + diffusion action head) and runs inference
-    with flow-matching denoising.  Returns 8-action chunks.
+    with flow-matching denoising.  Returns 8-action chunks.  Every observation's state enters the history,
+    buffered steps included, so it subclasses ``ModelServer`` and queues the chunk itself.
     """
 
     def __init__(
@@ -119,12 +120,12 @@ class VLANeXtModelServer(PredictModelServer):
         *,
         attn_implementation: str = "sdpa",
         center_crop_ratio: float = 1.0,
-        chunk_size: int = 8,
-        **kwargs: Any,
+        chunk_size: int | None = 8,
+        max_rows: int | None = None,
     ) -> None:
-        # Every observation must reach predict (dense state history), so the chunk is queued here.
-        super().__init__(chunk_size=None, **kwargs)
-        self.action_chunk_size = chunk_size
+        super().__init__()
+        self.chunk_size = chunk_size
+        self.max_rows = max_rows
         self.checkpoint = checkpoint
         self.suite = suite
         self.attn_implementation = attn_implementation
@@ -148,28 +149,34 @@ class VLANeXtModelServer(PredictModelServer):
     def get_observation_spec(self) -> dict[str, DimSpec]:
         return {"image": IMAGE_RGB, "wrist": IMAGE_RGB, "language": LANGUAGE, "state": STATE_EEF_POS_AA_GRIP}
 
-    def on_episode_start(self, rows: Rows) -> None:
+    async def on_episode_start(self, rows: Rows) -> None:
         for rid in rows.ids.tolist():
             self._state_histories[rid] = []
             self._action_queues[rid] = deque()
 
-    def on_episode_end(self, rows: Rows, results: list[EpisodeResult]) -> None:
+    async def on_episode_end(self, rows: Rows, results: list[EpisodeResult]) -> None:
         for rid in rows.ids.tolist():
             self._state_histories.pop(rid, None)
             self._action_queues.pop(rid, None)
 
-    def predict(self, obs: Observation, row: Row) -> Action:
-        """Record this observation's state, then serve the queued chunk or infer a new one."""
-        self._record_state(obs, row)
-        queue = self._action_queues.setdefault(row.id, deque())
-        if queue:
-            return {"actions": queue.popleft()}
-        actions = np.asarray(self._predict_chunk(obs, row)["actions"], dtype=np.float32)
-        if self.action_chunk_size is None or actions.ndim != 2:
-            return {"actions": actions}
-        actions = actions[: self.action_chunk_size]
-        queue.extend(actions[1:])
-        return {"actions": actions[0]}
+    async def on_observation(self, obs: Batch, rows: Rows) -> None:
+        """Per row: record the state, then answer from the queued chunk or infer a new one.  Inference is awaited
+        inline, so a row's next observation never touches its history before this one is inferred."""
+        for i, (row_obs, row) in enumerate(zip(columns.split(obs, len(rows)), rows)):
+            try:
+                self._record_state(row_obs, row)
+                queue = self._action_queues[row.id]
+                if not queue:
+                    actions = await self.run_on_model_thread(self._predict_chunk, row_obs, row)
+                    actions = np.asarray(actions["actions"], dtype=np.float32)
+                    if self.chunk_size is None or actions.ndim != 2:  # no queue: the whole output is the action
+                        await self.send_action(rows.take([i]), {"actions": actions[None]})
+                        continue
+                    queue.extend(actions[: self.chunk_size])
+                await self.send_action(rows.take([i]), {"actions": queue.popleft()[None]})
+            except Exception as exc:  # this row alone
+                logger.exception("VLANeXt failed row=%d", row.id)
+                await self.send_error(rows.take([i]), exc)
 
     def _record_state(self, obs: Observation, row: Row) -> None:
         """Capture proprioception from every observation (even buffered steps): VLANeXt needs dense
