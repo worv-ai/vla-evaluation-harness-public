@@ -215,7 +215,7 @@ All benchmark environments are packaged as standalone Docker images, based on `b
 | [`robomme`](https://ghcr.io/allenai/vla-evaluation-harness/robomme) | 17.0 GB | RoboMME | 3.11 | [`base`](https://ghcr.io/allenai/vla-evaluation-harness/base) |
 | [`vlabench`](https://ghcr.io/allenai/vla-evaluation-harness/vlabench) | 17.7 GB | VLABench | 3.11 | [`base`](https://ghcr.io/allenai/vla-evaluation-harness/base) |
 | [`robocasa`](https://ghcr.io/allenai/vla-evaluation-harness/robocasa) | 21.4 GB | RoboCasa | 3.11 | [`base`](https://ghcr.io/allenai/vla-evaluation-harness/base) |
-| `behavior1k` 🔒 | 23.6 GB | BEHAVIOR-1K (2025 challenge protocol) | 3.10 | [`base`](https://ghcr.io/allenai/vla-evaluation-harness/base) |
+| `behavior1k` 🔒 | ~28 GB | BEHAVIOR-1K (2026 challenge protocol) | 3.11 | [`stanfordvl/behavior:3.9.4`](https://hub.docker.com/r/stanfordvl/behavior) |
 | [`robotwin`](https://ghcr.io/allenai/vla-evaluation-harness/robotwin) | 28.6 GB | RoboTwin 2.0 | 3.11 | [`base`](https://ghcr.io/allenai/vla-evaluation-harness/base) |
 | [`molmospaces`](https://ghcr.io/allenai/vla-evaluation-harness/molmospaces) | 31.4 GB | MolmoSpaces-Bench | 3.11 | [`base`](https://ghcr.io/allenai/vla-evaluation-harness/base) |
 | [`robocasa365`](https://ghcr.io/allenai/vla-evaluation-harness/robocasa365) | 35.6 GB | RoboCasa365 | 3.11 | [`base`](https://ghcr.io/allenai/vla-evaluation-harness/base) |
