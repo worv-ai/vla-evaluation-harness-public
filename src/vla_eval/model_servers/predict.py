@@ -159,7 +159,7 @@ class PredictModelServer(ModelServer):
                 # wait for single-episode requests of other connections; a vector step is a whole step already
                 if self.max_wait_time > 0 and not self._full() and all(r.wait for r in self._queue):
                     with anyio.move_on_after(self.max_wait_time):
-                        while not self._full():
+                        while not self._full() and all(r.wait for r in self._queue):
                             await self._wake.wait()
                             self._wake = anyio.Event()
                 batch = [self._queue.pop(0)]

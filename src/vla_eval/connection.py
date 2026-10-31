@@ -179,6 +179,8 @@ class Connection:
         seq = self._next_seq()
         await self._ws.send(pack_message(Message(type=MessageType.VECTOR_STEP, payload=step, seq=seq)))
         reply = await self.recv(timeout=self.timeout)
+        if reply.type == MessageType.ERROR and reply.seq == seq:
+            raise RuntimeError(f"Server error: {reply.payload.get('error')}")
         if reply.type != MessageType.VECTOR_RESULT or reply.seq != seq:
             raise RuntimeError(f"Expected VECTOR_RESULT for seq {seq}, got {reply.type.value} seq {reply.seq}")
         return reply.payload

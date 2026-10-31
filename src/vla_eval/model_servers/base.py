@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, NamedTuple, TypeVar
 
 import anyio
+from anyio.lowlevel import checkpoint
 import numpy as np
 import numpy.typing as npt
 from anyio.to_thread import run_sync as _run_in_thread
@@ -149,7 +150,10 @@ class ModelServer(ABC):
 
     async def run_on_model_thread(self, fn: Callable[..., T], *args: Any) -> T:
         """``fn(*args)`` on the server's one model thread, after the calls submitted before it."""
-        return await _run_in_thread(self._model_thread.submit(fn, *args).result)
+        await checkpoint()  # a cancelled caller submits nothing
+        future = self._model_thread.submit(fn, *args)
+        with anyio.CancelScope(shield=True):  # once submitted, returns only after fn finishes
+            return await _run_in_thread(future.result)
 
     async def on_serve_start(self, tg: TaskGroup) -> None:
         """Called by ``serve_async`` before accepting connections; *tg* lives as long as the server.

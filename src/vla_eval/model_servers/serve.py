@@ -204,6 +204,10 @@ async def _handle_connection(ws: Any, model_server: ModelServer, tg: TaskGroup) 
                     continue
 
             elif msg.type == MessageType.VECTOR_STEP:
+                if not model_server.supports_vector_step:
+                    detail = f"vector_step_unsupported: {type(model_server).__name__}"
+                    await _try_reply(reply, MessageType.ERROR, {"error": detail}, msg.seq)
+                    continue
                 _inflight += 1
                 try:
                     result, slots = await _vector_step(msg.payload, slots, session_id, model_server, wait)

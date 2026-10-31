@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import anyio
 import numpy as np
 import pytest
 
@@ -327,4 +328,26 @@ async def test_repeated_or_restarted_slots_never_share_a_row(free_port):
         assert len(set(mine)) == 2 and len(set(theirs)) == 2 and not set(mine) & set(theirs)
     finally:
         await conn.close()
+        await stop_server(task)
+
+
+@pytest.mark.anyio
+async def test_a_vector_step_arriving_during_a_batching_wait_does_not_inherit_it(free_port):
+    import time
+
+    server = CountingServer(max_batch_size=8, max_wait_time=2.0)
+    task, single = await _connect(server, free_port)
+    vector = Connection(f"ws://127.0.0.1:{free_port}")
+    await vector.connect()
+    try:
+        await single.start_episode({"task": {"name": "t"}})
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(single.act, {"value": 9.0})  # waits up to 2 s for company
+            await anyio.sleep(0.2)
+            t0 = time.monotonic()
+            await vector.exchange(_step([0, 1], [_start(0), _start(1)]))
+            assert time.monotonic() - t0 < 1.0
+    finally:
+        await vector.close()
+        await single.close()
         await stop_server(task)

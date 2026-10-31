@@ -506,3 +506,37 @@ async def test_vlanext_a_rows_failure_is_its_own_in_a_vector_step(vlanext, free_
         assert [x[:2] for x in log] == [(1.0, [1.0]), (-1.0, [-1.0]), (3.0, [3.0]), (5.0, [-1.0, 5.0])]
     finally:
         await stop_server(task)
+
+
+@pytest.mark.anyio
+async def test_a_cancelled_model_call_never_runs_or_returns_only_after_it_ran():
+    server = ReplayServer()
+    ran: list[str] = []
+
+    def slow(tag: str) -> None:
+        time.sleep(0.2)
+        ran.append(tag)
+
+    with anyio.CancelScope() as scope:
+        scope.cancel()
+        await server.run_on_model_thread(slow, "cancelled before")
+    with anyio.move_on_after(0.05):
+        await server.run_on_model_thread(slow, "cancelled during")
+    assert ran == ["cancelled during"]  # the await outlived the call
+    await anyio.sleep(0.3)
+    assert ran == ["cancelled during"]
+
+
+@pytest.mark.anyio
+async def test_a_server_without_vector_step_refuses_it(free_port):
+    task = await start_server(LiveLogServer(), free_port)
+    conn = Connection(f"ws://127.0.0.1:{free_port}")
+    await conn.connect()
+    try:
+        assert conn.server_info["capabilities"] == {"vector_step": False}
+        step = {"ends": [], "starts": [[0, {"task": {"name": "t"}}]], "slots": [0], "observations": {"v": [1.0]}}
+        with pytest.raises(RuntimeError, match="vector_step_unsupported"):
+            await conn.exchange(step)
+    finally:
+        await conn.close()
+        await stop_server(task)
