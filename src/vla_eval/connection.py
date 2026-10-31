@@ -16,6 +16,12 @@ from vla_eval.types import Action, Observation
 
 logger = logging.getLogger(__name__)
 
+CAPABILITIES = {"episode_ready": True, "publish": True, "episode_error": True}  # what this client handles (HELLO)
+
+
+class ServerEpisodeError(RuntimeError):
+    """The server failed the running episode (``EPISODE_ERROR``); its ``failure_reason`` is ``model_act``."""
+
 
 class Connection:
     """WebSocket client for communicating with a ModelServer.
@@ -36,7 +42,7 @@ class Connection:
     - `start_episode` — send + await ``EPISODE_READY`` (when the server advertises it).
     - `end_episode`, `send_observation` — one-liner sends.
     - `act` — request/response (send + recv + seq validation).
-    - `on_action`, `listening()` — callback-based receive.
+    - `on_action`, `on_publish`, `listening()` — callback-based receive (live mode).
     - `reconnect` — close + connect with backoff.
 
     Timeouts and retries:
@@ -69,8 +75,12 @@ class Connection:
         self._episode_seq: int = 0  # the last EPISODE_START's: replies before it belong to an earlier episode
         self._action_seq: int = 0  # the live listener's last applied ACTION: an older one is stale
         self._action_callback: Callable[[Action], None] | None = None
+        self._publish_callback: Callable[[Action], None] | None = None
+        self._episode_active = False  # between EPISODE_START and EPISODE_END: server messages for it count
+        self._publish_index = -1  # the episode's last applied PUBLISH
         self._benchmark: str | None = None
         self.server_info: dict[str, Any] = {}
+        self._offered: dict[str, Any] = {}  # the capabilities our last HELLO advertised
 
     @property
     def is_connected(self) -> bool:
@@ -86,7 +96,8 @@ class Connection:
     async def _hello_handshake(self) -> None:
         """Exchange HELLO messages with the server."""
         extra: dict[str, Any] = {"benchmark": self._benchmark} if self._benchmark else {}
-        payload = make_hello_payload(capabilities={"episode_ready": True}, **extra)
+        self._offered = dict(CAPABILITIES)
+        payload = make_hello_payload(capabilities=self._offered, **extra)
         await self.send(MessageType.HELLO, payload)
         reply = await self.recv(timeout=self.timeout)
         if reply.type != MessageType.HELLO:
@@ -95,6 +106,7 @@ class Connection:
 
     async def close(self) -> None:
         """Close WebSocket connection and stop listener if running."""
+        self._episode_active = False
         if self._ws:
             try:
                 await self._ws.close()
@@ -114,9 +126,16 @@ class Connection:
         elif self._ws is None:
             raise RuntimeError("Not connected")
         seq = self._next_seq()
-        await self._ws.send(pack_message(Message(type=msg_type, payload=payload, seq=seq)))
-        if msg_type == MessageType.EPISODE_START:
-            self._episode_seq = seq
+        if msg_type == MessageType.EPISODE_START:  # before the send can suspend: replies may race it
+            self._episode_seq, self._episode_active, self._publish_index = seq, True, -1
+        elif msg_type == MessageType.EPISODE_END:
+            self._episode_active = False
+        try:
+            await self._ws.send(pack_message(Message(type=msg_type, payload=payload, seq=seq)))
+        except BaseException:
+            if msg_type == MessageType.EPISODE_START and self._episode_seq == seq:
+                self._episode_active = False
+            raise
         return seq
 
     async def recv(self, *, timeout: float | None = None) -> Message:
@@ -156,8 +175,8 @@ class Connection:
             TimeoutError: No ``EPISODE_READY`` within ``timeout``.
         """
         seq = await self.send(MessageType.EPISODE_START, config)
-        if not self.server_info.get("capabilities", {}).get("episode_ready"):
-            return  # an older server: a failed start surfaces at the first reply
+        if not (self._offered.get("episode_ready") and self.server_info.get("capabilities", {}).get("episode_ready")):
+            return  # an older peer: a failed start surfaces at the first reply
         try:
             with anyio.fail_after(self.timeout):
                 reply = await self.recv()
@@ -165,7 +184,8 @@ class Connection:
                     reply = await self.recv()
         except TimeoutError:
             raise TimeoutError(f"no EPISODE_READY within {self.timeout}s") from None
-        if reply.type == MessageType.ERROR:
+        if reply.type == MessageType.ERROR:  # e.g. a refused start (``requires``): no episode to end
+            self._episode_active = False
             raise RuntimeError(f"Server error: {reply.payload}")
         if reply.type != MessageType.EPISODE_READY or reply.seq != seq:
             raise RuntimeError(f"Expected EPISODE_READY for seq {seq}, got {reply.type.value} seq {reply.seq}")
@@ -214,11 +234,17 @@ class Connection:
         """Register callback for incoming actions (live mode)."""
         self._action_callback = callback
 
+    def on_publish(self, callback: Callable[[Action], None]) -> None:
+        """Register callback for actions the server publishes unasked (live mode, ``PUBLISH``)."""
+        self._publish_callback = callback
+
     @asynccontextmanager
     async def listening(self) -> AsyncIterator[None]:
-        """Run the listener for the block's duration (live mode): ACTIONs go to ``on_action``.
+        """Run the listener for the block's duration (live mode): ACTIONs go to ``on_action``, PUBLISHes to
+        ``on_publish``.
 
-        If the listener fails (e.g. the connection dropped), the block is cancelled and the error re-raised.
+        If the listener fails (e.g. the connection dropped, or ``ServerEpisodeError`` when the server failed the
+        episode), the block is cancelled and the error re-raised.
         """
         error: Exception | None = None
 
@@ -297,6 +323,20 @@ class Connection:
                     _recv_count += 1
                     if msg.seq < self._episode_seq or (msg.type == MessageType.ACTION and msg.seq <= self._action_seq):
                         logger.debug("Dropped stale %s seq %d", msg.type.value, msg.seq)  # earlier episode or action
+                    elif msg.type in (MessageType.PUBLISH, MessageType.EPISODE_ERROR) and not (
+                        self._episode_active and msg.seq == self._episode_seq
+                    ):
+                        logger.debug("Dropped %s seq %d of no running episode", msg.type.value, msg.seq)
+                    elif msg.type == MessageType.EPISODE_ERROR:
+                        raise ServerEpisodeError(f"Server failed the episode: {msg.payload.get('error')}")
+                    elif msg.type == MessageType.PUBLISH:
+                        index = msg.payload.get("index")
+                        if not isinstance(index, int) or index <= self._publish_index:
+                            logger.debug("Dropped stale PUBLISH index %r", index)
+                        else:
+                            self._publish_index = index
+                            if self._publish_callback is not None:
+                                self._publish_callback(msg.payload["action"])
                     elif msg.type == MessageType.ACTION and self._action_callback is not None:
                         self._action_seq = msg.seq
                         self._action_callback(msg.payload)
@@ -306,7 +346,7 @@ class Connection:
                         logger.error("Server error in listener: %s", msg.payload)
                     else:
                         logger.debug("Listener received msg type=%s #%d", msg.type, _recv_count)
-                except cancelled:
+                except (cancelled, ServerEpisodeError):
                     raise
                 except (ConnectionError, websockets.exceptions.ConnectionClosed):
                     logger.warning("Connection lost in listener loop (received %d msgs)", _recv_count)

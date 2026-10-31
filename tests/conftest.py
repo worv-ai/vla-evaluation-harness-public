@@ -15,8 +15,8 @@ import pytest
 import websockets
 
 from vla_eval.benchmarks.base import StepBenchmark, StepResult, repeat_last_hold
-from vla_eval.model_servers.base import Row, Rows
-from vla_eval.model_servers.live import LiveModelServer
+from vla_eval.model_servers.base import EpisodeClosed, Row, Rows
+from vla_eval.model_servers.daemons import DaemonModelServer, EpisodeContext
 from vla_eval.model_servers.predict import PredictModelServer
 from vla_eval.model_servers.serve import serve_async
 from vla_eval.tracking import Tracker
@@ -91,9 +91,6 @@ class RandomActionModelServer(PredictModelServer):
         return {"actions": self._rng.standard_normal(self._action_dim).astype(np.float32)}
 
 
-EMPTY = -2.0  # an observation value _Log answers with an empty chunk
-
-
 class Call(NamedTuple):
     value: float
     step: int
@@ -102,13 +99,13 @@ class Call(NamedTuple):
 
 
 class _Log:
-    """Echoes ``value`` (``out``: "echo" a ``[chunk_size, 7]`` chunk or ``[7]``, "ramp" ``value + arange(42)``
-    as ``[6, 7]``, "noactions" ``{"foo": value}``) after ``delay``; a negative value raises.  Logs calls, model
-    threads, starts and ends; a ``broken`` task fails to start, ``suite_chunk`` sets the episode's chunk size."""
+    """Echoes ``value`` as a ``[chunk_size, 7]`` chunk or ``[7]`` after ``delay``; a negative value raises.  Logs
+    calls, model threads, starts and ends; a ``broken`` task fails to start, ``suite_chunk`` sets the episode's
+    chunk size."""
 
-    def __init__(self, *, delay: float = 0.0, out: str = "echo", **kwargs: Any) -> None:
+    def __init__(self, *, delay: float = 0.0, **kwargs: Any) -> None:
         super().__init__(**kwargs)
-        self.delay, self.out = delay, out
+        self.delay = delay
         self.calls: list[Call] = []
         self.threads: set[str] = set()
         self.started: list[list[int]] = []
@@ -141,14 +138,8 @@ class _Log:
         time.sleep(self.delay)
         with self._lock:
             self.active -= 1
-        if v == EMPTY:
-            return {"actions": np.zeros((0, 7), np.float32)}
         if v < 0:
             raise ValueError("bad observation")
-        if self.out == "ramp":
-            return {"actions": v + np.arange(42, dtype=np.float64).reshape(6, 7)}
-        if self.out == "noactions":
-            return {"foo": v}
         n = getattr(self, "chunk_size", None)
         return {"actions": v * np.ones((n, 7) if n else 7, np.float32)}
 
@@ -182,8 +173,22 @@ class BatchLogServer(LogServer):
         return {"actions": values[:, None] * np.ones((len(rows), 7), np.float32)}
 
 
-class LiveLogServer(_Log, LiveModelServer):
-    pass
+class LoopLogServer(_Log, DaemonModelServer):
+    """Continuous inference: each episode's latest observation in turn; a failed one errors and the loop goes on."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(warn_unadvanced=False, **kwargs)
+
+    async def run(self, ep: EpisodeContext) -> None:
+        async for request in ep.observations():
+            try:
+                action = await ep.call(self.predict, request.obs, request.row)
+            except EpisodeClosed:
+                return
+            except Exception as exc:
+                await request.error(exc)
+                continue
+            await request.reply(action)
 
 
 class StubBenchmark(StepBenchmark):

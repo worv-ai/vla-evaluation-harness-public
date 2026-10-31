@@ -17,6 +17,7 @@
 #
 # [tool.uv]
 # exclude-newer = "2026-02-24T00:00:00Z"
+# exclude-newer-package = { chrono-daemon = "2026-06-29T00:00:00Z" }  # vla-eval's clocks dependency
 # ///
 """OpenVLA-OFT model server.
 

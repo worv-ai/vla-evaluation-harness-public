@@ -12,6 +12,7 @@
 #
 # [tool.uv]
 # exclude-newer = "2026-05-08T00:00:00Z"
+# exclude-newer-package = { chrono-daemon = "2026-06-29T00:00:00Z" }  # vla-eval's clocks dependency
 # ///
 """BEHAVIOR-1K demo-replay model server.
 
