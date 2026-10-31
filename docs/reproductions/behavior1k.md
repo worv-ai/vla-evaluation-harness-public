@@ -74,8 +74,10 @@ image changed no result. The demo run also exercised the task switch (`og.clear(
 `turning_on_radio` replay succeeds 4 steps earlier than the 2025 stack did (1364). The
 `picking_up_trash` replay reaches no goal predicate on either version; whether that is replay drift
 over a 7.7k-step trajectory or an env difference is not diagnosed, so one passing demo is the only
-end-to-end correctness evidence so far. None of these runs came near the time budget, so its failure
-path is covered by unit tests only. Known issue: the container process segfaults during interpreter
+end-to-end correctness evidence so far. To exercise the time budget, a scratch zero-action server that
+sleeps 2 s per query ran `turning_on_radio` public 0 with `max_steps: 20` (a 20 s budget): the rollout
+failed after 8 simulator steps with `failure_reason: group_time_budget_exceeded`, `q_score` 0 and
+upstream's zeroed normalized metrics (`normalized_time` 1/1.5). Known issue: the container process segfaults during interpreter
 teardown (Isaac Sim is left running, see `cleanup`), after results are written, so `vla-eval run`
 exits non-zero (245) on an otherwise complete run.
 
