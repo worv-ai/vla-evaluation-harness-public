@@ -14,7 +14,7 @@
 # lerobot = { git = "https://github.com/huggingface/lerobot.git", rev = "v0.6.0" }
 #
 # [tool.uv]
-# exclude-newer = "2026-07-04T00:00:00Z"
+# exclude-newer = "2026-10-31T00:00:00Z"
 # ///
 """🤗 LeRobot policy model server.
 

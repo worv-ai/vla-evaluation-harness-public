@@ -18,7 +18,7 @@
 # openpi = { git = "https://github.com/XPolicyLab/XPolicyLab.git", rev = "fe71eb54675cef495fea817a637386a4f4529153", subdirectory = "policy/Pi_05/openpi" }
 #
 # [tool.uv]
-# exclude-newer = "2026-07-13T00:00:00Z"
+# exclude-newer = "2026-10-31T00:00:00Z"
 # # The fork's own overrides don't propagate to consumers; without them
 # # lerobot(numpy>=2) vs openpi(numpy<2) is unresolvable.
 # override-dependencies = [
