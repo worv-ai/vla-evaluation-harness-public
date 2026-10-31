@@ -1,7 +1,5 @@
 # RFC-0009: Vectorized Benchmarks
 
-> **Note:** the CI/LAAS design (`LiveModelServer`) is superseded by episode daemons (#97).
-
 - **Author:** @MilkClouds
 - **Status:** Implemented
 - **Type:** Standards Track
