@@ -892,3 +892,29 @@ async def test_the_hooks_run_on_the_model_thread():
         await _observe(server, rid, 1.0)
         await server._end_episodes([rid], [{}])
     assert server.threads == {"model_0"}
+
+
+@pytest.mark.anyio
+async def test_infer_drops_a_row_that_ended_during_the_model_call():
+    server = Raw()
+
+    def slow_forward(o, r):
+        time.sleep(0.2)
+        return {"actions": np.zeros((len(r), 2), np.float32)}
+
+    server.engine.predict_batch = slow_forward
+    async with serving(server):
+        a, b = await _start(server, 2)
+        rows = server._rows([a, b])
+        got: list[Any] = []
+
+        async def infer() -> None:
+            got.append(await server.engine.infer({"value": np.asarray([1.0, 2.0], np.float32)}, rows))
+
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(infer)
+            await anyio.sleep(0.05)
+            server._gen[a] += 1  # a ends while the call runs
+    (result,) = got
+    assert list(result.errors) == [0] and isinstance(result.errors[0], EpisodeClosed)
+    assert np.asarray(result.actions["actions"]).shape == (1, 2)  # b's alone

@@ -266,6 +266,8 @@ class PredictionEngine:
         if todo:
             failed, parts = await self.server._run_submitted(self._work, obs, rows, todo)
             errors.update(failed)
+        if raw and parts and not (current := self.server._current(rows)).all():  # ended during the call
+            parts = [_drop_ended(positions, out, current, errors) for positions, out in parts]
         if not chunked:
             return columns.concat([p for _, p in parts]), errors
         # A chunked row returns its chunk's first action and keeps the rest; every row returns "actions" only.
@@ -346,6 +348,15 @@ async def reply_prediction(server: ModelServer, rows: Rows, result: PredictionRe
         by_error.setdefault(id(exc), (exc, []))[1].append(i)
     for exc, positions in by_error.values():
         await server.send_error(rows.take(positions), exc)
+
+
+def _drop_ended(
+    positions: list[int], out: Batch, current: np.ndarray, errors: dict[int, Exception]
+) -> tuple[list[int], Batch]:
+    """``positions`` and their rows of ``out`` whose episode still runs; the others fail as ended."""
+    keep = [j for j, i in enumerate(positions) if current[i]]
+    errors.update({i: _ENDED for i in positions if not current[i]})
+    return [positions[j] for j in keep], columns.take(out, keep) if len(keep) < len(positions) else out
 
 
 def _fail(requests: list[_Request], exc: Exception) -> None:
