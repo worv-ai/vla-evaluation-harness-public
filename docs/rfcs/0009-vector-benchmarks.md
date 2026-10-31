@@ -100,8 +100,8 @@ per-episode state in arrays indexed by them, and the lifecycle and inference are
 implements `predict(obs, row)` (one observation) or `predict_batch(obs, rows)` (columns in, columns out); the
 framework slices batches by `max_batch_size`, serves chunked episodes from per-row buffers and infers only the
 rows whose buffer ran out.  The same dispatcher coalesces single-episode connections' observations, so
-sharded and vector evaluations reach the model the same way.  HELLO advertises `capabilities.vector_step`, and
-the orchestrator refuses a server without it.  Messages other than `VECTOR_STEP` are unchanged, so the sync and
+sharded and vector evaluations reach the model the same way.  HELLO advertises `capabilities.vector_step`
+(`ModelServer.supports_vector_step`; `False` for `LiveModelServer`), and the orchestrator refuses a server without it.  Messages other than `VECTOR_STEP` are unchanged, so the sync and
 live runners are too.
 
 ### Orchestrator

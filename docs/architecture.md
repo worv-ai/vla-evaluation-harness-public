@@ -133,8 +133,10 @@ Observations and actions are `dict[str, Any]`; the framework imposes **no fixed 
 ```
 ModelServer (ABC)            ← async callbacks: on_episode_start / on_observation / on_episode_end,
 │                              answered with send_action / send_error
-└── PredictModelServer       ← subclass this: predict(obs, row) or predict_batch(obs, rows);
-                               hooks reset_episodes / observe / finish_episodes on the model thread
+├── PredictModelServer       ← subclass this: predict(obs, row) or predict_batch(obs, rows), batched across
+│                              rows and connections; hooks reset_episodes / finish_episodes
+└── LiveModelServer          ← continuous inference: predict each episode's latest observation in a loop,
+                               select(action, latency, row) the action to send (LAAS); batch 1
 ```
 
 Every running episode is a **row** of the model server (a connection's episode, or a vector slot); `row.id` keys

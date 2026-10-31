@@ -169,17 +169,20 @@ Every running episode is a row; inference and the episode hooks are batched over
 - `reset_episodes(rows)` / `finish_episodes(rows, results)`: blocking. `rows.episodes[i].config` is the
   `EPISODE_START` payload; return `{i: exc}` to fail one start, or raise to fail all. `results[i]` carries
   `status` (`success|fail|error|aborted`) and `failure_reason`.
-- `observe(obs, rows)`: every observation, once, in order, before it is inferred or answered from a chunk buffer
-  (e.g. a state history); default no-op. Every hook runs on one model thread.
+- Every hook runs on one model thread (`await self.run_on_model_thread(fn, *args)` from a `ModelServer`).
 - Per-episode state: key it by `row.id` (`rows.ids` in hooks); ids are reused, so reset it in `reset_episodes`.
 - `max_rows=1`: the model's state is global (e.g. its own action queue), so one episode at a time.
 - `chunk_size`: `[T, D]` per row, served from a per-episode buffer (`rows.episodes[i].chunk_size` overrides it).
-- `continuous_inference=True`: each episode's latest observation is inferred in a loop and its action sent;
-  `laas=True, hz=...` picks the chunk's action `latency * hz` steps in.
 
-Beyond predict (async producers, streaming): subclass `ModelServer` and implement `on_observation(obs, rows)`,
-answering each row once with `await self.send_action(rows, actions)` / `send_error`, now or later. A reply through
-rows of an ended episode, or one already answered, is dropped.
+Continuous inference (real-time, live mode): subclass `LiveModelServer` (`model_servers/live.py`) with the same
+`predict` / `reset_episodes` / `finish_episodes`. Each episode's latest observation is inferred in a loop, one at a
+time, and `select(action, latency, row)` picks what to send (default: the first action, or with `laas=True, hz=...`
+the one `latency * hz` steps in). No batching and no `VECTOR_STEP`.
+
+Anything else (async producers, streaming, a policy that must see every observation, as `vlanext.py` does): subclass
+`ModelServer` and implement `on_observation(obs, rows)`, answering each row once with
+`await self.send_action(rows, actions)` / `send_error`, now or later. A reply through rows of an ended episode, or one
+already answered, is dropped.
 
 See [the Push-T example](examples/pusht_train_eval/train.py) for a global policy reset per episode.
 
