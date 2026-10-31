@@ -54,7 +54,7 @@ uv run python experiments/bench_demand.py \
     --shards 1,2,4,8
 ```
 
-Starts an instant-response server and launches N real Docker shards against it. Counts the observations reaching `act()` to measure actual observation rate (including chunk-buffered steps).
+Starts an instant-response server and launches N real Docker shards against it. Counts the observations reaching the server's `on_observation()` to measure actual observation rate (including chunk-buffered steps).
 
 **What to look for**: λ(N) grows linearly at first, then flattens at high N due to host contention.
 

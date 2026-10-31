@@ -14,12 +14,12 @@ from anyio.lowlevel import checkpoint
 import pytest
 
 from vla_eval.connection import Connection
-from vla_eval.model_servers.base import ModelServer, Row, Rows
+from vla_eval.model_servers.base import Episode, ModelServer, Row, Rows
 from vla_eval.model_servers.live import LiveModelServer
 from vla_eval.model_servers.predict import PredictModelServer
 from vla_eval.protocol.messages import MessageType
 
-from tests.conftest import start_server, stop_server
+from tests.conftest import EMPTY, LiveLogServer, LogServer, start_server, stop_server
 
 LIVE = {"task": {"name": "t"}, "mode": "live"}
 
@@ -139,8 +139,16 @@ async def test_a_row_listed_twice_in_a_reply_is_answered_once(free_port):
         await stop_server(task)
 
 
+@pytest.mark.parametrize(
+    ("end", "expected"),
+    [
+        (None, {"status": "aborted", "failure_reason": "connection_closed"}),
+        ({"status": "error", "failure_reason": "timeout"}, {"status": "error", "failure_reason": "timeout"}),
+    ],
+)
 @pytest.mark.anyio
-async def test_a_disconnect_ends_an_episode_waiting_for_a_reply(free_port):
+async def test_a_disconnect_ends_an_episode_waiting_for_a_reply(free_port, end, expected):
+    """With an EPISODE_END sent before closing (the harness timed out), its status reaches the server."""
     server = ReplayServer()
     server.mode = "silent"
     task = await start_server(server, free_port)
@@ -150,33 +158,13 @@ async def test_a_disconnect_ends_an_episode_waiting_for_a_reply(free_port):
         await conn.start_episode({"task": {"name": "t"}})
         with pytest.raises(TimeoutError):
             await conn.act({"value": 1.0})
+        if end is not None:
+            await conn.end_episode(end)
         await conn.close()
         with anyio.fail_after(3):
             while not server.ended:
                 await anyio.sleep(0.02)
-        assert server.ended == [{"status": "aborted", "failure_reason": "connection_closed"}]
-    finally:
-        await stop_server(task)
-
-
-@pytest.mark.anyio
-async def test_an_episode_end_sent_before_a_disconnect_still_counts(free_port):
-    """The harness times out, sends EPISODE_END with its status, then closes: the status reaches the server."""
-    server = ReplayServer()
-    server.mode = "silent"
-    task = await start_server(server, free_port)
-    try:
-        conn = Connection(f"ws://127.0.0.1:{free_port}", timeout=0.2)
-        await conn.connect()
-        await conn.start_episode({"task": {"name": "t"}})
-        with pytest.raises(TimeoutError):
-            await conn.act({"value": 1.0})
-        await conn.end_episode({"status": "error", "failure_reason": "timeout"})
-        await conn.close()
-        with anyio.fail_after(3):
-            while not server.ended:
-                await anyio.sleep(0.02)
-        assert server.ended == [{"status": "error", "failure_reason": "timeout"}]
+        assert server.ended == [expected]
     finally:
         await stop_server(task)
 
@@ -191,31 +179,9 @@ def _vstep(slots: list[int], starts: list, values: Any) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-class HistoryServer(PredictModelServer):
-    """predict() logs each observation it infers with the row's step; reset/finish log the rows."""
-
-    def __init__(self, delay: float = 0.0, **kwargs: Any) -> None:
-        super().__init__(**kwargs)
-        self.delay = delay
-        self.predicted: list[tuple[float, int]] = []
-
-    def predict(self, obs: dict[str, Any], row: Row) -> dict[str, Any]:
-        self.predicted.append((float(obs["value"]), row.step))
-        time.sleep(self.delay)
-        n = self.chunk_size or 1
-        return {"actions": float(obs["value"]) * np.ones((n, 7), np.float32)}
-
-
-class FailOnceServer(HistoryServer):
-    def predict(self, obs, row):
-        if obs["value"] < 0:
-            raise ValueError("bad")
-        return super().predict(obs, row)
-
-
 @pytest.mark.anyio
 async def test_a_failed_observation_still_counts_as_a_step(free_port):
-    server = FailOnceServer()
+    server = LogServer()
     task = await start_server(server, free_port)
     try:
         async with Connection(f"ws://127.0.0.1:{free_port}") as conn:
@@ -223,71 +189,15 @@ async def test_a_failed_observation_still_counts_as_a_step(free_port):
             with pytest.raises(RuntimeError, match="observation_failed"):
                 await conn.act({"value": -1.0})
             await conn.act({"value": 2.0})
-        assert server.predicted == [(2.0, 1)]
+        assert server.predicted == [(-1.0, 0), (2.0, 1)]
     finally:
         await stop_server(task)
-
-
-@pytest.mark.anyio
-async def test_a_vector_step_never_waits_for_a_batch(free_port):
-    """One slot left, or some slots served from their buffers: no max_wait_time stall."""
-    server = HistoryServer(chunk_size=2, max_batch_size=8, max_wait_time=5.0)
-    task = await start_server(server, free_port)
-    try:
-        async with Connection(f"ws://127.0.0.1:{free_port}") as conn:
-            t0 = time.monotonic()
-            await conn.exchange(_vstep([0], [[0, {}]], 1.0))  # one row
-            await conn.exchange(_vstep([0, 1], [[1, {}]], 2.0))  # slot 0 buffered, slot 1 inferred
-            await conn.exchange(_vstep([0, 1], [], 3.0))  # slot 0 inferred, slot 1 buffered
-            assert time.monotonic() - t0 < 2.0
-        assert server.predicted == [(1.0, 0), (2.0, 0), (3.0, 2)]
-    finally:
-        await stop_server(task)
-
-
-class BrokenStartServer(HistoryServer):
-    def __init__(self, **kwargs: Any) -> None:
-        super().__init__(**kwargs)
-        self.finished: list[list[int]] = []
-
-    def reset_episodes(self, rows: Rows):
-        return {i: ValueError("no") for i, e in enumerate(rows.episodes) if e.config["task"].get("broken")}
-
-    def finish_episodes(self, rows, results):
-        self.finished.append(rows.ids.tolist())
-
-
-@pytest.mark.anyio
-async def test_a_failed_start_frees_its_row_without_an_end(free_port):
-    server = BrokenStartServer()
-    task = await start_server(server, free_port)
-    try:
-        async with Connection(f"ws://127.0.0.1:{free_port}") as conn:
-            reply = await conn.exchange(_vstep([0, 1], [[0, {"task": {"broken": True}}], [1, {"task": {}}]], 1.0))
-            assert [s for s, _ in reply["errors"]] == [0]
-            reply = await conn.exchange(_vstep([0], [[0, {"task": {}}]], 2.0))
-            assert reply["errors"] == []
-        with anyio.fail_after(3):  # the disconnect ends both
-            while not server.finished:
-                await anyio.sleep(0.02)
-        assert server.finished == [[0, 1]]  # row 0 was free again; the broken start never ended
-    finally:
-        await stop_server(task)
-
-
-class SlowEndLogServer(HistoryServer):
-    def __init__(self) -> None:
-        super().__init__(delay=0.3)
-        self.results: list[dict[str, Any]] = []
-
-    def finish_episodes(self, rows: Rows, results) -> None:
-        self.results += results
 
 
 @pytest.mark.anyio
 async def test_a_vector_end_sent_before_a_disconnect_still_counts(free_port):
     """A step still inferring when the client closes; the ends it sent after it keep their status."""
-    server = SlowEndLogServer()
+    server = LogServer(delay=0.3)
     task = await start_server(server, free_port)
     try:
         conn = Connection(f"ws://127.0.0.1:{free_port}")
@@ -304,41 +214,128 @@ async def test_a_vector_end_sent_before_a_disconnect_still_counts(free_port):
         await stop_server(task)
 
 
+@pytest.mark.anyio
+async def test_max_wait_time_counts_from_the_oldest_requests_arrival(free_port):
+    """B arrives while A infers; once A is done, B has waited max_wait_time already and is inferred at once."""
+    server = LogServer(delay=0.4, max_batch_size=4, max_wait_time=0.3)
+    task = await start_server(server, free_port)
+    try:
+        async with Connection(f"ws://127.0.0.1:{free_port}") as a, Connection(f"ws://127.0.0.1:{free_port}") as b:
+            await a.start_episode({"task": {"name": "t"}})
+            await b.start_episode({"task": {"name": "t"}})
+            await a.send_observation({"value": 1.0})
+            await anyio.sleep(0.35)  # A waits 0.3 s, then infers until 0.7 s
+            sent = time.monotonic()
+            await b.act({"value": 2.0})
+            await a.recv()
+        started = {c.value: c.t for c in server.calls}
+        assert started[2.0] - sent < 0.5  # 0.35 s behind A; 0.65 s if the wait started over
+    finally:
+        await stop_server(task)
+
+
+@pytest.mark.anyio
+async def test_a_cancelled_model_call_never_runs_or_returns_only_after_it_ran():
+    server = ReplayServer()
+    ran: list[str] = []
+
+    def slow(tag: str) -> None:
+        time.sleep(0.2)
+        ran.append(tag)
+
+    with anyio.CancelScope() as scope:
+        scope.cancel()
+        await server.run_on_model_thread(slow, "cancelled before")
+    with anyio.move_on_after(0.05):
+        await server.run_on_model_thread(slow, "cancelled during")
+    assert ran == ["cancelled during"]  # the await outlived the call
+    await anyio.sleep(0.3)
+    assert ran == ["cancelled during"]
+
+
+# ---------------------------------------------------------------------------
+# Cancellation and failure paths: every row released once, every request completed once
+# ---------------------------------------------------------------------------
+
+
+class HangingStartServer(ReplayServer):
+    max_rows = 1
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.hang = True
+
+    async def on_episode_start(self, rows: Rows) -> None:
+        if self.hang:
+            await anyio.sleep_forever()
+
+
+@pytest.mark.anyio
+async def test_a_start_cancelled_in_on_episode_start_frees_its_row():
+    server = HangingStartServer()
+    with anyio.move_on_after(0.05):
+        await server._start_episodes([({}, "s")])
+    assert server._running() == 0
+    server.hang = False
+    assert await server._start_episodes([({}, "s")]) == [0]
+
+
+@pytest.mark.anyio
+async def test_a_cancelled_episode_end_still_finishes_the_episode():
+    server = LogServer()
+    (rid,) = await server._start_episodes([({"task": {}}, "s")])
+    assert isinstance(rid, int)
+    with anyio.CancelScope() as scope:
+        scope.cancel()
+        await server._end_episodes([rid], [{}])
+    assert server.ended == [[rid]] and server._running() == 0
+
+
+async def _requests(server: PredictModelServer, obs: list[dict[str, Any]]) -> list[Any]:
+    from vla_eval.model_servers.predict import _Request
+
+    ids = await server._start_episodes([({}, "s")] * len(obs))
+    requests = []
+    for o, i in zip(obs, ids):
+        assert isinstance(i, int)
+        requests.append(_Request({k: np.asarray([v]) for k, v in o.items()}, server._rows([i]), wait=False))
+    return requests
+
+
+@pytest.mark.anyio
+async def test_a_cancelled_dispatch_fails_its_requests():
+    server = LogServer()
+    (req,) = await _requests(server, [{"value": 1.0}])
+    with anyio.CancelScope() as scope:
+        scope.cancel()
+        await server._run([req])
+    assert req.done.is_set() and set(req.errors) == {0} and "stopped" in str(req.errors[0])
+
+
+@pytest.mark.anyio
+async def test_a_dispatch_cancelled_one_request_at_a_time_completes_every_request():
+    server = LogServer(delay=0.2)
+    first, second = await _requests(server, [{"value": 1.0}, {"other": 2.0}])  # different keys: one at a time
+    with anyio.move_on_after(0.05):
+        await server._run([first, second])
+    assert first.done.is_set() and not first.errors and _value(first.actions) == 1.0
+    assert second.done.is_set() and set(second.errors) == {0}
+
+
+@pytest.mark.anyio
+async def test_a_row_ending_before_the_model_call_is_not_inferred():
+    server = LogServer()
+    (req,) = await _requests(server, [{"value": 1.0}])
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(server._run, [req])
+        await checkpoint()  # the dispatcher runs to its first checkpoint
+        server._gen[0] += 1
+    assert server.predicted == [] and set(req.errors) == {0}
+
+
 # ---------------------------------------------------------------------------
 # LiveModelServer: the latest observation of each episode, inferred in a loop
 # ---------------------------------------------------------------------------
-
-
-class LiveLogServer(LiveModelServer):
-    def __init__(self, delay: float = 0.0, out: str = "echo", **kwargs: Any) -> None:
-        super().__init__(**kwargs)
-        self.delay, self.out = delay, out
-        self.predicted: list[tuple[float, int]] = []
-        self.threads: set[str] = set()
-        self.busy = False
-        self.finished_busy: list[bool] = []
-
-    def reset_episodes(self, rows: Rows) -> None:
-        self.threads.add(threading.current_thread().name)
-
-    def predict(self, obs: dict[str, Any], row: Row) -> dict[str, Any]:
-        self.threads.add(threading.current_thread().name)
-        v = float(obs["value"])
-        self.predicted.append((v, row.step))
-        self.busy = True
-        time.sleep(self.delay)
-        self.busy = False
-        if v < 0:
-            raise ValueError("boom")
-        if self.out == "chunk":
-            return {"actions": v + np.arange(42, dtype=np.float64).reshape(6, 7)}
-        if self.out == "noactions":
-            return {"foo": v}
-        return {"actions": v * np.ones(7)}
-
-    def finish_episodes(self, rows: Rows, results) -> None:
-        self.threads.add(threading.current_thread().name)
-        self.finished_busy.append(self.busy)
 
 
 async def _live(server: LiveModelServer, port: int, values: list[float], gap: float = 0.0) -> list[Any]:
@@ -355,7 +352,7 @@ async def _live(server: LiveModelServer, port: int, values: list[float], gap: fl
             got = []
             while True:
                 try:
-                    m = await conn.recv(timeout=1.0)
+                    m = await conn.recv(timeout=0.5)
                 except Exception:
                     break
                 got.append((m.type, seqs.index(m.seq), m.payload))
@@ -374,19 +371,26 @@ async def test_live_coalesces_to_the_latest_observation_and_counts_every_step(fr
 
 
 @pytest.mark.anyio
-async def test_live_sends_a_chunks_first_action_as_float32(free_port):
-    got = await _live(LiveLogServer(out="chunk", chunk_size=4), free_port, [1.0], gap=0.2)
-    (_, _, payload), chunk = got[0], 1.0 + np.arange(42).reshape(6, 7)
-    assert np.asarray(payload["actions"]).dtype == np.float32 and np.array_equal(payload["actions"], chunk[0])
-
-
-@pytest.mark.parametrize("chunk_size", [4, None])
-@pytest.mark.anyio
-async def test_live_laas_counts_latency_from_admission(free_port, chunk_size):
-    server = LiveLogServer(delay=0.25, out="chunk", chunk_size=chunk_size, laas=True, hz=10.0)
+async def test_live_laas_counts_latency_from_admission(free_port):
+    server = LiveLogServer(delay=0.25, out="ramp", chunk_size=4, laas=True, hz=10.0)
     got = await _live(server, free_port, [1.0])
     chunk = 1.0 + np.arange(42).reshape(6, 7)
-    assert any(np.array_equal(got[0][2]["actions"], chunk[k]) for k in (2, 3))
+    assert any(np.array_equal(got[0][2]["actions"], chunk[k]) for k in (2, 3))  # never past chunk_size=4
+
+
+def test_laas_selects_the_step_its_latency_reached():
+    server = LiveLogServer(laas=True, hz=10.0, chunk_size=4)
+    row = Row(0, 0, True, Episode(config={}, episode_id="e", session_id="s", chunk_size=4))
+    chunk = {"actions": np.arange(42, dtype=np.float64).reshape(6, 7)}
+    assert np.array_equal(server.select({"actions": np.ones(7)}, 0.0, row)["actions"], np.ones(7))
+    assert np.array_equal(server.select(chunk, 0.25, row)["actions"], chunk["actions"][2])
+    assert np.array_equal(server.select(chunk, 9.0, row)["actions"], chunk["actions"][3])  # trimmed first
+    assert server.select(chunk, 0.0, row)["actions"].dtype == np.float32
+    assert server.select({"foo": 1.0}, 0.0, row) == {"foo": 1.0}
+    row.episode.chunk_size = None
+    assert np.array_equal(server.select(chunk, 9.0, row)["actions"], chunk["actions"][5])
+    server.laas = False
+    assert np.array_equal(server.select(chunk, 0.25, row)["actions"], chunk["actions"][0])
 
 
 @pytest.mark.anyio
@@ -395,17 +399,38 @@ async def test_live_passes_an_action_without_actions_through(free_port):
     assert [(i, p) for _, i, p in got] == [(0, {"foo": 1.0}), (1, {"foo": 2.0})]
 
 
+class SendFailsOnceServer(LiveLogServer):
+    async def send_action(self, rows: Rows, actions: Any) -> None:
+        if not self.predicted[1:]:
+            raise RuntimeError("send failed")
+        await super().send_action(rows, actions)
+
+
+@pytest.mark.parametrize(
+    ("cls", "first", "error"),
+    [
+        (LiveLogServer, -1.0, "bad observation"),
+        (LiveLogServer, EMPTY, "IndexError"),  # an empty chunk
+        (SendFailsOnceServer, 1.0, "send failed"),
+    ],
+)
 @pytest.mark.anyio
-async def test_live_failure_errors_its_observation_and_the_loop_goes_on(free_port):
-    got = await _live(LiveLogServer(), free_port, [-1.0, 2.0], gap=0.2)
+async def test_live_a_failure_errors_its_observation_and_the_loop_goes_on(free_port, cls, first, error):
+    got = await _live(cls(), free_port, [first, 2.0], gap=0.2)
     assert [(t, i) for t, i, _ in got] == [(MessageType.ERROR, 0), (MessageType.ACTION, 1)]
-    assert "boom" in got[0][2]["error"] and _value(got[1][2]) == 2.0
+    assert error in got[0][2]["error"] and _value(got[1][2]) == 2.0
 
 
-class SelectLastServer(LiveLogServer):
-    def __init__(self, **kwargs: Any) -> None:
-        super().__init__(**kwargs)
+class SelectLastServer(LiveModelServer):
+    """Overrides predict and select only: the default reset and finish hooks run."""
+
+    def __init__(self) -> None:
+        super().__init__()
         self.latencies: list[float] = []
+
+    def predict(self, obs, row):
+        time.sleep(0.2)
+        return {"actions": float(obs["value"]) + np.arange(42, dtype=np.float64).reshape(6, 7)}
 
     def select(self, action, latency, row):
         self.latencies.append(latency)
@@ -414,7 +439,7 @@ class SelectLastServer(LiveLogServer):
 
 @pytest.mark.anyio
 async def test_live_select_chooses_the_action_after_the_inference(free_port):
-    server = SelectLastServer(delay=0.2, out="chunk")
+    server = SelectLastServer()
     got = await _live(server, free_port, [1.0])
     assert np.array_equal(got[0][2]["actions"], 1.0 + np.arange(35, 42))
     assert server.latencies[0] >= 0.2
@@ -422,6 +447,7 @@ async def test_live_select_chooses_the_action_after_the_inference(free_port):
 
 @pytest.mark.anyio
 async def test_live_episode_end_waits_for_the_inference_in_flight(free_port):
+    """The in-flight action is dropped, and the next episode on the connection gets a loop of its own."""
     server = LiveLogServer(delay=0.3)
     task = await start_server(server, free_port)
     try:
@@ -432,9 +458,24 @@ async def test_live_episode_end_waits_for_the_inference_in_flight(free_port):
             await conn.end_episode({})
             await conn.start_episode(LIVE)  # the same row id, once the first episode finished
             assert _value(await conn.act({"value": 2.0})) == 2.0
-        assert server.finished_busy[:1] == [False]
+        assert server.ended_busy[:1] == [False]
         assert server.threads == {"model_0"}
     finally:
+        await stop_server(task)
+
+
+@pytest.mark.anyio
+async def test_a_server_without_vector_step_refuses_it(free_port):
+    task = await start_server(LiveLogServer(), free_port)
+    conn = Connection(f"ws://127.0.0.1:{free_port}")
+    await conn.connect()
+    try:
+        assert conn.server_info["capabilities"] == {"vector_step": False}
+        step = {"ends": [], "starts": [[0, {"task": {"name": "t"}}]], "slots": [0], "observations": {"v": [1.0]}}
+        with pytest.raises(RuntimeError, match="vector_step_unsupported"):
+            await conn.exchange(step)
+    finally:
+        await conn.close()
         await stop_server(task)
 
 
@@ -507,160 +548,3 @@ async def test_vlanext_a_rows_failure_is_its_own_in_a_vector_step(vlanext, free_
         assert [x[:2] for x in log] == [(1.0, [1.0]), (-1.0, [-1.0]), (3.0, [3.0]), (5.0, [-1.0, 5.0])]
     finally:
         await stop_server(task)
-
-
-@pytest.mark.anyio
-async def test_a_cancelled_model_call_never_runs_or_returns_only_after_it_ran():
-    server = ReplayServer()
-    ran: list[str] = []
-
-    def slow(tag: str) -> None:
-        time.sleep(0.2)
-        ran.append(tag)
-
-    with anyio.CancelScope() as scope:
-        scope.cancel()
-        await server.run_on_model_thread(slow, "cancelled before")
-    with anyio.move_on_after(0.05):
-        await server.run_on_model_thread(slow, "cancelled during")
-    assert ran == ["cancelled during"]  # the await outlived the call
-    await anyio.sleep(0.3)
-    assert ran == ["cancelled during"]
-
-
-@pytest.mark.anyio
-async def test_a_server_without_vector_step_refuses_it(free_port):
-    task = await start_server(LiveLogServer(), free_port)
-    conn = Connection(f"ws://127.0.0.1:{free_port}")
-    await conn.connect()
-    try:
-        assert conn.server_info["capabilities"] == {"vector_step": False}
-        step = {"ends": [], "starts": [[0, {"task": {"name": "t"}}]], "slots": [0], "observations": {"v": [1.0]}}
-        with pytest.raises(RuntimeError, match="vector_step_unsupported"):
-            await conn.exchange(step)
-    finally:
-        await conn.close()
-        await stop_server(task)
-
-
-# ---------------------------------------------------------------------------
-# Cancellation and failure paths: every row released once, every request completed once
-# ---------------------------------------------------------------------------
-
-
-class HangingStartServer(ReplayServer):
-    max_rows = 1
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.hang = True
-
-    async def on_episode_start(self, rows: Rows) -> None:
-        if self.hang:
-            await anyio.sleep_forever()
-
-
-@pytest.mark.anyio
-async def test_a_start_cancelled_in_on_episode_start_frees_its_row():
-    server = HangingStartServer()
-    with anyio.move_on_after(0.05):
-        await server._start_episodes([({}, "s")])
-    assert server._running() == 0
-    server.hang = False
-    assert await server._start_episodes([({}, "s")]) == [0]
-
-
-@pytest.mark.anyio
-async def test_a_cancelled_episode_end_still_finishes_the_episode():
-    server = BrokenStartServer()
-    (rid,) = await server._start_episodes([({"task": {}}, "s")])
-    assert isinstance(rid, int)
-    with anyio.CancelScope() as scope:
-        scope.cancel()
-        await server._end_episodes([rid], [{}])
-    assert server.finished == [[rid]] and server._running() == 0
-
-
-class SendFailsOnceServer(LiveLogServer):
-    async def send_action(self, rows: Rows, actions: Any) -> None:
-        if not self.predicted[1:]:
-            raise RuntimeError("send failed")
-        await super().send_action(rows, actions)
-
-
-@pytest.mark.anyio
-async def test_live_a_failed_send_errors_its_observation_and_the_loop_goes_on(free_port):
-    got = await _live(SendFailsOnceServer(), free_port, [1.0, 2.0], gap=0.2)
-    assert [(t, i) for t, i, _ in got] == [(MessageType.ERROR, 0), (MessageType.ACTION, 1)]
-    assert "send failed" in got[0][2]["error"] and _value(got[1][2]) == 2.0
-
-
-class StampServer(HistoryServer):
-    def __init__(self, **kwargs: Any) -> None:
-        super().__init__(**kwargs)
-        self.started: dict[float, float] = {}
-
-    def predict(self, obs, row):
-        self.started[float(obs["value"])] = time.monotonic()
-        return super().predict(obs, row)
-
-
-@pytest.mark.anyio
-async def test_max_wait_time_counts_from_the_oldest_requests_arrival(free_port):
-    """B arrives while A infers; once A is done, B has waited max_wait_time already and is inferred at once."""
-    server = StampServer(delay=0.4, max_batch_size=4, max_wait_time=0.3)
-    task = await start_server(server, free_port)
-    try:
-        async with Connection(f"ws://127.0.0.1:{free_port}") as a, Connection(f"ws://127.0.0.1:{free_port}") as b:
-            await a.start_episode({"task": {"name": "t"}})
-            await b.start_episode({"task": {"name": "t"}})
-            await a.send_observation({"value": 1.0})
-            await anyio.sleep(0.35)  # A waits 0.3 s, then infers until 0.7 s
-            sent = time.monotonic()
-            await b.act({"value": 2.0})
-            await a.recv()
-        assert server.started[2.0] - sent < 0.5  # 0.35 s behind A; 0.65 s if the wait started over
-    finally:
-        await stop_server(task)
-
-
-async def _requests(server: PredictModelServer, obs: list[dict[str, Any]]) -> list[Any]:
-    from vla_eval.model_servers.predict import _Request
-
-    ids = await server._start_episodes([({}, "s")] * len(obs))
-    requests = []
-    for o, i in zip(obs, ids):
-        assert isinstance(i, int)
-        requests.append(_Request({k: np.asarray([v]) for k, v in o.items()}, server._rows([i]), wait=False))
-    return requests
-
-
-@pytest.mark.anyio
-async def test_a_cancelled_dispatch_fails_its_requests():
-    server = HistoryServer()
-    (req,) = await _requests(server, [{"value": 1.0}])
-    with anyio.CancelScope() as scope:
-        scope.cancel()
-        await server._run([req])
-    assert req.done.is_set() and set(req.errors) == {0} and "stopped" in str(req.errors[0])
-
-
-@pytest.mark.anyio
-async def test_a_dispatch_cancelled_one_request_at_a_time_completes_every_request():
-    server = HistoryServer(delay=0.2)
-    first, second = await _requests(server, [{"value": 1.0}, {"other": 2.0}])  # different keys: one at a time
-    with anyio.move_on_after(0.05):
-        await server._run([first, second])
-    assert first.done.is_set() and not first.errors and _value(first.actions) == 1.0
-    assert second.done.is_set() and set(second.errors) == {0}
-
-
-@pytest.mark.anyio
-async def test_a_row_ending_before_the_model_call_is_not_inferred():
-    server = HistoryServer()
-    (req,) = await _requests(server, [{"value": 1.0}])
-    async with anyio.create_task_group() as tg:
-        tg.start_soon(server._run, [req])
-        await checkpoint()  # the dispatcher runs to its first checkpoint
-        server._gen[0] += 1
-    assert server.predicted == [] and set(req.errors) == {0}

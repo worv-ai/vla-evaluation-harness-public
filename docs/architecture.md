@@ -88,7 +88,7 @@ See [RFC-0009](rfcs/0009-vector-benchmarks.md).
 ```
 Orchestrator ── VectorEpisodeRunner ── Connection ──► Model Server
                  │ reset(slots, ...)   VECTOR_STEP     (one row per slot,
-                 │ step(slots, acts) ◄─VECTOR_RESULT   act → predict_batch(obs, rows))
+                 │ step(slots, acts) ◄─VECTOR_RESULT   predict_batch(obs, rows))
                  ▼
           VectorStepBenchmark (num_envs environments)
 ```

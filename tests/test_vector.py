@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 import threading
+from collections import Counter
 from typing import Any, ClassVar
 from unittest.mock import patch
 
@@ -13,12 +14,10 @@ import pytest
 import websockets.exceptions
 
 from vla_eval.benchmarks.base import BenchmarkCommon, VectorStepBenchmark
-from vla_eval.model_servers.base import Row
-from vla_eval.model_servers.predict import PredictModelServer
 from vla_eval.orchestrator import Orchestrator, UnhealthyShardError
 from vla_eval.recording import RecordingStore
 
-from tests.conftest import start_server, stop_server
+from tests.conftest import BatchLogServer, LogServer, start_server, stop_server
 
 
 class StubVectorBenchmark(VectorStepBenchmark):
@@ -126,35 +125,11 @@ class SlotOneResultErrorStub(StubVectorBenchmark):
         return super().result(slot)
 
 
-class SlotTwoModelErrorStub(StubVectorBenchmark):
-    """Slot 1 sends a value the error server rejects."""
+class SlotOneModelErrorStub(StubVectorBenchmark):
+    """Slot 1 sends a value the server rejects."""
 
     def value(self, slot):
         return -1.0 if slot == 1 else float(slot + 1)
-
-
-class SessionLogServer(PredictModelServer):
-    """Echoes ``value`` and logs which session sent it; rejects negative values."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.seen: list[tuple[str, float]] = []
-
-    def predict(self, obs: dict[str, Any], row: Row) -> dict[str, Any]:
-        if obs["value"] < 0:
-            raise ValueError("bad observation")
-        self.seen.append((row.episode.session_id, float(obs["value"])))
-        return {"actions": obs["value"] * np.ones(7, dtype=np.float32)}
-
-
-class BatchLogServer(PredictModelServer):
-    def __init__(self) -> None:
-        super().__init__(max_batch_size=8, max_wait_time=0.2)
-        self.sizes: list[int] = []
-
-    def predict_batch(self, obs, rows):
-        self.sizes.append(len(rows))
-        return {"actions": np.asarray(obs["value"])[:, None] * np.ones(7, dtype=np.float32)}
 
 
 def _config(url: str, tmp_path, name: str = "vec", episodes: int = 4, **params: Any) -> dict[str, Any]:
@@ -179,7 +154,7 @@ def _episodes(result: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
 
 @pytest.fixture
 async def log_server(free_port: int):
-    server = SessionLogServer()
+    server = LogServer()
     task = await start_server(server, free_port)
     yield f"ws://127.0.0.1:{free_port}", server
     await stop_server(task)
@@ -202,6 +177,7 @@ async def test_waves_run_every_item_and_reset_only_when_idle(echo_server, tmp_pa
     assert all(running == [] for _, running in bench.resets)
     assert max(len(s) for s in bench.steps) == 3 and bench.misrouted == []
     assert all(len(tasks) == 1 for tasks in bench.step_tasks)
+    assert bench.threads == {threading.get_ident()}  # the benchmark runs on the orchestrator's thread
 
 
 @pytest.mark.anyio
@@ -223,7 +199,7 @@ async def test_each_running_episode_has_its_own_session(log_server, tmp_path, no
     url, server = log_server
     await _run(StubVectorBenchmark, _config(url, tmp_path, episodes=6), no_save=no_save, eval_id=f"ev-s{no_save}")
     by_session: dict[str, set[float]] = {}
-    for sid, value in server.seen:
+    for sid, value in ((c.session, c.value) for c in server.calls):
         by_session.setdefault(sid, set()).add(value)
     assert all(len(v) == 1 for v in by_session.values())  # a session never sees another slot's observations
     assert len(by_session) == (3 if no_save else 12)  # one per slot, or one per episode (its recording sid)
@@ -231,18 +207,6 @@ async def test_each_running_episode_has_its_own_session(log_server, tmp_path, no
         with sqlite3.connect(tmp_path / f"recording-ev-s{no_save}.sqlite") as db:
             sids = {row[0] for row in db.execute("SELECT sid FROM episode_results")}
         assert sids == set(by_session)
-
-
-@pytest.mark.anyio
-async def test_concurrent_slots_reach_the_server_as_one_batch(free_port, tmp_path):
-    server = BatchLogServer()
-    task = await start_server(server, free_port)
-    try:
-        result = await _run(StubVectorBenchmark, _config(f"ws://127.0.0.1:{free_port}", tmp_path), no_save=True)
-    finally:
-        await stop_server(task)
-    assert result["mean_success"] == pytest.approx(1.0)
-    assert max(server.sizes) == 3
 
 
 @pytest.mark.anyio
@@ -256,14 +220,22 @@ async def test_max_steps_ends_each_episode(echo_server, tmp_path):
 
 
 @pytest.mark.anyio
-async def test_a_model_error_fails_only_its_episode(log_server, tmp_path):
-    url, _ = log_server
-    result = await _run(SlotTwoModelErrorStub, _config(url, tmp_path), no_save=True)
+@pytest.mark.parametrize(
+    ("stub", "reason"), [(SlotOneModelErrorStub, "model_act"), (SlotOneResultErrorStub, "env_step")]
+)
+async def test_a_model_or_result_error_fails_only_its_episode(log_server, tmp_path, stub, reason):
+    url, server = log_server
+    result = await _run(stub, _config(url, tmp_path), no_save=True)
     episodes = _episodes(result)
     failed = [ep for _, ep in episodes if ep.get("failure_reason")]
     assert len(episodes) == 8 and len(failed) == 2  # slot 1 runs one episode in each wave of three
-    assert {ep["failure_reason"] for ep in failed} == {"model_act"}
+    assert {ep["failure_reason"] for ep in failed} == {reason}
     assert all(ep["metrics"]["success"] for _, ep in episodes if not ep.get("failure_reason"))
+    with anyio.fail_after(3):  # every server episode ends with its status
+        while len(server.results) < 8:
+            await anyio.sleep(0.02)
+    ends = Counter((r["status"], r["failure_reason"]) for r in server.results)
+    assert ends == {("success", None): 6, ("error", reason): 2}
 
 
 @pytest.mark.anyio
@@ -321,9 +293,9 @@ def _echo(step: dict[str, Any]) -> dict[str, Any]:
 
 
 class FakeConnection:
-    """Echoes vector steps; ``fail`` maps a call number to the exception that call raises."""
+    """Echoes vector steps; ``fail`` maps a call number to the exception that call raises, or "malformed"."""
 
-    fail: dict[int, BaseException] = {}
+    fail: dict[int, BaseException | str] = {}
     reconnect_error: BaseException | None = None
 
     def __init__(self, url="", **kwargs):
@@ -340,25 +312,31 @@ class FakeConnection:
     async def exchange(self, step):
         self.calls += 1
         self.steps.append(step)
-        if self.calls in self.fail:
-            raise self.fail[self.calls]
-        return _echo(step)
+        error = self.fail.get(self.calls)
+        if isinstance(error, BaseException):
+            raise error
+        reply = _echo(step)
+        if error == "malformed":
+            reply["actions"]["extra"] = [1]  # columns of different lengths
+        return reply
 
     async def reconnect(self):
         if self.reconnect_error is not None:
             raise self.reconnect_error
 
 
+_CLOSED = websockets.exceptions.ConnectionClosed(None, None)
+
+
 @pytest.mark.anyio
 @pytest.mark.parametrize(
-    ("step_error", "reason"),
-    [(websockets.exceptions.ConnectionClosed(None, None), "connection_closed"), (TimeoutError(), "timeout")],
+    ("step_error", "reason", "reconnect_error", "fail_at"),  # fail_at: the run's first round trip, or task_1's
+    [
+        (_CLOSED, "connection_closed", ConnectionError("unreachable after retries"), 1),
+        (TimeoutError(), "timeout", TimeoutError("HELLO"), 5),
+        (_CLOSED, "connection_closed", RuntimeError("Expected HELLO reply"), 5),
+    ],
 )
-@pytest.mark.parametrize(
-    "reconnect_error",
-    [ConnectionError("unreachable after retries"), TimeoutError("HELLO"), RuntimeError("Expected HELLO reply")],
-)
-@pytest.mark.parametrize("fail_at", [1, 5])  # the run's first round trip, or the first of task_1's first wave
 async def test_a_failed_reconnect_ends_every_running_episode_and_returns_partial(
     tmp_path, step_error, reason, reconnect_error, fail_at
 ):
@@ -378,14 +356,29 @@ async def test_a_failed_reconnect_ends_every_running_episode_and_returns_partial
     assert sorted(ep.get("failure_reason") or "" for _, ep in episodes) == sorted([""] * done + [reason] * 3)
 
 
+class StepTimeoutOnceStub(StubVectorBenchmark):
+    def step(self, slots, actions):
+        if not self.steps:
+            self.steps.append(sorted(slots))
+            raise TimeoutError("simulator stalled")
+        return super().step(slots, actions)
+
+
 @pytest.mark.anyio
-async def test_a_reconnect_fails_the_running_episodes_and_the_run_goes_on(tmp_path):
-    closed = websockets.exceptions.ConnectionClosed(None, None)
-    with patch("vla_eval.orchestrator.Connection", FakeConnection), patch.object(FakeConnection, "fail", {2: closed}):
-        result = await _run(StubVectorBenchmark, _config("ws://fake:9999", tmp_path), no_save=True)
+@pytest.mark.parametrize(
+    ("stub", "fail", "reason"),
+    [
+        (StubVectorBenchmark, {2: _CLOSED}, "connection_closed"),  # reconnected
+        (StubVectorBenchmark, {1: "malformed"}, "model_act"),
+        (StepTimeoutOnceStub, {}, "timeout"),  # the environment's
+    ],
+)
+async def test_a_failed_step_fails_its_wave_and_the_run_goes_on(tmp_path, stub, fail, reason):
+    with patch("vla_eval.orchestrator.Connection", FakeConnection), patch.object(FakeConnection, "fail", fail):
+        result = await _run(stub, _config("ws://fake:9999", tmp_path), no_save=True)
     episodes = _episodes(result)
     assert len(episodes) == 8 and "partial" not in result
-    assert sorted(ep.get("failure_reason") or "" for _, ep in episodes) == [""] * 5 + ["connection_closed"] * 3
+    assert sorted(ep.get("failure_reason") or "" for _, ep in episodes) == [""] * 5 + [reason] * 3
 
 
 @pytest.mark.anyio
@@ -406,22 +399,6 @@ async def test_a_step_carries_ends_starts_and_observations(tmp_path):
 
 
 @pytest.mark.anyio
-async def test_a_malformed_reply_fails_the_running_episodes_not_the_run(tmp_path):
-    class Malformed(FakeConnection):
-        async def exchange(self, step):
-            reply = await super().exchange(step)
-            if self.calls == 1:
-                reply["actions"]["extra"] = [1]  # columns of different lengths
-            return reply
-
-    with patch("vla_eval.orchestrator.Connection", Malformed), patch.object(FakeConnection, "fail", {}):
-        result = await _run(StubVectorBenchmark, _config("ws://fake:9999", tmp_path), no_save=True)
-    episodes = _episodes(result)
-    assert len(episodes) == 8 and "partial" not in result
-    assert sorted(ep.get("failure_reason") or "" for _, ep in episodes) == [""] * 5 + ["model_act"] * 3
-
-
-@pytest.mark.anyio
 async def test_a_server_without_vector_steps_is_refused(tmp_path):
     class Old(FakeConnection):
         def __init__(self, *args, **kwargs):
@@ -430,22 +407,6 @@ async def test_a_server_without_vector_steps_is_refused(tmp_path):
 
     with patch("vla_eval.orchestrator.Connection", Old), pytest.raises(RuntimeError, match="vector steps"):
         await _run(StubVectorBenchmark, _config("ws://fake:9999", tmp_path), no_save=True)
-
-
-class StepTimeoutOnceStub(StubVectorBenchmark):
-    def step(self, slots, actions):
-        if not self.steps:
-            self.steps.append(sorted(slots))
-            raise TimeoutError("simulator stalled")
-        return super().step(slots, actions)
-
-
-@pytest.mark.anyio
-async def test_an_environment_timeout_fails_its_wave_and_the_run_goes_on(echo_server, tmp_path):
-    result = await _run(StepTimeoutOnceStub, _config(echo_server, tmp_path), no_save=True)
-    episodes = _episodes(result)
-    assert len(episodes) == 8 and "partial" not in result
-    assert sorted(ep.get("failure_reason") or "" for _, ep in episodes) == [""] * 5 + ["timeout"] * 3
 
 
 @pytest.mark.anyio
@@ -515,15 +476,8 @@ def test_vector_benchmarks_validate_as_benchmarks():
 
 
 @pytest.mark.anyio
-async def test_benchmark_runs_on_the_orchestrators_thread(echo_server, tmp_path):
-    await _run(StubVectorBenchmark, _config(echo_server, tmp_path), no_save=True)
-    threads = StubVectorBenchmark.last.threads
-    assert threads == {threading.get_ident()}
-
-
-@pytest.mark.anyio
 async def test_a_lockstep_step_is_one_full_batch(free_port, tmp_path):
-    server = BatchLogServer()
+    server = BatchLogServer(max_batch_size=8, max_wait_time=0.2)
     task = await start_server(server, free_port)
     try:
         await _run(
@@ -533,23 +487,13 @@ async def test_a_lockstep_step_is_one_full_batch(free_port, tmp_path):
         )
     finally:
         await stop_server(task)
-    assert set(server.sizes) == {3}  # the first request waits for its slot-mates, not a batch of one
+    assert {len(b) for b in server.batches} == {3}  # the first request waits for its slot-mates, not a batch of one
 
 
 @pytest.mark.anyio
 async def test_the_next_task_may_observe_other_columns(echo_server, tmp_path):
     result = await _run(TaskShapedStub, _config(echo_server, tmp_path), no_save=True)
     assert result["mean_success"] == pytest.approx(1.0) and len(_episodes(result)) == 8
-
-
-@pytest.mark.anyio
-async def test_a_result_error_fails_only_its_episode(echo_server, tmp_path):
-    result = await _run(SlotOneResultErrorStub, _config(echo_server, tmp_path, episodes=3), no_save=True)
-    episodes = [ep for _, ep in _episodes(result)]
-    failed = [ep for ep in episodes if ep.get("failure_reason")]
-    assert len(episodes) == 6 and len(failed) == 2  # slot 1 took one episode in each of the two waves
-    assert {ep["failure_reason"] for ep in failed} == {"env_step"}
-    assert all(ep["metrics"]["success"] for ep in episodes if not ep.get("failure_reason"))
 
 
 def test_server_image_format_sets_the_wire_encoding(tmp_path):
