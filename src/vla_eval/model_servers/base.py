@@ -1,17 +1,19 @@
 """Model-server contract: every running episode is a row.  ``serve`` calls the async callbacks with batches of rows;
 the server replies with ``send_action`` / ``send_error``.  ``PredictModelServer`` (predict.py, batched
-request/response) and ``LiveModelServer`` (live.py, continuous inference) build on it."""
+request/response) and ``DaemonModelServer`` (daemons.py, a loop per episode; ``LiveModelServer`` in live.py) build
+on it."""
 
 from __future__ import annotations
 
+import contextlib
 import heapq
 import logging
 import uuid
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable, Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, NamedTuple, TypeVar
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple, TypeVar
 
 import anyio
 from anyio.lowlevel import checkpoint
@@ -21,7 +23,7 @@ from anyio.to_thread import run_sync as _run_in_thread
 
 from vla_eval import columns
 from vla_eval.specs import DimSpec
-from vla_eval.types import Batch, EpisodeResult
+from vla_eval.types import Action, Batch, EpisodeResult
 
 if TYPE_CHECKING:
     from anyio.abc import TaskGroup
@@ -30,11 +32,23 @@ logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
 
+CAPABILITIES = ("publish", "episode_error")
+"""Client HELLO capabilities the server acts on (each counts only when exactly ``true``)."""
+
+
+class EpisodeClosed(RuntimeError):
+    """The episode is closing (END, disconnect, failure or shutdown): new work is refused, late results dropped."""
+
+
+class MissingCapabilities(RuntimeError):
+    """The client lacks capabilities the server requires; its ``EPISODE_START`` fails and the socket closes."""
+
 
 @dataclass(eq=False)
 class Episode:
     """One running episode.  ``session_id``/``episode_id``/``recording_db_path`` open a ``StepRecorder`` on
-    its recording; ``reset_episodes`` may override ``chunk_size`` (e.g. per task suite)."""
+    its recording; ``reset_episodes`` may override ``chunk_size`` (e.g. per task suite).  ``mode``: set by the
+    transport (``VECTOR_STEP`` and implicit starts are sync); ``capabilities``: the client's (``CAPABILITIES``)."""
 
     config: dict[str, Any]
     episode_id: str
@@ -42,6 +56,8 @@ class Episode:
     eval_id: str = ""
     recording_db_path: str = ""
     chunk_size: int | None = None
+    mode: Literal["sync", "live"] = "sync"
+    capabilities: frozenset[str] = field(default_factory=frozenset)
 
 
 class Row(NamedTuple):
@@ -61,6 +77,7 @@ class _Pending:
         *,
         vector: bool = False,
         forward: Callable[[Any, Exception | None], Awaitable[None]] | None = None,
+        seq: int | None = None,
     ) -> None:
         self.pos = np.arange(n)  # the positions of the rows on_observation gets
         self.answered = np.zeros(n, bool)
@@ -70,6 +87,9 @@ class _Pending:
         self.done = anyio.Event()
         self.vector = vector
         self.forward = forward
+        self.seq = seq  # the OBSERVATION's wire seq
+        self.ids: npt.NDArray[np.int64] | None = None  # set by _observe: each position's row and incarnation
+        self.gens: npt.NDArray[np.int64] | None = None
 
     def result(self) -> Batch:
         """The answered positions' actions, in position order."""
@@ -80,6 +100,23 @@ class _Pending:
         pos = np.concatenate([p for p, _ in self.parts])
         actions = self.parts[0][1] if len(self.parts) == 1 else columns.concat([a for _, a in self.parts])
         return actions if (np.diff(pos) > 0).all() else columns.take(actions, np.argsort(pos))
+
+
+class _Link(NamedTuple):
+    """A live episode's server-initiated messages (framework-private): ``EPISODE_ERROR`` and ``PUBLISH`` senders,
+    each ``None`` when the client did not negotiate it."""
+
+    error: Callable[[Exception], Awaitable[None]] | None
+    publish: Callable[[Action, int, int | None], Awaitable[None]] | None
+
+
+class _Publisher:
+    """One live episode's ``PUBLISH`` sender: the index and the send happen under ``lock``."""
+
+    def __init__(self, send: Callable[[Action, int, int | None], Awaitable[None]]) -> None:
+        self.send = send
+        self.lock = anyio.Lock()
+        self.index = 0
 
 
 class Rows:
@@ -147,6 +184,12 @@ class ModelServer(ABC):
         self._closing = np.zeros(0, bool)
         self._free: list[int] = []  # ended rows' ids, reused smallest first
         self._size = 0  # row ids ever used
+        self._failed: dict[int, Exception] = {}  # by row id: fail_episode's error, until the row is released
+        self._open: set[_Pending] = set()  # sync/vector observations waiting for replies
+        self._fail_hooks: list[Callable[[int, int, Episode, Exception], None]] = []
+        self._sinks: dict[int, Callable[[Exception], Awaitable[None]]] = {}  # live rows' EPISODE_ERROR senders
+        self._publishers: dict[int, _Publisher] = {}  # live rows' PUBLISH senders
+        self._serve_tg: TaskGroup | None = None  # set by serve_async
 
     async def run_on_model_thread(self, fn: Callable[..., T], *args: Any) -> T:
         """``fn(*args)`` on the server's one model thread, after the calls submitted before it."""
@@ -212,6 +255,41 @@ class ModelServer(ABC):
         if not p.left:
             p.done.set()
 
+    def fail_episode(self, rows: Rows, error: Exception) -> None:
+        """End ``rows``' episodes as failed by the model: replies drop from now on, their pending observations
+        fail with ``error`` and a live client is told (``EPISODE_ERROR``); ``EPISODE_END`` still owns teardown.
+        First failure wins; stale or ending rows are ignored.  Event-loop only."""
+        for i in range(len(rows)):
+            rid = int(rows.ids[i])
+            if not 0 <= rid < self._size or self._table[rid] is not rows._episodes[i]:
+                continue
+            if self._gen[rid] != rows._gen[i] or self._closing[rid] or rid in self._failed:
+                continue
+            gen0, episode = int(self._gen[rid]), self._table[rid]
+            self._failed[rid] = error
+            self._gen[rid] += 1
+            for p in list(self._open):
+                if p.ids is None or p.gens is None:
+                    continue
+                hit = np.flatnonzero((p.ids == rid) & (p.gens == gen0) & ~p.answered)
+                for j in hit.tolist():
+                    p.answered[j] = True
+                    p.errors[j] = error
+                    p.left -= 1
+                if len(hit) and not p.left:
+                    p.done.set()
+            for hook in list(self._fail_hooks):
+                try:
+                    hook(rid, gen0, episode, error)
+                except Exception:
+                    logger.exception("episode failure hook failed")
+            sink = self._sinks.get(rid)
+            if sink is not None and self._serve_tg is not None:
+                try:
+                    self._serve_tg.start_soon(_run_sink, sink, error)
+                except Exception:
+                    logger.exception("EPISODE_ERROR not scheduled")
+
     def get_action_spec(self) -> dict[str, DimSpec]:
         """Declare the action output format of this model server.
 
@@ -259,9 +337,10 @@ class ModelServer(ABC):
             p.answered[:] = True
             p.left = 0
             return pos
-        ok = ~p.answered[pos] & (self._gen[rows.ids] == rows._gen)
+        current = self._gen[rows.ids] == rows._gen
+        ok = ~p.answered[pos] & current
         if not ok.all():
-            if (dup := p.answered[pos]).any():
+            if (dup := p.answered[pos] & current).any():
                 logger.warning("dropped %d replies to rows answered already", int(dup.sum()))
             if not ok.any():
                 return None
@@ -297,10 +376,30 @@ class ModelServer(ABC):
     def _release(self, rid: int) -> None:
         self._table[rid] = None
         self._closing[rid] = False
+        self._failed.pop(rid, None)
+        self._sinks.pop(rid, None)
+        self._publishers.pop(rid, None)
         heapq.heappush(self._free, rid)
 
-    async def _start_episodes(self, starts: list[tuple[dict[str, Any], str]]) -> list[int | Exception]:
-        """Start an episode per ``(EPISODE_START payload, default session id)``; its row id or why it failed."""
+    @contextlib.contextmanager
+    def _track(self, pending: _Pending) -> Iterator[None]:
+        """Keep a sync/vector ``pending`` reachable by ``fail_episode`` while it waits."""
+        self._open.add(pending)
+        try:
+            yield
+        finally:
+            self._open.discard(pending)
+
+    async def _start_episodes(
+        self,
+        starts: list[tuple[dict[str, Any], str]],
+        *,
+        mode: Literal["sync", "live"] = "sync",
+        capabilities: frozenset[str] = frozenset(),
+        link: _Link | None = None,
+    ) -> list[int | Exception]:
+        """Start an episode per ``(EPISODE_START payload, default session id)``; its row id or why it failed.
+        ``link``: a live episode's server-initiated senders, installed before ``on_episode_start``."""
         out: list[int | Exception] = []
         ids: list[int] = []
         for config, session_id in starts:
@@ -315,7 +414,13 @@ class ModelServer(ABC):
                 session_id=rec.get("sid") or session_id,
                 eval_id=rec.get("eval_id") or "",
                 recording_db_path=rec.get("db_path") or "",
+                mode=mode,
+                capabilities=capabilities,
             )
+            if link is not None and link.error is not None:
+                self._sinks[rid] = link.error
+            if link is not None and link.publish is not None:
+                self._publishers[rid] = _Publisher(link.publish)
             self._gen[rid] += 1
             self._steps[rid] = 0
             ids.append(rid)
@@ -359,6 +464,16 @@ class ModelServer(ABC):
         """Hand ``obs`` (a row per id) to ``on_observation``; its replies go to ``pending``."""
         rows = self._rows(ids, pending)
         self._steps[rows.ids] += 1
+        pending.ids, pending.gens = rows.ids, rows._gen
+        if self._failed:  # failed episodes' observations fail with their error; the rest go on
+            bad = [i for i, rid in enumerate(rows.ids.tolist()) if rid in self._failed]
+            if bad:
+                for i in bad:
+                    await self.send_error(rows.take([i]), self._failed[int(rows.ids[i])])
+                keep = sorted(set(range(len(rows))) - set(bad))
+                if not keep:
+                    return
+                obs, rows = columns.take(obs, keep), rows.take(keep)
         try:
             await self.on_observation(obs, rows)
         except Exception as exc:
@@ -367,3 +482,10 @@ class ModelServer(ABC):
 
     def _running(self) -> int:
         return self._size - len(self._free)
+
+
+async def _run_sink(sink: Callable[[Exception], Awaitable[None]], error: Exception) -> None:
+    try:
+        await sink(error)
+    except Exception:
+        logger.exception("EPISODE_ERROR not sent")

@@ -11,6 +11,7 @@ from typing import Any, ClassVar, Literal
 import websockets
 
 from vla_eval.benchmarks.base import Benchmark
+from vla_eval.connection import ServerEpisodeError
 from vla_eval.recording import EpisodeRecorder, RecordingError
 from vla_eval.types import EpisodeResult, Task
 
@@ -53,6 +54,8 @@ def failure_reason(error: BaseException) -> str:
         return "connection_closed"
     if isinstance(error, TimeoutError):
         return "timeout"
+    if isinstance(error, ServerEpisodeError):
+        return "model_act"
     return error.phase if isinstance(error, EpisodeError) else "exception"
 
 
