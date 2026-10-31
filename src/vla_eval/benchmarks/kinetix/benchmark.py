@@ -12,8 +12,9 @@ variables and bridges to the StepBenchmark async interface.
 
 from __future__ import annotations
 
-import logging
 import inspect
+import logging
+import time
 from pathlib import Path
 from typing import Any
 
@@ -90,7 +91,7 @@ class KinetixBenchmark(StepBenchmark):
             ``"symbolic"`` for the flat symbolic state vector used by RTC.
     """
 
-    _ALL_RECORD_FIELDS = frozenset({"reward", "done", "success"})
+    _ALL_RECORD_FIELDS = frozenset({"reward", "done", "success", "action", "t_wall"})
 
     # No GL involved: frames are computed in JAX, so "CPU rendering" is just a CPU device.
     render_backends = frozenset({"gpu", "cpu"})
@@ -191,6 +192,15 @@ class KinetixBenchmark(StepBenchmark):
             return env.reset(rng, params, override_reset_state=level_state)
 
         self._jit_reset = jax.jit(_reset_to_level)
+        # Compile step()'s ops now, so no live tick stalls on JIT; twice, as reset's state has other weak types.
+        key, noise_key = jax.random.split(jax.random.PRNGKey(0))
+        _, warm_state = self._jit_reset(key, env_params)
+        warm_action = (
+            jax.numpy.zeros(ACTION_DIM) + jax.random.normal(noise_key, (ACTION_DIM,)) * self._action_noise_std
+        )
+        for _ in range(2):
+            warm_state = self._jit_step(key, warm_state, warm_action, env_params)[1]
+        jax.block_until_ready(warm_state)
 
         logger.info("Kinetix env created for level: %s (path: %s)", level, level_path)
 
@@ -235,6 +245,7 @@ class KinetixBenchmark(StepBenchmark):
 
     def step(self, action: Action) -> StepResult:
         assert self._jax is not None and self._jnp is not None
+        t_wall = time.monotonic()
         jax = self._jax
         jnp = self._jnp
 
@@ -275,7 +286,9 @@ class KinetixBenchmark(StepBenchmark):
             self._episode_success = True
 
         self._recorder.record_video(self._extract_frame(obs))
-        self._recorder.record_step(reward=reward_val, done=done_val, success=bool(self._episode_success))
+        self._recorder.record_step(
+            reward=reward_val, done=done_val, success=self._episode_success, action=raw_action.tolist(), t_wall=t_wall
+        )
 
         return StepResult(obs=obs, reward=reward_val, done=done_val, info=info)
 
@@ -324,10 +337,9 @@ class KinetixBenchmark(StepBenchmark):
         return repeat_last_hold(last_action, ACTION_DIM)
 
     def get_action_spec(self) -> dict[str, DimSpec]:
-        return {"action": RAW}
+        return {"actions": RAW}
 
     def get_observation_spec(self) -> dict[str, DimSpec]:
-        return {
-            "viewport": IMAGE_RGB,
-            "language": LANGUAGE,
-        }
+        if self._observation_type == "symbolic":
+            return {"state": RAW, "language": LANGUAGE}
+        return {"viewport": IMAGE_RGB, "language": LANGUAGE}
