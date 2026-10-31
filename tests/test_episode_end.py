@@ -151,3 +151,36 @@ async def test_connection_drops_replies_from_before_episode_start(free_port):
                     while not got:
                         await anyio.sleep(0.01)
             assert got == [[3.0]]
+
+
+@pytest.mark.anyio
+async def test_the_live_listener_drops_an_action_older_than_one_applied(free_port):
+    """A raw server that answers two observations newest first."""
+
+    async def handler(ws: Any) -> None:
+        held: list[Message] = []
+        async for raw in ws:
+            msg = unpack_message(raw)
+            if msg.type == MessageType.HELLO:
+                await ws.send(
+                    pack_message(Message(type=MessageType.HELLO, payload={"harness_version": "x"}, seq=msg.seq))
+                )
+            elif msg.type == MessageType.OBSERVATION:
+                held.append(Message(type=MessageType.ACTION, payload={"actions": [msg.payload["value"]]}, seq=msg.seq))
+                if len(held) == 2:
+                    for m in reversed(held):
+                        await ws.send(pack_message(m))
+
+    async with ws_serve(handler, "127.0.0.1", free_port):
+        async with Connection(f"ws://127.0.0.1:{free_port}") as conn:
+            got: list[Any] = []
+            conn.on_action(lambda a: got.append(a["actions"]))
+            await conn.start_episode({})
+            async with conn.listening():
+                await conn.send_observation({"value": 1.0})
+                await conn.send_observation({"value": 2.0})
+                with anyio.fail_after(2):
+                    while not got:
+                        await anyio.sleep(0.01)
+                await anyio.sleep(0.1)
+            assert got == [[2.0]]

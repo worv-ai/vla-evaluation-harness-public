@@ -65,6 +65,7 @@ class Connection:
         self._ws: Any = None
         self._seq: int = 0
         self._episode_seq: int = 0  # the last EPISODE_START's: replies before it belong to an earlier episode
+        self._action_seq: int = 0  # the live listener's last applied ACTION: an older one is stale
         self._action_callback: Callable[[Action], None] | None = None
         self._benchmark: str | None = None
         self.server_info: dict[str, Any] = {}
@@ -270,9 +271,10 @@ class Connection:
                 try:
                     msg = await self.recv()
                     _recv_count += 1
-                    if msg.seq < self._episode_seq:  # a late reply of an earlier episode
-                        logger.debug("Dropped %s seq %d from before EPISODE_START", msg.type.value, msg.seq)
+                    if msg.seq < self._episode_seq or (msg.type == MessageType.ACTION and msg.seq <= self._action_seq):
+                        logger.debug("Dropped stale %s seq %d", msg.type.value, msg.seq)  # earlier episode or action
                     elif msg.type == MessageType.ACTION and self._action_callback is not None:
+                        self._action_seq = msg.seq
                         self._action_callback(msg.payload)
                         if _recv_count <= 3:
                             logger.info("Listener received ACTION #%d (seq=%s)", _recv_count, msg.seq)
