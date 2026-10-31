@@ -363,9 +363,11 @@ async def test_a_failed_reconnect_ends_every_running_episode_and_returns_partial
     tmp_path, step_error, reason, reconnect_error, fail_at
 ):
     config = _config("ws://fake:9999", tmp_path, name="a")
-    with patch("vla_eval.orchestrator.Connection", FakeConnection), patch.object(
-        FakeConnection, "fail", {fail_at: step_error}
-    ), patch.object(FakeConnection, "reconnect_error", reconnect_error):
+    with (
+        patch("vla_eval.orchestrator.Connection", FakeConnection),
+        patch.object(FakeConnection, "fail", {fail_at: step_error}),
+        patch.object(FakeConnection, "reconnect_error", reconnect_error),
+    ):
         result = await _run(StubVectorBenchmark, config, shard_id=0, num_shards=1, eval_id="ev-a")
     episodes = _episodes(result)
     assert result["partial"] is True
