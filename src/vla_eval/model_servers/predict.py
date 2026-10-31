@@ -11,6 +11,7 @@ from typing import Any
 import anyio
 import numpy as np
 from anyio.abc import TaskGroup
+from anyio.lowlevel import checkpoint
 
 from vla_eval import columns
 from vla_eval.types import Action, Batch, EpisodeResult, Observation
@@ -19,6 +20,7 @@ from vla_eval.model_servers.base import ModelServer, Row, Rows
 logger = logging.getLogger(__name__)
 
 _ENDED = RuntimeError("the episode ended")
+_STOPPED = RuntimeError("model server stopped")
 
 
 @dataclass(eq=False)
@@ -29,6 +31,7 @@ class _Request:
     done: anyio.Event = field(default_factory=anyio.Event)
     actions: Batch = field(default_factory=dict)
     errors: dict[int, Exception] = field(default_factory=dict)
+    queued_at: float = field(default_factory=anyio.current_time)
 
 
 class PredictModelServer(ModelServer):
@@ -144,11 +147,7 @@ class PredictModelServer(ModelServer):
         try:
             await self._dispatch_loop()
         finally:  # shutdown: no request waits forever
-            stopped = RuntimeError("model server stopped")
-            for r in self._queue:
-                r.actions = {}
-                r.errors = {i: stopped for i in range(len(r.rows))}
-                r.done.set()
+            _fail(self._queue, _STOPPED)
             self._queue = []
 
     async def _dispatch_loop(self) -> None:
@@ -158,7 +157,8 @@ class PredictModelServer(ModelServer):
             while self._queue:
                 # wait for single-episode requests of other connections; a vector step is a whole step already
                 if self.max_wait_time > 0 and not self._full() and all(r.wait for r in self._queue):
-                    with anyio.move_on_after(self.max_wait_time):
+                    deadline = self._queue[0].queued_at + self.max_wait_time  # from the oldest request's arrival
+                    with anyio.CancelScope(deadline=deadline):
                         while not self._full() and all(r.wait for r in self._queue):
                             await self._wake.wait()
                             self._wake = anyio.Event()
@@ -178,8 +178,11 @@ class PredictModelServer(ModelServer):
             try:
                 obs = columns.concat([r.obs for r in batch])
             except Exception:  # requests of different shapes: one at a time
-                for r in batch:
-                    await self._run([r])
+                try:
+                    for r in batch:
+                        await self._run([r])
+                finally:  # cancelled: the rest fail
+                    _fail(batch, _STOPPED)
                 return
             rows = _merge([r.rows for r in batch])
         else:
@@ -194,19 +197,20 @@ class PredictModelServer(ModelServer):
                 r.actions = actions if len(batch) == 1 else columns.take(actions, range(ok_seen, ok_seen + ok))
                 ok_seen += ok
                 start += n
-        except Exception as exc:
-            logger.exception("dispatch failed")
-            for r in batch:
-                r.actions, r.errors = {}, dict.fromkeys(range(len(r.rows)), exc)
-        finally:
             for r in batch:
                 r.done.set()
+        except Exception as exc:
+            logger.exception("dispatch failed")
+            _fail(batch, exc)
+        finally:  # cancelled
+            _fail(batch, _STOPPED)
 
     async def _infer(self, obs: Batch, rows: Rows) -> tuple[Batch, dict[int, Exception]]:
         """The actions of every position that did not fail, in order, and the failures by position.  One
         model-thread call."""
         n = len(rows)
         ids = rows.ids
+        await checkpoint()  # the last await before the model call, so a row ending meanwhile is filtered here
         current = self._current(rows)
         errors: dict[int, Exception] = {}
         if not current.all():  # ended while queued: not inferred
@@ -220,7 +224,7 @@ class PredictModelServer(ModelServer):
         todo = [i for i in range(n) if i not in served and i not in errors] if served or errors else list(range(n))
         parts: list[tuple[list[int], Batch]] = []
         if todo:
-            failed, parts = await self.run_on_model_thread(self._work, obs, rows, todo)
+            failed, parts = await self._run_submitted(self._work, obs, rows, todo)
             errors.update(failed)
         if not chunked:
             return columns.concat([p for _, p in parts]), errors
@@ -285,6 +289,14 @@ class PredictModelServer(ModelServer):
             except Exception as exc:
                 failed[i] = exc
         return columns.stack(out), failed
+
+
+def _fail(requests: list[_Request], exc: Exception) -> None:
+    """Complete the requests not completed yet with ``exc`` for every row."""
+    for r in requests:
+        if not r.done.is_set():
+            r.actions, r.errors = {}, dict.fromkeys(range(len(r.rows)), exc)
+            r.done.set()
 
 
 def _merge(parts: list[Rows]) -> Rows:

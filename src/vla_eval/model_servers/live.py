@@ -132,13 +132,11 @@ class LiveModelServer(ModelServer):
                     action = await self.run_on_model_thread(self._infer, columns.split(obs, 1)[0], rows[0], t)
                     if loop.stopped:
                         return
-                    out = columns.stack([action])
-                except Exception as exc:  # this observation fails; the loop goes on
+                    await self.send_action(rows, columns.stack([action]))
+                except Exception as exc:  # inference or send: this observation fails; the loop goes on
                     if loop.stopped:
                         return
                     await self.send_error(rows, exc)
-                    continue
-                await self.send_action(rows, out)
         except Exception:
             logger.exception("continuous inference stopped row=%d", rid)
         finally:

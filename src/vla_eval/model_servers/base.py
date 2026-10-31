@@ -151,6 +151,10 @@ class ModelServer(ABC):
     async def run_on_model_thread(self, fn: Callable[..., T], *args: Any) -> T:
         """``fn(*args)`` on the server's one model thread, after the calls submitted before it."""
         await checkpoint()  # a cancelled caller submits nothing
+        return await self._run_submitted(fn, *args)
+
+    async def _run_submitted(self, fn: Callable[..., T], *args: Any) -> T:
+        """``fn(*args)`` submitted with no await first, so what the caller checked still holds at submission."""
         future = self._model_thread.submit(fn, *args)
         with anyio.CancelScope(shield=True):  # once submitted, returns only after fn finishes
             return await _run_in_thread(future.result)
@@ -322,6 +326,10 @@ class ModelServer(ABC):
             failed = await self.on_episode_start(self._rows(ids)) or {}
         except Exception as exc:
             failed = dict.fromkeys(range(len(ids)), exc)
+        except BaseException:  # cancelled: none of them started
+            for rid in ids:
+                self._release(rid)
+            raise
         bad = {ids[i]: exc for i, exc in failed.items()}
         for rid, exc in bad.items():
             logger.warning("on_episode_start failed for row %d: %s: %s", rid, type(exc).__name__, exc)
@@ -338,13 +346,14 @@ class ModelServer(ABC):
         rows = self._rows(list(ending))
         self._closing[rows.ids] = True
         self._gen[rows.ids] += 1  # replies from now on drop
-        try:
-            await self.on_episode_end(rows, list(ending.values()))
-        except Exception:
-            logger.exception("on_episode_end failed")
-        finally:
-            for rid in ending:
-                self._release(rid)
+        with anyio.CancelScope(shield=True):  # once begun, an end runs on_episode_end before the rows are freed
+            try:
+                await self.on_episode_end(rows, list(ending.values()))
+            except Exception:
+                logger.exception("on_episode_end failed")
+            finally:
+                for rid in ending:
+                    self._release(rid)
 
     async def _observe(self, obs: Batch, ids: Sequence[int] | np.ndarray, pending: _Pending) -> None:
         """Hand ``obs`` (a row per id) to ``on_observation``; its replies go to ``pending``."""

@@ -540,3 +540,124 @@ async def test_a_server_without_vector_step_refuses_it(free_port):
     finally:
         await conn.close()
         await stop_server(task)
+
+
+# ---------------------------------------------------------------------------
+# Cancellation and failure paths: every row released once, every request completed once
+# ---------------------------------------------------------------------------
+
+
+class HangingStartServer(ReplayServer):
+    max_rows = 1
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.hang = True
+
+    async def on_episode_start(self, rows: Rows) -> None:
+        if self.hang:
+            await anyio.sleep_forever()
+
+
+@pytest.mark.anyio
+async def test_a_start_cancelled_in_on_episode_start_frees_its_row():
+    server = HangingStartServer()
+    with anyio.move_on_after(0.05):
+        await server._start_episodes([({}, "s")])
+    assert server._running() == 0
+    server.hang = False
+    assert await server._start_episodes([({}, "s")]) == [0]
+
+
+@pytest.mark.anyio
+async def test_a_cancelled_episode_end_still_finishes_the_episode():
+    server = BrokenStartServer()
+    (rid,) = await server._start_episodes([({"task": {}}, "s")])
+    assert isinstance(rid, int)
+    with anyio.CancelScope() as scope:
+        scope.cancel()
+        await server._end_episodes([rid], [{}])
+    assert server.finished == [[rid]] and server._running() == 0
+
+
+class SendFailsOnceServer(LiveLogServer):
+    async def send_action(self, rows: Rows, actions: Any) -> None:
+        if not self.predicted[1:]:
+            raise RuntimeError("send failed")
+        await super().send_action(rows, actions)
+
+
+@pytest.mark.anyio
+async def test_live_a_failed_send_errors_its_observation_and_the_loop_goes_on(free_port):
+    got = await _live(SendFailsOnceServer(), free_port, [1.0, 2.0], gap=0.2)
+    assert [(t, i) for t, i, _ in got] == [(MessageType.ERROR, 0), (MessageType.ACTION, 1)]
+    assert "send failed" in got[0][2]["error"] and _value(got[1][2]) == 2.0
+
+
+class StampServer(HistoryServer):
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.started: dict[float, float] = {}
+
+    def predict(self, obs, row):
+        self.started[float(obs["value"])] = time.monotonic()
+        return super().predict(obs, row)
+
+
+@pytest.mark.anyio
+async def test_max_wait_time_counts_from_the_oldest_requests_arrival(free_port):
+    """B arrives while A infers; once A is done, B has waited max_wait_time already and is inferred at once."""
+    server = StampServer(delay=0.4, max_batch_size=4, max_wait_time=0.3)
+    task = await start_server(server, free_port)
+    try:
+        async with Connection(f"ws://127.0.0.1:{free_port}") as a, Connection(f"ws://127.0.0.1:{free_port}") as b:
+            await a.start_episode({"task": {"name": "t"}})
+            await b.start_episode({"task": {"name": "t"}})
+            await a.send_observation({"value": 1.0})
+            await anyio.sleep(0.35)  # A waits 0.3 s, then infers until 0.7 s
+            sent = time.monotonic()
+            await b.act({"value": 2.0})
+            await a.recv()
+        assert server.started[2.0] - sent < 0.5  # 0.35 s behind A; 0.65 s if the wait started over
+    finally:
+        await stop_server(task)
+
+
+async def _requests(server: PredictModelServer, obs: list[dict[str, Any]]) -> list[Any]:
+    from vla_eval.model_servers.predict import _Request
+
+    ids = await server._start_episodes([({}, "s")] * len(obs))
+    return [
+        _Request({k: np.asarray([v]) for k, v in o.items()}, server._rows([i]), wait=False) for o, i in zip(obs, ids)
+    ]
+
+
+@pytest.mark.anyio
+async def test_a_cancelled_dispatch_fails_its_requests():
+    server = HistoryServer()
+    (req,) = await _requests(server, [{"value": 1.0}])
+    with anyio.CancelScope() as scope:
+        scope.cancel()
+        await server._run([req])
+    assert req.done.is_set() and set(req.errors) == {0} and "stopped" in str(req.errors[0])
+
+
+@pytest.mark.anyio
+async def test_a_dispatch_cancelled_one_request_at_a_time_completes_every_request():
+    server = HistoryServer(delay=0.2)
+    first, second = await _requests(server, [{"value": 1.0}, {"other": 2.0}])  # different keys: one at a time
+    with anyio.move_on_after(0.05):
+        await server._run([first, second])
+    assert first.done.is_set() and not first.errors and _value(first.actions) == 1.0
+    assert second.done.is_set() and set(second.errors) == {0}
+
+
+@pytest.mark.anyio
+async def test_a_row_ending_before_the_model_call_is_not_inferred():
+    server = HistoryServer()
+    (req,) = await _requests(server, [{"value": 1.0}])
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(server._run, [req])
+        await anyio.lowlevel.checkpoint()  # the dispatcher runs to its first checkpoint
+        server._gen[0] += 1
+    assert server.predicted == [] and set(req.errors) == {0}
