@@ -6,6 +6,7 @@
 #     "lerobot==0.4.4",  # imported via openpi.training.data_loader; the fork keeps it in a
 #                        # local-only dependency-group, so consumers must pin it directly
 #     "numpy>=1.24",
+#     "pandas<3.1",  # 3.1 refuses numpy<2 at import, which the override below forces
 #     "pytest",  # not declared in openpi's deps but imported by openpi.models_pytorch
 #     "chex",    # not declared in openpi's deps but imported by openpi.models
 # ]
