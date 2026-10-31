@@ -4,6 +4,7 @@
 #     "vla-eval",
 #     "openpi",
 #     "numpy>=1.24",
+#     "pyarrow<26",  # 26 requires numpy>=2 at import; openpi holds numpy<2
 #     "pytest",  # not declared in openpi's deps but imported by openpi.models_pytorch
 #     "chex",    # not declared in openpi's deps but imported by openpi.models
 # ]

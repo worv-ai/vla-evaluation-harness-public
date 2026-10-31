@@ -7,6 +7,7 @@
 #                        # local-only dependency-group, so consumers must pin it directly
 #     "numpy>=1.24",
 #     "pandas<3.1",  # 3.1 refuses numpy<2 at import, which the override below forces
+#     "pyarrow<26",  # 26 requires numpy>=2 at import; openpi holds numpy<2
 #     "pytest",  # not declared in openpi's deps but imported by openpi.models_pytorch
 #     "chex",    # not declared in openpi's deps but imported by openpi.models
 # ]
