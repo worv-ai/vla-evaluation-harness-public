@@ -44,6 +44,9 @@ The time budget is new in v3.9.4 (upstream PR 2366). Upstream charges each rollo
 plus its share of simulator stepping; with one env per rollout that is the wall clock from the first action,
 which `step` measures (`time_budget: false` turns it off). A failed rollout records upstream's
 `failure_reason` (`group_time_budget_exceeded` or `policy_query_timeout`) with zero `q_score`.
+The configs set `server.timeout: 600` to match upstream's per-query cap. One divergence remains: a
+query that never answers within 600 s ends as a harness `timeout` error (counted in `num_errors`, and
+left out of the mean `q_score`) instead of upstream's zero-score record.
 Upstream's multi-port mode (`--policy-endpoints`, `MultiWebsocketPolicy`) is not used: the harness
 runs one env per benchmark process and shards across processes instead.
 

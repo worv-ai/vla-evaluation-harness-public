@@ -71,7 +71,8 @@ class Behavior1KBenchmark(StepBenchmark):
         - **Heavy lazy imports**: ``omnigibson`` boots Isaac Sim, and ``omnigibson.eval.utils.eval_utils`` reads
           the task metadata from ``gm.DATA_PATH`` at import, so imports wait until the first episode.
         - **Time budget**: with one env, upstream's accounted time (policy queries plus simulator steps) is
-          the wall clock between the first action and now, so ``step`` measures it there.
+          the wall clock between the first action and now, so ``step`` measures it there.  A query that never
+          returns hits ``server.timeout`` (600 s in the configs) and becomes a harness error, not a zero score.
         - **Threads**: Isaac Sim runs on a worker thread (see ``start_episode``) so the orchestrator's event
           loop survives ``SimulationApp`` start-up.
 
