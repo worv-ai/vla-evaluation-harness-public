@@ -1,9 +1,10 @@
 """WebSocket server runner for ModelServer instances.
 
 Each episode is a model-server row: ``EPISODE_START``..``EPISODE_END`` of a connection, or a vector slot's
-``starts``..``ends``.  An ``OBSERVATION`` (``VECTOR_STEP``) is answered once all its rows are; a live episode's
-replies go out as they come.  Failures send an ``ERROR`` (per slot) and keep the connection; a disconnect ends its
-episodes (``status: aborted``).
+``starts``..``ends``.  ``EPISODE_START`` is answered with ``EPISODE_READY`` once started (to a client whose HELLO
+advertises ``episode_ready``).  An ``OBSERVATION`` (``VECTOR_STEP``) is answered once all its rows are; a live
+episode's replies go out as they come.  Failures send an ``ERROR`` (per slot) and keep the connection; a disconnect
+ends its episodes (``status: aborted``).
 
 HTTP control plane:
     ``GET /health`` returns ``200 {"status": "ok"}`` once ``__init__`` has
@@ -77,6 +78,7 @@ async def _handle_connection(ws: Any, model_server: ModelServer, tg: TaskGroup) 
     session_id = str(uuid.uuid4())
     row: int | None = None  # the connection's own episode
     live = False  # its replies go out as they come (EPISODE_START mode "live")
+    ready = False  # the client's HELLO advertised episode_ready
     slots = np.full(0, -1, np.int64)  # a vector benchmark's slot -> row (-1: none)
     closed = False
     waiting: _Pending | None = None
@@ -159,6 +161,7 @@ async def _handle_connection(ws: Any, model_server: ModelServer, tg: TaskGroup) 
                 offered = msg.payload.get("capabilities")
                 offered = offered if isinstance(offered, dict) else {}
                 caps = frozenset(k for k in CAPABILITIES if offered.get(k) is True)
+                ready = offered.get("episode_ready") is True
                 extra: dict[str, Any] = {}
                 obs_params = model_server.get_observation_params()
                 if obs_params:
@@ -176,6 +179,7 @@ async def _handle_connection(ws: Any, model_server: ModelServer, tg: TaskGroup) 
                     model_server=type(model_server).__name__,
                     capabilities={
                         "vector_step": model_server.supports_vector_step,
+                        "episode_ready": True,
                         **dict.fromkeys(CAPABILITIES, True),
                     },
                     **extra,
@@ -208,6 +212,8 @@ async def _handle_connection(ws: Any, model_server: ModelServer, tg: TaskGroup) 
                     continue
                 row = out
                 logger.info("EPISODE_START session=%s row=%d", session_id[:8], row)
+                if ready:
+                    await reply(MessageType.EPISODE_READY, {}, msg.seq)
 
             elif msg.type == MessageType.OBSERVATION:
                 if row is None:  # an observation without EPISODE_START: an episode of its own

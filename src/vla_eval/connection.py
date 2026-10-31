@@ -16,7 +16,7 @@ from vla_eval.types import Action, Observation
 
 logger = logging.getLogger(__name__)
 
-CAPABILITIES = {"publish": True, "episode_error": True}  # what the live listener handles (HELLO)
+CAPABILITIES = {"episode_ready": True, "publish": True, "episode_error": True}  # what this client handles (HELLO)
 
 
 class ServerEpisodeError(RuntimeError):
@@ -39,7 +39,8 @@ class Connection:
 
     **Convenience methods** — thin compositions of the primitives above:
 
-    - `start_episode`, `end_episode`, `send_observation` — one-liner sends.
+    - `start_episode` — send + await ``EPISODE_READY`` (when the server advertises it).
+    - `end_episode`, `send_observation` — one-liner sends.
     - `act` — request/response (send + recv + seq validation).
     - `on_action`, `on_publish`, `listening()` — callback-based receive (live mode).
     - `reconnect` — close + connect with backoff.
@@ -79,6 +80,7 @@ class Connection:
         self._publish_index = -1  # the episode's last applied PUBLISH
         self._benchmark: str | None = None
         self.server_info: dict[str, Any] = {}
+        self._offered: dict[str, Any] = {}  # the capabilities our last HELLO advertised
 
     @property
     def is_connected(self) -> bool:
@@ -93,9 +95,9 @@ class Connection:
 
     async def _hello_handshake(self) -> None:
         """Exchange HELLO messages with the server."""
-        payload = make_hello_payload(
-            capabilities=CAPABILITIES, **({"benchmark": self._benchmark} if self._benchmark else {})
-        )
+        extra: dict[str, Any] = {"benchmark": self._benchmark} if self._benchmark else {}
+        self._offered = dict(CAPABILITIES)
+        payload = make_hello_payload(capabilities=self._offered, **extra)
         await self.send(MessageType.HELLO, payload)
         reply = await self.recv(timeout=self.timeout)
         if reply.type != MessageType.HELLO:
@@ -165,8 +167,28 @@ class Connection:
         await self._hello_handshake()
 
     async def start_episode(self, config: dict[str, Any]) -> None:
-        """Signal episode start to the server."""
-        await self.send(MessageType.EPISODE_START, config)
+        """Send ``EPISODE_START``; a server advertising ``episode_ready`` is awaited (``timeout``) until it started.
+        Call it outside ``listening()``, which would read the same socket.
+
+        Raises:
+            RuntimeError: The server failed the start (``ERROR``).
+            TimeoutError: No ``EPISODE_READY`` within ``timeout``.
+        """
+        seq = await self.send(MessageType.EPISODE_START, config)
+        if not (self._offered.get("episode_ready") and self.server_info.get("capabilities", {}).get("episode_ready")):
+            return  # an older peer: a failed start surfaces at the first reply
+        try:
+            with anyio.fail_after(self.timeout):
+                reply = await self.recv()
+                while reply.seq < seq:  # a late reply of an earlier episode
+                    reply = await self.recv()
+        except TimeoutError:
+            raise TimeoutError(f"no EPISODE_READY within {self.timeout}s") from None
+        if reply.type == MessageType.ERROR:  # e.g. a refused start (``requires``): no episode to end
+            self._episode_active = False
+            raise RuntimeError(f"Server error: {reply.payload}")
+        if reply.type != MessageType.EPISODE_READY or reply.seq != seq:
+            raise RuntimeError(f"Expected EPISODE_READY for seq {seq}, got {reply.type.value} seq {reply.seq}")
 
     async def end_episode(self, result: dict[str, Any]) -> None:
         """Signal episode end to the server."""

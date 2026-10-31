@@ -4,6 +4,7 @@ capability negotiation and old-client refusal; RTCServer's time-grid streaming."
 from __future__ import annotations
 
 import math
+import time
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -20,7 +21,7 @@ from vla_eval.model_servers.daemons import EpisodeContext, ObservationRequest
 from vla_eval.model_servers.live import RTCServer
 from vla_eval.protocol.messages import Message, MessageType, pack_message, unpack_message
 from vla_eval.runners.action_buffer import ActionBuffer
-from vla_eval.runners.base import failure_reason
+from vla_eval.runners.base import ModelStartError, failure_reason
 from vla_eval.runners.live_runner import LiveEpisodeRunner
 from vla_eval.runners.sync_runner import SyncEpisodeRunner
 
@@ -104,6 +105,43 @@ async def test_an_old_live_client_against_rtc_ends_connection_closed(free_port, 
             with pytest.raises(websockets.exceptions.ConnectionClosed) as info:
                 await LiveEpisodeRunner(hz=50.0).run_episode(StubBenchmark(), {"name": "t"}, conn, max_steps=200)
         assert failure_reason(info.value) == "connection_closed"
+    finally:
+        await stop_server(task)
+
+
+@pytest.mark.anyio
+async def test_a_ready_capable_client_lacking_publish_fails_an_rtc_start_model_start(free_port, monkeypatch):
+    monkeypatch.setattr(connection_module, "CAPABILITIES", {"episode_ready": True})  # a client before PUBLISH
+    task = await start_server(Chunker(hz=50.0), free_port)
+    try:
+        async with Connection(f"ws://127.0.0.1:{free_port}") as conn:
+            with anyio.fail_after(3), pytest.raises(ModelStartError, match="missing capabilities") as info:
+                await LiveEpisodeRunner(hz=50.0).run_episode(StubBenchmark(), {"name": "t"}, conn, max_steps=200)
+            assert failure_reason(info.value) == "model_start"
+            with pytest.raises(websockets.exceptions.ConnectionClosed) as closed:
+                await conn.recv(timeout=2)
+            assert closed.value.rcvd is not None and closed.value.rcvd.code == 1008
+    finally:
+        await stop_server(task)
+
+
+@pytest.mark.anyio
+async def test_episode_ready_follows_the_daemons_reset_with_the_run_installed(free_port):
+    class Slow(Daemon):
+        def reset_episodes(self, rows: Rows) -> dict[int, Exception] | None:
+            time.sleep(0.3)
+            return super().reset_episodes(rows)
+
+    server = Slow(echo)
+    task = await start_server(server, free_port)
+    try:
+        async with Connection(f"ws://127.0.0.1:{free_port}") as conn:
+            t0 = time.monotonic()
+            await conn.start_episode(LIVE)
+            assert time.monotonic() - t0 >= 0.3 and server.log == [("reset", [0])] and 0 in server.daemons._eps
+            await conn.send_observation({"value": 2.0})
+            assert (await conn.recv(timeout=2)).payload["actions"].tolist() == [2.0, 2.0]
+            await conn.end_episode({})
     finally:
         await stop_server(task)
 
@@ -640,8 +678,8 @@ async def test_a_live_episode_left_without_tasks_is_failed_before_any_observatio
     try:
         async with Connection(f"ws://127.0.0.1:{free_port}") as conn:
             with anyio.fail_after(3), pytest.raises(ServerEpisodeError, match="no task is left"):
+                await conn.start_episode(LIVE)  # EPISODE_READY precedes the run's EPISODE_ERROR
                 async with conn.listening():
-                    await conn.start_episode(LIVE)
                     await anyio.sleep_forever()
     finally:
         await stop_server(task)

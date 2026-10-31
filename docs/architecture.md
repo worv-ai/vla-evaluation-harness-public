@@ -58,6 +58,8 @@ curl -fsS http://host:port/health   # → HTTP 200 once the server is up
 
 TCP listen, HTTP routes (`/health`, `/config`), and the WebSocket HELLO handshake all become live at the same moment, when `__init__` completes. An `__init__` that throws (OOM, bad config, missing checkpoint) kills the process before anything starts listening, so a failing connect is itself a fail-fast signal.
 
+Per episode, the server answers `EPISODE_START` with `EPISODE_READY` once `on_episode_start` returned (or `ERROR` if it failed); the runner waits for it (at most `server.timeout`) before its clock starts and the first observation goes out. Both HELLOs advertise `capabilities.episode_ready`; with an older peer nothing is sent or awaited. A live episode applies the benchmark's hold action until the first action arrives.
+
 ## Episode Execution Flow (Sync)
 
 ```
@@ -65,7 +67,7 @@ Orchestrator          SyncEpisodeRunner        Connection         Model Server
     │                       │                      │                    │
     │── run_episode() ────► │                      │                    │
     │                       │── start_episode() ──►│── episode_start ──►│
-    │                       │                      │                    │
+    │                       │                      │◄── episode_ready ──│
     │                       │   ┌─ step loop ──────────────────────┐    │
     │                       │   │ obs_dict = make_obs(raw_obs)     │    │
     │                       │   │ action = conn.act(obs_dict)      │    │
@@ -101,7 +103,7 @@ Every message is a msgpack binary frame:
 
 ```python
 {
-    "type": "observation" | "action" | "episode_start" | "episode_end" | "error" | ...,
+    "type": "observation" | "action" | "episode_start" | "episode_ready" | "episode_end" | "error" | ...,
     "payload": dict[str, Any],   # benchmark-specific, no fixed schema
     "seq": int,                  # monotonically increasing sequence number
     "timestamp": float,          # wall-clock Unix epoch
@@ -151,9 +153,10 @@ with `EPISODE_END {status, failure_reason}`; the server ends those a client drop
 Live episodes may get server-initiated messages, each negotiated in HELLO (`capabilities: {"publish": true,
 "episode_error": true}`) and bound to the episode's `EPISODE_START` seq: `PUBLISH {action, index, source_seq}`
 (applied latest-wins with replies; a stale index drops) and `EPISODE_ERROR {error, failure_reason: "model_act"}`
-(the client ends the episode `model_act`). A server that `requires` a capability refuses an old client's start and
-closes its socket. `EPISODE_START` may carry `control_hz` (the live runner's `hz`, else
-`BenchmarkCommon.control_hz`): a `DaemonModelServer` loop's `ep.sim_dt`.
+(the client ends the episode `model_act`). A server that `requires` a capability refuses an old client's start
+(`ERROR` instead of `EPISODE_READY`, so the start fails `model_start`) and closes its socket. A `DaemonModelServer`
+sends `EPISODE_READY` once `reset_episodes` returned and the episode's `run` is scheduled. `EPISODE_START` may carry
+`control_hz` (the live runner's `hz`, else `BenchmarkCommon.control_hz`): a `DaemonModelServer` loop's `ep.sim_dt`.
 
 The server runner (`model_servers/serve.py`) wraps any `ModelServer` into a WebSocket server with `serve(model_server, host, port)`.
 
