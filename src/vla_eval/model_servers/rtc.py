@@ -87,8 +87,9 @@ class _Inference:
 @dataclass(eq=False)
 class _RowState:
     level: str
-    key: Any
+    seed: int
     recorder: StepRecorder | None
+    key: Any = None  # JAX PRNG key, made on the model thread
 
 
 class KinetixRTCServer(DaemonModelServer):
@@ -96,7 +97,7 @@ class KinetixRTCServer(DaemonModelServer):
 
     Each observation is answered with the plan's action for its step (``reply`` in sync, ``publish`` in live), so
     the step index, not a time grid, decides which slot a tick gets.  Live, protocol step 0 is the second observation:
-    the first is sent before tick 0, which always holds.  A boundary's chunk lands ``delay`` steps later
+    the first is sent right before tick 0, which holds; ``initial_hold`` applies the same zero action first in sync.  A boundary's chunk lands ``delay`` steps later
     (``latency="steps"``) or after ``(delay - 1/2) / hz`` (``"wall"``) / ``delay / hz`` (``"wall_exact"``) seconds
     since its observation's admission, compute included (live only).  The initial chunk (official: computed with
     no delay before the loop) is exempt unless ``first_chunk_delayed``, in which case the first steps get no action.
@@ -122,6 +123,7 @@ class KinetixRTCServer(DaemonModelServer):
         horizon: int = 1,
         latency: Latency = "steps",
         first_chunk_delayed: bool = False,
+        initial_hold: bool = False,
         bid_n: int = 32,
         bid_k: int | None = 3,
         beta: float = 5.0,
@@ -146,7 +148,7 @@ class KinetixRTCServer(DaemonModelServer):
             weak_checkpoint_dir,
         )
         self.method, self.delay, self.horizon, self.latency = method, delay, horizon, latency
-        self.first_chunk_delayed = first_chunk_delayed
+        self.first_chunk_delayed, self.initial_hold = first_chunk_delayed, initial_hold
         self.bid_n, self.bid_k, self.beta, self.flow_steps = bid_n, bid_k, beta, flow_steps
         self.obs_dim, self.action_dim = obs_dim, action_dim
         self._states: dict[str, Any] = {}  # level -> nnx.State
@@ -241,8 +243,6 @@ class KinetixRTCServer(DaemonModelServer):
         return np.asarray(self._sample_fn(self._states[level], self._weak.get(level), key, obs, prev))
 
     def reset_episodes(self, rows: Rows) -> dict[int, Exception] | None:
-        import jax
-
         failed: dict[int, Exception] = {}
         for i, (rid, episode) in enumerate(zip(rows.ids.tolist(), rows.episodes)):
             level = (episode.config.get("task") or {}).get("level")
@@ -256,13 +256,13 @@ class KinetixRTCServer(DaemonModelServer):
             rec = None
             if episode.recording_db_path:
                 rec = StepRecorder(episode.recording_db_path, episode.session_id, episode.episode_id)
-            self._eps_state[rid] = _RowState(level, jax.random.PRNGKey(seed), rec)
+            self._eps_state[rid] = _RowState(level, seed, rec)
         return failed
 
     def _infer(self, st: _RowState, obs: np.ndarray, prev: np.ndarray | None) -> tuple[np.ndarray, float]:
         import jax
 
-        st.key, key = jax.random.split(st.key)
+        st.key, key = jax.random.split(jax.random.PRNGKey(st.seed) if st.key is None else st.key)
         t0 = time.perf_counter()
         chunk = self._call_init(st.level, key, obs) if prev is None else self._call_sample(st.level, key, obs, prev)
         return chunk[0], (time.perf_counter() - t0) * 1e3
@@ -296,14 +296,17 @@ class KinetixRTCServer(DaemonModelServer):
                 land(inf)
             inf.done.set()
 
-        # Live: the first observation precedes the clock's first tick, which holds, so protocol step 0 is the next.
-        offset = 1 if ep.can_publish else 0
+        # A live runner's tick 0 follows its first observation at once and holds, so protocol step 0 is the next one;
+        # ``initial_hold`` replays that hold in sync (the sync counterpart of a live run).
+        offset = 1 if ep.can_publish or self.initial_hold else 0
         async for req in ep.observations():
             j = req.step - offset
             row: dict[str, Any] = {"step": req.step, "p": j, "admitted_wall": req.admitted_wall}
             if j < 0:
                 if st.recorder is not None:
                     st.recorder.record(row)
+                if not ep.can_publish:
+                    await req.reply({"actions": np.zeros(self.action_dim, np.float32)})
                 continue
             if j == 0 and not self.first_chunk_delayed:
                 init = _Inference(-1, 0, -1)
