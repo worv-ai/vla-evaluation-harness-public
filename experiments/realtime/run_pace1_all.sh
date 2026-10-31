@@ -1,6 +1,6 @@
 #!/bin/bash
 # Pace=1.0 experiments: main table (realtime/ci/laas) + inference delay sweep
-# All conditions use pace=1.0, wait_first_action=true, 50 eps/task, 12 tasks
+# All conditions use pace=1.0, 50 eps/task, 12 tasks
 set -euo pipefail
 
 HARNESS="$(cd "$(dirname "$0")/../.." && pwd)"
