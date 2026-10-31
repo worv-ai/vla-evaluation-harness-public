@@ -211,7 +211,10 @@ async def _handle_connection(ws: Any, model_server: ModelServer, tg: TaskGroup) 
                     _inflight -= 1
                 if result is None:
                     continue
-                await reply(MessageType.VECTOR_RESULT, result, msg.seq)
+                try:
+                    await reply(MessageType.VECTOR_RESULT, result, msg.seq)
+                except websockets.exceptions.ConnectionClosed:
+                    continue
 
             elif msg.type == MessageType.EPISODE_END:
                 logger.info("EPISODE_END session=%s", session_id[:8])

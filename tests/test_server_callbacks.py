@@ -371,3 +371,32 @@ def test_old_hook_names_fail_loudly():
         class Old(PredictModelServer):
             def on_episode_start(self, rows):
                 pass
+
+
+class SlowEndLogServer(HistoryServer):
+    def __init__(self) -> None:
+        super().__init__(delay=0.3)
+        self.results: list[dict[str, Any]] = []
+
+    def finish_episodes(self, rows: Rows, results) -> None:
+        self.results += results
+
+
+@pytest.mark.anyio
+async def test_a_vector_end_sent_before_a_disconnect_still_counts(free_port):
+    """A step still inferring when the client closes; the ends it sent after it keep their status."""
+    server = SlowEndLogServer()
+    task = await start_server(server, free_port)
+    try:
+        conn = Connection(f"ws://127.0.0.1:{free_port}")
+        await conn.connect()
+        await conn.send(MessageType.VECTOR_STEP, _vstep([0], [[0, {}]], 1.0))
+        end = {"status": "error", "failure_reason": "timeout"}
+        await conn.send(MessageType.VECTOR_STEP, {"ends": [[0, end]], "starts": [], "slots": [], "observations": {}})
+        await conn.close()
+        with anyio.fail_after(3):
+            while not server.results:
+                await anyio.sleep(0.02)
+        assert server.results == [end]
+    finally:
+        await stop_server(task)
