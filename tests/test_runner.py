@@ -18,7 +18,8 @@ from vla_eval.runners.action_buffer import ActionBuffer
 from vla_eval.runners.live_runner import LiveEpisodeRunner
 from vla_eval.runners.sync_runner import SyncEpisodeRunner
 from vla_eval.model_servers.predict import PredictModelServer
-from vla_eval.model_servers.base import Row
+from vla_eval.model_servers.base import Episode, ModelServer, Row
+from vla_eval.model_servers.live import LiveModelServer
 from vla_eval.model_servers.serve import serve_async
 
 from tests.conftest import StubBenchmark, wait_for_server, stop_server
@@ -360,9 +361,9 @@ async def test_predict_serialised_under_concurrent_clients(free_port):
 # ---------------------------------------------------------------------------
 
 
-class CIEchoServer(PredictModelServer):
+class CIEchoServer(LiveModelServer):
     def __init__(self, delay: float = 0.0, **kwargs: Any):
-        super().__init__(continuous_inference=True, hz=10.0, **kwargs)
+        super().__init__(hz=10.0, **kwargs)
         self.delay = delay
         self.calls = 0
 
@@ -372,16 +373,16 @@ class CIEchoServer(PredictModelServer):
         return {"actions": obs.get("value", 0) * np.ones(7, dtype=np.float32)}
 
 
-class CILAASChunkServer(PredictModelServer):
+class CILAASChunkServer(LiveModelServer):
     def __init__(self):
-        super().__init__(continuous_inference=True, laas=True, hz=10.0, chunk_size=4)
+        super().__init__(laas=True, hz=10.0, chunk_size=4)
 
     def predict(self, obs: dict[str, Any], row: Row) -> dict[str, Any]:
         time.sleep(0.25)  # 2.5 steps at 10 Hz
         return {"actions": np.arange(6 * 7, dtype=np.float32).reshape(6, 7)}
 
 
-async def _serve(server: PredictModelServer, port: int) -> asyncio.Task:
+async def _serve(server: ModelServer, port: int) -> asyncio.Task:
     task = asyncio.create_task(serve_async(server, port=port))
     await wait_for_server(port)
     return task
@@ -416,14 +417,19 @@ async def test_ci_laas_skips_stale_actions(free_port):
         await stop_server(task)
 
 
-def test_pick_action_laas():
+def test_laas_selects_the_step_its_latency_reached():
     server = CILAASChunkServer()
-    chunk = np.arange(28, dtype=np.float32).reshape(4, 7)
-    assert np.array_equal(server.pick_action(np.ones(7), time.monotonic()), np.ones(7))
-    assert np.array_equal(server.pick_action(chunk, time.monotonic() - 0.25), chunk[2])
-    assert np.array_equal(server.pick_action(chunk, time.monotonic() - 9.0), chunk[3])
+    row = Row(0, 0, True, Episode(config={}, episode_id="e", session_id="s", chunk_size=4))
+    chunk = {"actions": np.arange(42, dtype=np.float64).reshape(6, 7)}
+    assert np.array_equal(server.select({"actions": np.ones(7)}, 0.0, row)["actions"], np.ones(7))
+    assert np.array_equal(server.select(chunk, 0.25, row)["actions"], chunk["actions"][2])
+    assert np.array_equal(server.select(chunk, 9.0, row)["actions"], chunk["actions"][3])  # trimmed first
+    assert server.select(chunk, 0.0, row)["actions"].dtype == np.float32
+    assert server.select({"foo": 1.0}, 0.0, row) == {"foo": 1.0}
+    row.episode.chunk_size = None
+    assert np.array_equal(server.select(chunk, 9.0, row)["actions"], chunk["actions"][5])
     server.laas = False
-    assert np.array_equal(server.pick_action(chunk, time.monotonic() - 0.25), chunk[0])
+    assert np.array_equal(server.select(chunk, 0.25, row)["actions"], chunk["actions"][0])
 
 
 @pytest.mark.anyio
@@ -461,34 +467,6 @@ async def test_ci_episode_end_drops_inflight_action(free_port):
             assert np.allclose(action["actions"], 4.0)
             assert server.calls == 2
             await conn.end_episode({})
-    finally:
-        await stop_server(task)
-
-
-class CIBatchServer(CIEchoServer):
-    def __init__(self):
-        super().__init__(max_batch_size=2, max_wait_time=0.5)
-        self.sizes: list[int] = []
-
-    def predict_batch(self, obs, rows):
-        self.sizes.append(len(rows))
-        return {"actions": np.asarray(obs["value"], np.float32)[:, None] * np.ones((1, 7), np.float32)}
-
-
-@pytest.mark.anyio
-async def test_ci_connections_batch(free_port):
-    server = CIBatchServer()
-    task = await _serve(server, free_port)
-    try:
-        conns = [Connection(f"ws://127.0.0.1:{free_port}") for _ in range(2)]
-        for c in conns:
-            await c.connect()
-            await c.start_episode({"task": {"name": "t"}, "mode": "live"})
-        actions = await asyncio.gather(*(c.act({"value": float(i + 1)}) for i, c in enumerate(conns)))
-        assert [float(a["actions"][0]) for a in actions] == [1.0, 2.0]
-        assert server.sizes == [2]
-        for c in conns:
-            await c.close()
     finally:
         await stop_server(task)
 
@@ -542,9 +520,6 @@ class ThreadLogServer(PredictModelServer):
         return {"actions": np.ones((2, 7), np.float32)}
 
     def reset_episodes(self, rows):
-        self.threads.add(threading.get_ident())
-
-    def observe(self, obs, rows):
         self.threads.add(threading.get_ident())
 
     def finish_episodes(self, rows, results):

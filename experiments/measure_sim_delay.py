@@ -53,8 +53,9 @@ class InstantServer(PredictModelServer):
         self.step_timestamps = []
         print(f"\n=== Episode started: {config.get('task', {}).get('name', '?')} ===")
 
-    def observe(self, obs: Batch, rows: Rows) -> None:
+    async def on_observation(self, obs: Batch, rows: Rows) -> None:
         self.step_timestamps.append(time.monotonic())
+        await super().on_observation(obs, rows)
 
     def finish_episodes(self, rows: Rows, results: list[EpisodeResult]) -> None:
         if not self.step_timestamps:

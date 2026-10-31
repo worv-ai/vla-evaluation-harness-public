@@ -256,11 +256,12 @@ class InstantServer(PredictModelServer):
     def predict(self, obs: Observation, row: Row) -> Action:
         return {"actions": np.zeros(self.action_dim, dtype=np.float32)}
 
-    def observe(self, obs: Batch, rows: Rows) -> None:
+    async def on_observation(self, obs: Batch, rows: Rows) -> None:
         if self._first_obs_time is None:
             self._first_obs_time = time.monotonic()
         self.call_count += len(rows)
         self._pbar.update(len(rows))
+        await super().on_observation(obs, rows)
 
     def reset(self) -> None:
         """Reset counters for the next measurement round."""

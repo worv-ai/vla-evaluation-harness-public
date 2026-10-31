@@ -151,7 +151,7 @@ async def _handle_connection(ws: Any, model_server: ModelServer, tg: TaskGroup) 
                     pass
                 reply_payload = make_hello_payload(
                     model_server=type(model_server).__name__,
-                    capabilities={"vector_step": not getattr(model_server, "continuous_inference", False)},
+                    capabilities={"vector_step": model_server.supports_vector_step},
                     **extra,
                 )
                 await reply(MessageType.HELLO, reply_payload, msg.seq)
@@ -444,6 +444,7 @@ def serve(
         anyio.run(partial(serve_async, model_server, host, port, on_shutdown=arm))
     finally:
         signal.signal(signal.SIGINT, previous)
+        model_server._model_thread.shutdown(cancel_futures=True)
 
 
 # ---------------------------------------------------------------------------

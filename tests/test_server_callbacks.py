@@ -1,7 +1,8 @@
-"""The callback contract: send_action/send_error over Rows snapshots; observe sees every observation."""
+"""The callback contract (send_action/send_error over Rows snapshots) and the servers built on it."""
 
 from __future__ import annotations
 
+import threading
 import time
 from typing import Any
 
@@ -11,6 +12,7 @@ import pytest
 
 from vla_eval.connection import Connection
 from vla_eval.model_servers.base import ModelServer, Row, Rows
+from vla_eval.model_servers.live import LiveModelServer
 from vla_eval.model_servers.predict import PredictModelServer
 from vla_eval.protocol.messages import MessageType
 
@@ -182,117 +184,23 @@ def _vstep(slots: list[int], starts: list, values: Any) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# PredictModelServer: observe sees every observation once, in order, before it is inferred
+# PredictModelServer
 # ---------------------------------------------------------------------------
 
 
 class HistoryServer(PredictModelServer):
-    """observe() keeps each row's value history; predict() logs what it saw with its observation."""
+    """predict() logs each observation it infers with the row's step; reset/finish log the rows."""
 
     def __init__(self, delay: float = 0.0, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self.delay = delay
-        self.history: dict[int, list[float]] = {}
-        self.predicted: list[tuple[float, list[float], int]] = []
-        self.finished: list[list[float]] = []
-
-    def reset_episodes(self, rows: Rows) -> None:
-        for rid in rows.ids.tolist():
-            self.history[rid] = []
-
-    def observe(self, obs, rows: Rows) -> None:
-        for rid, v in zip(rows.ids.tolist(), np.asarray(obs["value"]).tolist()):
-            self.history[rid].append(v)
-
-    def finish_episodes(self, rows: Rows, results) -> None:
-        self.finished += [list(self.history[rid]) for rid in rows.ids.tolist()]
+        self.predicted: list[tuple[float, int]] = []
 
     def predict(self, obs: dict[str, Any], row: Row) -> dict[str, Any]:
-        self.predicted.append((float(obs["value"]), list(self.history[row.id]), row.step))
+        self.predicted.append((float(obs["value"]), row.step))
         time.sleep(self.delay)
         n = self.chunk_size or 1
         return {"actions": float(obs["value"]) * np.ones((n, 7), np.float32)}
-
-
-@pytest.mark.anyio
-async def test_observe_sees_buffered_observations_once_in_order(free_port):
-    server = HistoryServer(chunk_size=3)
-    task = await start_server(server, free_port)
-    try:
-        async with Connection(f"ws://127.0.0.1:{free_port}") as conn:
-            await conn.start_episode({"task": {"name": "t"}})
-            for v in range(1, 6):
-                await conn.act({"value": float(v)})
-        assert server.history[0] == [1.0, 2.0, 3.0, 4.0, 5.0]
-        assert server.predicted == [(1.0, [1.0], 0), (4.0, [1.0, 2.0, 3.0, 4.0], 3)]
-    finally:
-        await stop_server(task)
-
-
-@pytest.mark.anyio
-async def test_ci_observes_coalesced_observations_and_infers_aligned_history(free_port):
-    """An observation arriving during an inference is observed only before the next one: history matches obs."""
-    server = HistoryServer(delay=0.3, continuous_inference=True)
-    task = await start_server(server, free_port)
-    try:
-        async with Connection(f"ws://127.0.0.1:{free_port}") as conn:
-            await conn.start_episode(LIVE)
-            await conn.send_observation({"value": 1.0})
-            await anyio.sleep(0.1)
-            for v in (2.0, 3.0):
-                await conn.send_observation({"value": v})
-            got = [_value((await conn.recv(timeout=2.0)).payload) for _ in range(2)]
-            await conn.end_episode({})
-        assert got == [1.0, 3.0]
-        # step counts every received observation, the coalesced one included
-        assert server.predicted == [(1.0, [1.0], 0), (3.0, [1.0, 2.0, 3.0], 2)]
-    finally:
-        await stop_server(task)
-
-
-@pytest.mark.anyio
-async def test_ci_observes_every_observation_before_the_episode_ends(free_port):
-    server = HistoryServer(delay=0.3, continuous_inference=True)
-    task = await start_server(server, free_port)
-    try:
-        async with Connection(f"ws://127.0.0.1:{free_port}") as conn:
-            await conn.start_episode(LIVE)
-            await conn.send_observation({"value": 1.0})
-            await anyio.sleep(0.1)
-            await conn.send_observation({"value": 2.0})  # arrives during the inference of 1.0
-            await conn.end_episode({})
-            await conn.start_episode(LIVE)  # waits for the end: an inference was in flight
-            assert _value(await conn.act({"value": 3.0})) == 3.0
-        assert server.finished[0] == [1.0, 2.0]
-    finally:
-        await stop_server(task)
-
-
-class FailObserveServer(HistoryServer):
-    def observe(self, obs, rows: Rows) -> None:
-        if float(np.asarray(obs["value"])[0]) == 2.0:
-            raise ValueError("cannot observe 2")
-        super().observe(obs, rows)
-
-
-@pytest.mark.anyio
-async def test_ci_reports_a_skipped_observations_failure_as_its_own(free_port):
-    """Observations 2 and 3 arrive during an inference; observe(2) fails: 2 gets the error, 3 is still inferred."""
-    server = FailObserveServer(delay=0.3, continuous_inference=True)
-    task = await start_server(server, free_port)
-    try:
-        async with Connection(f"ws://127.0.0.1:{free_port}") as conn:
-            await conn.start_episode(LIVE)
-            await conn.send_observation({"value": 1.0})
-            await anyio.sleep(0.1)
-            seq2 = await conn.send(MessageType.OBSERVATION, {"value": 2.0})
-            seq3 = await conn.send(MessageType.OBSERVATION, {"value": 3.0})
-            got = [await conn.recv(timeout=2.0) for _ in range(3)]
-            await conn.end_episode({})
-        assert [(m.type, m.seq) for m in got[1:]] == [(MessageType.ERROR, seq2), (MessageType.ACTION, seq3)]
-        assert "cannot observe 2" in got[1].payload["error"] and _value(got[2].payload) == 3.0
-    finally:
-        await stop_server(task)
 
 
 class FailOnceServer(HistoryServer):
@@ -312,7 +220,7 @@ async def test_a_failed_observation_still_counts_as_a_step(free_port):
             with pytest.raises(RuntimeError, match="observation_failed"):
                 await conn.act({"value": -1.0})
             await conn.act({"value": 2.0})
-        assert server.predicted == [(2.0, [-1.0, 2.0], 1)]
+        assert server.predicted == [(2.0, 1)]
     finally:
         await stop_server(task)
 
@@ -329,7 +237,7 @@ async def test_a_vector_step_never_waits_for_a_batch(free_port):
             await conn.exchange(_vstep([0, 1], [[1, {}]], 2.0))  # slot 0 buffered, slot 1 inferred
             await conn.exchange(_vstep([0, 1], [], 3.0))  # slot 0 inferred, slot 1 buffered
             assert time.monotonic() - t0 < 2.0
-        assert server.history == {0: [1.0, 2.0, 3.0], 1: [2.0, 3.0]}
+        assert server.predicted == [(1.0, 0), (2.0, 0), (3.0, 2)]
     finally:
         await stop_server(task)
 
@@ -340,7 +248,6 @@ class BrokenStartServer(HistoryServer):
         self.finished: list[list[int]] = []
 
     def reset_episodes(self, rows: Rows):
-        super().reset_episodes(rows)
         return {i: ValueError("no") for i, e in enumerate(rows.episodes) if e.config["task"].get("broken")}
 
     def finish_episodes(self, rows, results):
@@ -363,14 +270,6 @@ async def test_a_failed_start_frees_its_row_without_an_end(free_port):
         assert server.finished == [[0, 1]]  # row 0 was free again; the broken start never ended
     finally:
         await stop_server(task)
-
-
-def test_old_hook_names_fail_loudly():
-    with pytest.raises(TypeError, match="override reset_episodes"):
-
-        class Old(PredictModelServer):
-            def on_episode_start(self, rows):
-                pass
 
 
 class SlowEndLogServer(HistoryServer):
@@ -398,5 +297,139 @@ async def test_a_vector_end_sent_before_a_disconnect_still_counts(free_port):
             while not server.results:
                 await anyio.sleep(0.02)
         assert server.results == [end]
+    finally:
+        await stop_server(task)
+
+
+# ---------------------------------------------------------------------------
+# LiveModelServer: the latest observation of each episode, inferred in a loop
+# ---------------------------------------------------------------------------
+
+
+class LiveLogServer(LiveModelServer):
+    def __init__(self, delay: float = 0.0, out: str = "echo", **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.delay, self.out = delay, out
+        self.predicted: list[tuple[float, int]] = []
+        self.threads: set[str] = set()
+        self.busy = False
+        self.finished_busy: list[bool] = []
+
+    def reset_episodes(self, rows: Rows) -> None:
+        self.threads.add(threading.current_thread().name)
+
+    def predict(self, obs: dict[str, Any], row: Row) -> dict[str, Any]:
+        self.threads.add(threading.current_thread().name)
+        v = float(obs["value"])
+        self.predicted.append((v, row.step))
+        self.busy = True
+        time.sleep(self.delay)
+        self.busy = False
+        if v < 0:
+            raise ValueError("boom")
+        if self.out == "chunk":
+            return {"actions": v + np.arange(42, dtype=np.float64).reshape(6, 7)}
+        if self.out == "noactions":
+            return {"foo": v}
+        return {"actions": v * np.ones(7)}
+
+    def finish_episodes(self, rows: Rows, results) -> None:
+        self.threads.add(threading.current_thread().name)
+        self.finished_busy.append(self.busy)
+
+
+async def _live(server: LiveModelServer, port: int, values: list[float], gap: float = 0.0) -> list[Any]:
+    """Send ``values`` in one live episode (``gap`` apart), then collect the replies until they stop."""
+    task = await start_server(server, port)
+    try:
+        async with Connection(f"ws://127.0.0.1:{port}") as conn:
+            assert conn.server_info["capabilities"]["vector_step"] is False
+            await conn.start_episode(LIVE)
+            seqs = []
+            for v in values:
+                seqs.append(await conn.send(MessageType.OBSERVATION, {"value": v}))
+                await anyio.sleep(gap)
+            got = []
+            while True:
+                try:
+                    m = await conn.recv(timeout=1.0)
+                except Exception:
+                    break
+                got.append((m.type, seqs.index(m.seq), m.payload))
+            await conn.end_episode({})
+        return got
+    finally:
+        await stop_server(task)
+
+
+@pytest.mark.anyio
+async def test_live_coalesces_to_the_latest_observation_and_counts_every_step(free_port):
+    server = LiveLogServer(delay=0.3)
+    got = await _live(server, free_port, [1.0, 2.0, 3.0])
+    assert [(t, i, _value(p)) for t, i, p in got] == [(MessageType.ACTION, 0, 1.0), (MessageType.ACTION, 2, 3.0)]
+    assert server.predicted == [(1.0, 0), (3.0, 2)]
+
+
+@pytest.mark.anyio
+async def test_live_sends_a_chunks_first_action_as_float32(free_port):
+    got = await _live(LiveLogServer(out="chunk", chunk_size=4), free_port, [1.0], gap=0.2)
+    (_, _, payload), chunk = got[0], 1.0 + np.arange(42).reshape(6, 7)
+    assert np.asarray(payload["actions"]).dtype == np.float32 and np.array_equal(payload["actions"], chunk[0])
+
+
+@pytest.mark.parametrize("chunk_size", [4, None])
+@pytest.mark.anyio
+async def test_live_laas_counts_latency_from_admission(free_port, chunk_size):
+    server = LiveLogServer(delay=0.25, out="chunk", chunk_size=chunk_size, laas=True, hz=10.0)
+    got = await _live(server, free_port, [1.0])
+    chunk = 1.0 + np.arange(42).reshape(6, 7)
+    assert any(np.array_equal(got[0][2]["actions"], chunk[k]) for k in (2, 3))
+
+
+@pytest.mark.anyio
+async def test_live_passes_an_action_without_actions_through(free_port):
+    got = await _live(LiveLogServer(out="noactions"), free_port, [1.0, 2.0], gap=0.2)
+    assert [(i, p) for _, i, p in got] == [(0, {"foo": 1.0}), (1, {"foo": 2.0})]
+
+
+@pytest.mark.anyio
+async def test_live_failure_errors_its_observation_and_the_loop_goes_on(free_port):
+    got = await _live(LiveLogServer(), free_port, [-1.0, 2.0], gap=0.2)
+    assert [(t, i) for t, i, _ in got] == [(MessageType.ERROR, 0), (MessageType.ACTION, 1)]
+    assert "boom" in got[0][2]["error"] and _value(got[1][2]) == 2.0
+
+
+class SelectLastServer(LiveLogServer):
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.latencies: list[float] = []
+
+    def select(self, action, latency, row):
+        self.latencies.append(latency)
+        return {"actions": np.asarray(action["actions"][-1], np.float32)}
+
+
+@pytest.mark.anyio
+async def test_live_select_chooses_the_action_after_the_inference(free_port):
+    server = SelectLastServer(delay=0.2, out="chunk")
+    got = await _live(server, free_port, [1.0])
+    assert np.array_equal(got[0][2]["actions"], 1.0 + np.arange(35, 42))
+    assert server.latencies[0] >= 0.2
+
+
+@pytest.mark.anyio
+async def test_live_episode_end_waits_for_the_inference_in_flight(free_port):
+    server = LiveLogServer(delay=0.3)
+    task = await start_server(server, free_port)
+    try:
+        async with Connection(f"ws://127.0.0.1:{free_port}") as conn:
+            await conn.start_episode(LIVE)
+            await conn.send_observation({"value": 1.0})
+            await anyio.sleep(0.1)
+            await conn.end_episode({})
+            await conn.start_episode(LIVE)  # the same row id, once the first episode finished
+            assert _value(await conn.act({"value": 2.0})) == 2.0
+        assert server.finished_busy[:1] == [False]
+        assert server.threads == {"model_0"}
     finally:
         await stop_server(task)

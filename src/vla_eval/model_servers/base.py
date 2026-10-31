@@ -1,5 +1,6 @@
 """Model-server contract: every running episode is a row.  ``serve`` calls the async callbacks with batches of rows;
-the server replies with ``send_action`` / ``send_error``.  ``PredictModelServer`` (predict.py) builds on it."""
+the server replies with ``send_action`` / ``send_error``.  ``PredictModelServer`` (predict.py, batched
+request/response) and ``LiveModelServer`` (live.py, continuous inference) build on it."""
 
 from __future__ import annotations
 
@@ -8,12 +9,14 @@ import logging
 import uuid
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable, Iterator, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple, TypeVar
 
 import anyio
 import numpy as np
 import numpy.typing as npt
+from anyio.to_thread import run_sync as _run_in_thread
 
 from vla_eval import columns
 from vla_eval.specs import DimSpec
@@ -23,6 +26,8 @@ if TYPE_CHECKING:
     from anyio.abc import TaskGroup
 
 logger = logging.getLogger(__name__)
+
+T = TypeVar("T")
 
 
 @dataclass(eq=False)
@@ -128,13 +133,23 @@ class ModelServer(ABC):
     max_rows: int | None = None
     """Most concurrent episodes (``None``: no limit); starts beyond it fail."""
 
+    supports_vector_step: bool = True
+    """Whether clients may send ``VECTOR_STEP`` (HELLO capability ``vector_step``)."""
+
     def __init__(self) -> None:
+        # Every model call on one thread, one at a time: CUDA graphs (torch.compile) and JAX are thread-bound.
+        # The server owns it for its whole life (serve_async may run it again); serve() shuts it down.
+        self._model_thread = ThreadPoolExecutor(1, thread_name_prefix="model")
         self._table = np.empty(0, object)  # by row id: its Episode, None when free
         self._gen = np.zeros(0, np.int64)  # by row id: bumped at start and end, so stale Rows are told apart
         self._steps = np.zeros(0, np.int64)  # by row id: observations received
         self._closing = np.zeros(0, bool)
         self._free: list[int] = []  # ended rows' ids, reused smallest first
         self._size = 0  # row ids ever used
+
+    async def run_on_model_thread(self, fn: Callable[..., T], *args: Any) -> T:
+        """``fn(*args)`` on the server's one model thread, after the calls submitted before it."""
+        return await _run_in_thread(self._model_thread.submit(fn, *args).result)
 
     async def on_serve_start(self, tg: TaskGroup) -> None:
         """Called by ``serve_async`` before accepting connections; *tg* lives as long as the server.
