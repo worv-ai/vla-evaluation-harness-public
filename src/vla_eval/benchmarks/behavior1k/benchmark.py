@@ -22,7 +22,7 @@ Key facts:
       reports indices 0-9 with one rollout each.  ``train`` takes raw instance ids (the demo instances).
     - Timeout: 1.5x the task's mean human-demo length unless ``max_steps`` is set.
     - Time budget (v3.9.4): ``max_steps`` seconds of wall clock per rollout, starting once the first policy
-      query returns (that query is free, up to 600 s); later queries are capped at 600 s.  A rollout that
+      query returns (that query is free; ``server.timeout`` caps it); later queries are capped at 600 s.  A rollout that
       runs over scores zero with a ``failure_reason``, as upstream's ``evaluate_instances_batched``.
     - Metrics: binary ``success`` and the ranking metric ``q_score`` (fraction of goal predicates newly
       satisfied, max over goal options; 1.0 on success), plus upstream's efficiency metrics.
@@ -248,7 +248,6 @@ class Behavior1KBenchmark(StepBenchmark):
         self._steps = 0
         self._failure: str | None = None
         self._deadline: float | None = None
-        self._obs_ready = time.monotonic()
         obs = self._state.obs
         self._recorder.record_video(self._frame(obs))
         return obs
@@ -280,12 +279,14 @@ class Behavior1KBenchmark(StepBenchmark):
         """Failure reason for the query that just returned, as ``evaluate_instances_batched`` would record it."""
         from omnigibson.eval.utils.network_utils import POLICY_RESPONSE_TIMEOUT
 
-        if self._deadline is not None and now >= self._deadline:
+        if self._deadline is None:
+            # The first query is uncharged and, like EPISODE_START before it, bounded by ``server.timeout``.
+            self._deadline = now + self._evaluator.max_steps
+            return None
+        if now >= self._deadline:
             return "group_time_budget_exceeded"
         if now - self._obs_ready > POLICY_RESPONSE_TIMEOUT:
             return "policy_query_timeout"
-        if self._deadline is None:  # The first query is uncharged; accounting starts before its action runs.
-            self._deadline = now + self._evaluator.max_steps
         return None
 
     def _fail(self, reason: str) -> StepResult:

@@ -24,12 +24,13 @@ def bench(monkeypatch):
     b._evaluator = SimpleNamespace(max_steps=100, instance_eval_states=[state])
     b._recorder = NullEpisodeRecorder()
     b._instance_id, b._steps, b._failure, b._deadline = 301, 0, None, None
-    b._obs_ready = time.monotonic()
+    b._obs_ready = time.monotonic() - 1
     return b, net
 
 
 def test_first_query_starts_budget(bench):
-    b, _ = bench
+    b, net = bench
+    net.POLICY_RESPONSE_TIMEOUT = 0  # the first query is exempt: EPISODE_START precedes it
     now = time.monotonic()
     assert b._check_budget(now) is None
     assert b._deadline == pytest.approx(now + 100)
@@ -40,6 +41,7 @@ def test_failed_rollout_scores_zero(bench, reason):
     b, net = bench
     if reason == "policy_query_timeout":
         net.POLICY_RESPONSE_TIMEOUT = 0
+        b._deadline = time.monotonic() + 100
     else:
         b._deadline = time.monotonic() - 1
     result = b.step({"actions": [0.0] * 23})
