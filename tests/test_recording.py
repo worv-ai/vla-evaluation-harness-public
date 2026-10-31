@@ -35,7 +35,7 @@ def _count_frames(path: Path) -> int:
     import imageio
 
     with imageio.get_reader(str(path)) as r:
-        return sum(1 for _ in r)
+        return sum(1 for _ in r)  # ty: ignore[not-iterable]
 
 
 def _rec(tmp_path: Path, **overrides: Any) -> EpisodeVideoRecorder:
