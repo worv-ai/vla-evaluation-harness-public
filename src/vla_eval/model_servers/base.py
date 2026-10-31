@@ -56,6 +56,7 @@ class _Pending:
         vector: bool = False,
         forward: Callable[[Any, Exception | None], Awaitable[None]] | None = None,
     ) -> None:
+        self.pos = np.arange(n)  # the positions of the rows on_observation gets
         self.answered = np.zeros(n, bool)
         self.left = n
         self.parts: list[tuple[np.ndarray, Batch]] = []  # (positions, their actions)
@@ -68,6 +69,8 @@ class _Pending:
         """The answered positions' actions, in position order."""
         if not self.parts:
             return {}
+        if len(self.parts) == 1 and self.parts[0][0] is self.pos:  # one reply for every row
+            return self.parts[0][1]
         pos = np.concatenate([p for p, _ in self.parts])
         actions = self.parts[0][1] if len(self.parts) == 1 else columns.concat([a for _, a in self.parts])
         return actions if (np.diff(pos) > 0).all() else columns.take(actions, np.argsort(pos))
@@ -167,7 +170,7 @@ class ModelServer(ABC):
             for action in columns.split(actions, len(keep)):
                 await p.forward(action, None)
             return
-        p.parts.append((rows._pos[keep], actions))
+        p.parts.append((rows._pos if len(keep) == len(rows) else rows._pos[keep], actions))
         if not p.left:
             p.done.set()
 
@@ -229,6 +232,10 @@ class ModelServer(ABC):
         p, pos = rows._pending, rows._pos
         if p is None or pos is None:
             raise RuntimeError("send_action/send_error take the rows of an on_observation call")
+        if pos is p.pos and p.left == len(pos) and (self._gen[rows.ids] == rows._gen).all():  # all rows, first reply
+            p.answered[:] = True
+            p.left = 0
+            return pos
         ok = ~p.answered[pos] & (self._gen[rows.ids] == rows._gen)
         if not ok.all():
             if (dup := p.answered[pos]).any():
@@ -249,7 +256,7 @@ class ModelServer(ABC):
 
     def _rows(self, ids: Sequence[int] | np.ndarray, pending: _Pending | None = None) -> Rows:
         idx = np.asarray(ids, np.int64)
-        pos = None if pending is None else np.arange(len(idx))
+        pos = None if pending is None else pending.pos
         return Rows(idx, self._steps[idx], self._table[idx], self._gen[idx], pending, pos)
 
     def _alloc(self) -> int:
