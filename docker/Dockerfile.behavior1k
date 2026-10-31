@@ -1,15 +1,17 @@
 # BEHAVIOR-1K — OmniGibson on NVIDIA Isaac Sim (https://behavior.stanford.edu)
 #
-# BEHAVIOR Challenge 2026 stack: BEHAVIOR-1K v3.9.3, Isaac Sim 5.1.0, Python 3.11,
-# 100 tasks. Mirrors upstream setup.sh (--omnigibson --bddl --joylo --eval).
-#
-# Heavy image: Isaac Sim wheels (~15 GB) plus the BEHAVIOR-1K source tree. The
-# dataset (~40 GB) is NOT baked in; it is mounted at /app/BEHAVIOR-1K/datasets.
+# BEHAVIOR Challenge 2026 stack: BEHAVIOR-1K v3.9.4, Isaac Sim 5.1.0, Python 3.11, 100 tasks.
+# Built FROM upstream's official image (docker/Dockerfile, published by build-push-containers.yml), which
+# runs setup.sh --omnigibson --bddl --joylo --primitives --eval into the conda env ``behavior``.
+# This file only adds the harness.  The dataset (~32 GiB) is NOT baked in; it is mounted at /data
+# (the image's OMNIGIBSON_DATA_PATH).
 #
 # Hardware requirements: NVIDIA GPU with Vulkan, driver >= 570 (CUDA 12.8 torch).
 
-ARG BASE_IMAGE=ghcr.io/allenai/vla-evaluation-harness/base:latest
-FROM ${BASE_IMAGE}
+# Digest of stanfordvl/behavior:3.9.4 (image revision fe66cc7 = tag v3.9.4, amd64 only); ch-image rejects
+# a ref with both tag and digest.
+ARG BEHAVIOR_IMAGE=stanfordvl/behavior@sha256:6f8ca9a97ba044d7c65a5854fb74267bb8ecd00d3848ca296b83178133669929
+FROM ${BEHAVIOR_IMAGE}
 
 # Build-time license confirmation.  The user must explicitly opt in
 # the same way Stanford's setup.sh requires --accept-nvidia-eula.
@@ -30,86 +32,27 @@ RUN if [ "$ACCEPT_NVIDIA_EULA" != "YES" ]; then \
         exit 1; \
     fi
 
-# Isaac Sim 5.1 runtime libraries missing from the base image (upstream docker/Dockerfile list).
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        libatomic1 libglu1-mesa libgomp1 libnghttp2-14 libxi6 libxrandr2 libxt6 \
-    && rm -rf /var/lib/apt/lists/*
 # OmniGibson torch.compile()s at import, and Triton links with -lcuda, which needs the unversioned name.
-# The runtime injects only libcuda.so.1 (Docker: /usr/lib/...; Charliecloud: the first ldconfig dir).
-RUN ln -s libcuda.so.1 /usr/lib/x86_64-linux-gnu/libcuda.so \
-    && ln -s libcuda.so.1 /usr/local/cuda/targets/x86_64-linux/lib/libcuda.so
+# Runtimes inject only libcuda.so.1: Docker into /usr/lib/x86_64-linux-gnu, ch-fromhost into the first
+# ``ldconfig -Nv`` directory.
+RUN for d in /usr/lib/x86_64-linux-gnu "$(/sbin/ldconfig -Nv 2>/dev/null | grep -E '^/' | cut -d: -f1 | head -1)"; do \
+        ln -sfn libcuda.so.1 "$d/libcuda.so"; \
+    done
 
+# Non-interactive headless runs; the official image only accepts the EULA during setup.sh.
 ENV OMNIGIBSON_HEADLESS=1 \
     OMNI_KIT_ACCEPT_EULA=YES \
     ACCEPT_EULA=Y \
-    PRIVACY_CONSENT=Y \
-    OMNIGIBSON_DATA_PATH=/app/BEHAVIOR-1K/datasets
-
-# ── Conda environment (Python 3.11 — required by Isaac Sim 5.1.0) ──
-RUN conda create -n behavior python=3.11 pip "setuptools>=71,<81" wheel -y && conda clean -afy
-ENV PATH=/opt/conda/envs/behavior/bin:$PATH \
-    UV_PYTHON=/opt/conda/envs/behavior/bin/python
-
-# ── PyTorch 2.7.0 + CUDA 12.8 (setup.sh) ────────────────────────────
-RUN uv pip install --no-cache-dir \
-        "torch==2.7.0" "torchvision==0.22.0" "torchaudio==2.7.0" "torchcodec==0.5" \
-        --torch-backend cu128 \
-    && uv pip install --no-cache-dir "numpy<2"
-
-# Install order follows setup.sh: OmniGibson, then Isaac Sim, then joylo.  Later steps deliberately
-# override earlier pins (Isaac Sim's pillow 11.3.0 / packaging 23.0), as pip does upstream.
-
-# ── BEHAVIOR-1K (bddl3 + OmniGibson[eval]) ──────────────────────────
-ARG BEHAVIOR1K_REF=v3.9.3-post2
-RUN git clone --depth 1 --branch "${BEHAVIOR1K_REF}" \
-        https://github.com/StanfordVL/BEHAVIOR-1K.git /app/BEHAVIOR-1K \
-    && rm -rf /app/BEHAVIOR-1K/.git
-# The tag tracks lerobot's moving release/b1k branch; pin the commit upstream fe66cc7 settled on.
-# uv drops that override's self-referencing lerobot[av-dep] extra, so its av pin is listed explicitly.
-RUN cd /app/BEHAVIOR-1K \
-    && echo "lerobot[dataset] @ git+https://github.com/wensi-ai/lerobot@436812bd8ee39b768c645c248c91f1330834e687" \
-        > /tmp/b1k-overrides.txt \
-    && uv pip install --no-cache-dir --override /tmp/b1k-overrides.txt -e ./bddl3 -e "./OmniGibson[eval]" \
-        "av>=15.0.0,<16.0.0" \
-    && rm /tmp/b1k-overrides.txt
-
-# ── Isaac Sim 5.1.0 (package list from setup.sh install_isaac_packages) ──
-# Direct manylinux wheel URLs, as setup.sh does: the index metadata uv reads otherwise comes from the
-# win_amd64 wheel and pins pywin32.  Other dependencies still resolve from PyPI.
-RUN set -e; urls=""; \
-    for pkg in omniverse_kit-107.3.1.206797 isaacsim_kernel-5.1.0.0 isaacsim_app-5.1.0.0 isaacsim_core-5.1.0.0 \
-        isaacsim_gui-5.1.0.0 isaacsim_utils-5.1.0.0 isaacsim_storage-5.1.0.0 isaacsim_asset-5.1.0.0 \
-        isaacsim_sensor-5.1.0.0 isaacsim_robot_motion-5.1.0.0 isaacsim_robot-5.1.0.0 isaacsim_benchmark-5.1.0.0 \
-        isaacsim_code_editor-5.1.0.0 isaacsim_ros1-5.1.0.0 isaacsim_cortex-5.1.0.0 isaacsim_example-5.1.0.0 \
-        isaacsim_replicator-5.1.0.0 isaacsim_rl-5.1.0.0 isaacsim_robot_setup-5.1.0.0 isaacsim_ros2-5.1.0.0 \
-        isaacsim_template-5.1.0.0 isaacsim_test-5.1.0.0 isaacsim-5.1.0.0 isaacsim_extscache_physics-5.1.0.0 \
-        isaacsim_extscache_kit-5.1.0.0 isaacsim_extscache_kit_sdk-5.1.0.0; do \
-        name=${pkg%-*}; \
-        urls="$urls https://pypi.nvidia.com/$(echo "$name" | tr _ -)/${pkg}-cp311-none-manylinux_2_35_x86_64.whl"; \
-    done; \
-    uv pip install --no-cache-dir $urls
-
-# setup.sh: drop Isaac Sim's bundled websockets/packaging, which shadow newer site-packages copies.
-RUN ext=/opt/conda/envs/behavior/lib/python3.11/site-packages/isaacsim/extscache \
-    && find "$ext" -type d -name websockets -path "*/pip_prebundle/*" -exec rm -rf {} + \
-    && rm -rf "$ext/omni.services.pip_archive-0.16.0+107.0.3.lx64.cp311/pip_prebundle/packaging"
-
-# setup.sh: force cffi 1.17.1 and websockets >= 15.0.1, then joylo and torch-cluster (--eval).
-RUN uv pip install --no-cache-dir --reinstall "cffi==1.17.1" "websockets>=15.0.1" \
-    && uv pip install --no-cache-dir -e /app/BEHAVIOR-1K/joylo \
-    && uv pip install --no-cache-dir torch-cluster -f https://data.pyg.org/whl/torch-2.7.0+cu128.html \
-    && uv pip install --no-cache-dir --no-deps "numpy<2"
-# omnigibson/utils/usd_utils.py imports warp at module top, but setup.sh only installs it with
-# --primitives; use that extra's pin.
-RUN uv pip install --no-cache-dir "warp-lang==1.12.0"
+    PRIVACY_CONSENT=Y
 
 WORKDIR /workspace
 COPY pyproject.toml README.md ./
 COPY src/ src/
 ARG HARNESS_VERSION=0.0.0
 ENV SETUPTOOLS_SCM_PRETEND_VERSION=${HARNESS_VERSION}
-RUN uv pip install --no-cache-dir -e .
+RUN /opt/conda/envs/behavior/bin/python -m pip install --no-cache-dir -e .
 COPY configs/ configs/
 
-ENTRYPOINT ["vla-eval"]
+# Upstream's /entrypoint.sh activates the ``behavior`` env (incl. its activate.d hooks), then execs.
+ENTRYPOINT ["/entrypoint.sh", "vla-eval"]
 CMD ["run", "--config", "/workspace/configs/benchmarks/behavior1k/eval.yaml"]

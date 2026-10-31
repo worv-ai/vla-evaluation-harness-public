@@ -1,4 +1,4 @@
-# BEHAVIOR-1K evaluation, 2026 challenge protocol (B100, BEHAVIOR-1K v3.9.3, Isaac Sim 5.1 / OmniGibson).
+# BEHAVIOR-1K evaluation, 2026 challenge protocol (B100, BEHAVIOR-1K v3.9.4, Isaac Sim 5.1 / OmniGibson).
 # 100 tasks x public-test instance indices 0-9 (ids 301-310), one rollout each, upstream 1.5x-human timeouts.
 # Requires ~32 GiB asset download on first run. Pass --accept-license behavior-dataset-tos for non-interactive use.
 server:
@@ -10,15 +10,11 @@ docker:
     - "NVIDIA_DRIVER_CAPABILITIES=all"
     - "OMNIGIBSON_HEADLESS=1"
     - "OMNI_KIT_ACCEPT_EULA=YES"
-    # Pin Vulkan to the base image's NVIDIA ICD: Docker's toolkit may add a second one under /etc (Isaac Sim
-    # then fails with "Multiple ICDs for the same GPU"), and Charliecloud provides none there.
-    - "VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/nvidia_icd.json"
-    - "VK_DRIVER_FILES=/usr/share/vulkan/icd.d/nvidia_icd.json"
   volumes:
-    # OmniGibson reads ``gm.DATA_PATH=/app/BEHAVIOR-1K/datasets`` at import time.  The host path mirrors
-    # ``vla_eval.dirs.assets_cache``'s precedence so ``vla-eval run`` and the in-container fetch agree.
+    # OmniGibson reads ``gm.DATA_PATH`` (the image's OMNIGIBSON_DATA_PATH=/data) at import time.  The host
+    # path mirrors ``vla_eval.dirs.assets_cache``'s precedence so ``vla-eval run`` and the in-container fetch agree.
     # Mounted writable so the first-run download can populate the cache.
-    - "${oc.env:VLA_EVAL_ASSETS_CACHE,${oc.env:VLA_EVAL_HOME,${oc.env:XDG_CACHE_HOME,${oc.env:HOME}/.cache}/vla-eval}/assets}/behavior1k:/app/BEHAVIOR-1K/datasets"
+    - "${oc.env:VLA_EVAL_ASSETS_CACHE,${oc.env:VLA_EVAL_HOME,${oc.env:XDG_CACHE_HOME,${oc.env:HOME}/.cache}/vla-eval}/assets}/behavior1k:/data"
 
 output_dir: "./results"
 

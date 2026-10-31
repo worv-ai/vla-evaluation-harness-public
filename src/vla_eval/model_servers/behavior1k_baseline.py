@@ -13,7 +13,7 @@
 # ///
 """BEHAVIOR-1K zero-action baseline model server.
 
-Mirrors ``LocalPolicy`` from ``OmniGibson/omnigibson/eval/policies.py`` (BEHAVIOR-1K v3.9.3): every step
+Mirrors ``LocalPolicy`` from ``OmniGibson/omnigibson/eval/policies.py`` (BEHAVIOR-1K v3.9.4): every step
 returns a 23-D zero action for the R1Pro robot, as upstream's ``eval.py --policy local`` smoke test does.
 
 Why ship this?  It produces a real (but trivially small) q_score on the BEHAVIOR Challenge eval and

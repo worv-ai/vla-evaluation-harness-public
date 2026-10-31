@@ -3,10 +3,10 @@
 BEHAVIOR-1K is a long-horizon household-activity benchmark built on OmniGibson (NVIDIA Isaac Sim).
 The 2026 BEHAVIOR Challenge evaluates 100 tasks (B100) on the R1Pro mobile manipulator.
 
-Protocol version: BEHAVIOR-1K v3.9.3 (tag ``v3.9.3-post2``), Isaac Sim 5.1.0, Python 3.11.  Episodes run
-through upstream's own ``omnigibson.eval.evaluator.BatchedEvaluator`` (one logical env), so scene setup,
-instance loading, metrics and timeouts match ``python -m omnigibson.eval.eval``; only the policy transport
-is the harness WebSocket protocol instead of upstream's.  The 2025 stack (v3.7.2, B50) is no longer supported.
+Protocol version: BEHAVIOR-1K v3.9.4, Isaac Sim 5.1.0, Python 3.11.  Episodes run through upstream's own
+``omnigibson.eval.evaluator.BatchedEvaluator`` (one logical env), so scene setup, instance loading, metrics
+and timeouts match ``python -m omnigibson.eval.eval``; only the policy transport is the harness WebSocket
+protocol instead of upstream's.  The 2025 stack (v3.7.2, B50) is no longer supported.
 
 References:
     - https://behavior.stanford.edu/challenge/evaluation.html
@@ -21,6 +21,9 @@ Key facts:
     - Instances: test instance ids 301-340; ``public_test`` indices 0-19 map to 301-320, and the challenge
       reports indices 0-9 with one rollout each.  ``train`` takes raw instance ids (the demo instances).
     - Timeout: 1.5x the task's mean human-demo length unless ``max_steps`` is set.
+    - Time budget (v3.9.4): ``max_steps`` seconds of wall clock per rollout, starting once the first policy
+      query returns (that query is free, up to 600 s); later queries are capped at 600 s.  A rollout that
+      runs over scores zero with a ``failure_reason``, as upstream's ``evaluate_instances_batched``.
     - Metrics: binary ``success`` and the ranking metric ``q_score`` (fraction of goal predicates newly
       satisfied, max over goal options; 1.0 on success), plus upstream's efficiency metrics.
 """
@@ -67,6 +70,8 @@ class Behavior1KBenchmark(StepBenchmark):
           ``_apply_actions`` (env step, light sync, metric update), so the protocol stays upstream's.
         - **Heavy lazy imports**: ``omnigibson`` boots Isaac Sim, and ``omnigibson.eval.utils.eval_utils`` reads
           the task metadata from ``gm.DATA_PATH`` at import, so imports wait until the first episode.
+        - **Time budget**: with one env, upstream's accounted time (policy queries plus simulator steps) is
+          the wall clock between the first action and now, so ``step`` measures it there.
         - **Threads**: Isaac Sim runs on a worker thread (see ``start_episode``) so the orchestrator's event
           loop survives ``SimulationApp`` start-up.
 
@@ -81,6 +86,7 @@ class Behavior1KBenchmark(StepBenchmark):
         partial_scene_load: Load only the task's rooms from ``B100_task_misc.csv`` (upstream always does).
         send_proprio: Include the robot proprio vector (``<robot name>::proprio``) as ``states``.
         camera_names: Camera roles to forward.  Defaults to ``head``, ``left_wrist``, ``right_wrist``.
+        time_budget: Enforce the challenge's wall-clock budget and per-query timeout (upstream default).
     """
 
     _ALL_RECORD_FIELDS = frozenset({"done", "terminated", "truncated", "success"})
@@ -96,6 +102,7 @@ class Behavior1KBenchmark(StepBenchmark):
         partial_scene_load: bool = True,
         send_proprio: bool = False,
         camera_names: list[str] | None = None,
+        time_budget: bool = True,
     ) -> None:
         super().__init__()
         unknown = [t for t in tasks or [] if t not in TASK_INSTRUCTIONS]
@@ -112,6 +119,7 @@ class Behavior1KBenchmark(StepBenchmark):
         self._partial_scene_load = partial_scene_load
         self._send_proprio = send_proprio
         self._camera_names = list(camera_names or CAMERA_ROLES)
+        self._time_budget = time_budget
         unknown_cams = [c for c in self._camera_names if c not in CAMERA_ROLES]
         if unknown_cams:
             raise ValueError(f"Unknown camera roles: {unknown_cams}. Valid: {list(CAMERA_ROLES)}")
@@ -237,11 +245,16 @@ class Behavior1KBenchmark(StepBenchmark):
         self._instance_id = resolve_instance_ids(task_name, [index], mode=self._mode)[0]
         self._evaluator.load_batch({0: self._instance_id})
         self._steps = 0
+        self._failure: str | None = None
+        self._deadline: float | None = None
+        self._obs_ready = time.monotonic()
         obs = self._state.obs
         self._recorder.record_video(self._frame(obs))
         return obs
 
     def step(self, action: Action) -> StepResult:
+        if self._time_budget and (failure := self._check_budget(time.monotonic())):
+            return self._fail(failure)
         import torch as th
 
         raw = action.get("actions", action.get("action"))
@@ -252,13 +265,33 @@ class Behavior1KBenchmark(StepBenchmark):
 
         terminated, truncated, info = self._evaluator._apply_actions(tensor.unsqueeze(0), [0])
         self._steps += 1
+        self._recorder.record_video(self._frame(self._state.obs))
+        # As upstream, a step that ends past the deadline fails the rollout even if it terminated.
+        if self._deadline is not None and time.monotonic() >= self._deadline:
+            return self._fail("group_time_budget_exceeded")
         term, trunc = bool(terminated[0]), bool(truncated[0])
         success = self._state.env_accessor.success
-        obs = self._state.obs
-
-        self._recorder.record_video(self._frame(obs))
         self._recorder.record_step(done=term or trunc, terminated=term, truncated=trunc, success=success)
-        return StepResult(obs=obs, reward=0.0, done=term or trunc, info={"success": success})
+        self._obs_ready = time.monotonic()
+        return StepResult(obs=self._state.obs, reward=0.0, done=term or trunc, info={"success": success})
+
+    def _check_budget(self, now: float) -> str | None:
+        """Failure reason for the query that just returned, as ``evaluate_instances_batched`` would record it."""
+        from omnigibson.eval.utils.network_utils import POLICY_RESPONSE_TIMEOUT
+
+        if self._deadline is not None and now >= self._deadline:
+            return "group_time_budget_exceeded"
+        if now - self._obs_ready > POLICY_RESPONSE_TIMEOUT:
+            return "policy_query_timeout"
+        if self._deadline is None:  # The first query is uncharged; accounting starts before its action runs.
+            self._deadline = now + self._evaluator.max_steps
+        return None
+
+    def _fail(self, reason: str) -> StepResult:
+        logger.warning("Rollout failed at step %d for instance %d: %s", self._steps, self._instance_id, reason)
+        self._failure = reason
+        self._recorder.record_step(done=True, terminated=False, truncated=True, success=False)
+        return StepResult(obs=self._state.obs, reward=0.0, done=True, info={"success": False})
 
     def _frame(self, obs: dict) -> np.ndarray | None:
         names = self._evaluator.robot_camera_names
@@ -294,14 +327,28 @@ class Behavior1KBenchmark(StepBenchmark):
         """Upstream's per-rollout record (``BatchedEvaluator.run.record_fn``), flattened to scalars."""
         state = self._state
         record: dict[str, Any] = {}
-        for metric in state.metrics:
-            record.update(metric.aggregate())
+        if self._failure is None or self._steps > 0:
+            for metric in state.metrics:
+                record.update(metric.aggregate())
+        if self._failure is not None:  # record_fn's zero score for a failed rollout
+            import omnigibson as og
+            from omnigibson.eval.evaluator import EVAL_TIMEOUT_MULTIPLIER
+
+            zeros = {"base": 0.0, "left": 0.0, "right": 0.0}
+            record["q_score"] = {"final": 0.0}
+            record.setdefault("agent_distance", dict(zeros))
+            record["normalized_agent_distance"] = dict(zeros)
+            sim_time = self._steps * og.sim.get_rendering_dt()
+            record.setdefault("time", {"simulator_steps": self._steps, "simulator_time": sim_time})
+            record["time"]["normalized_time"] = 1 / EVAL_TIMEOUT_MULTIPLIER
         q_score = record.get("q_score", {}).get("final", 0.0)
         result: dict[str, Any] = {
-            "success": bool(state.env_accessor.success),
+            "success": self._failure is None and bool(state.env_accessor.success),
             "q_score": float(q_score),
             "instance_id": int(self._instance_id),
         }
+        if self._failure is not None:
+            result["failure_reason"] = self._failure
         for group in ("time", "agent_distance", "normalized_agent_distance"):
             for key, value in record.get(group, {}).items():
                 name = key if group == "time" else f"{group}_{key}"
