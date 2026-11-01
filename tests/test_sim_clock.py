@@ -4,7 +4,9 @@ delivered, waking one sleeper at a time and settling its model calls; live episo
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import random
+import sys
 import time
 from typing import Any
 
@@ -176,6 +178,76 @@ async def test_tasks_an_episode_task_creates_hold_time_too(spawn):
             pending = await observe(server, rid, v)
             assert not pending.errors
     assert done == [(t, t) for t in (0.25, 0.5, 0.75, 1.0)]
+
+
+@pytest.mark.parametrize("where", ["inside, fresh context", "outside, the episode's context"])
+@pytest.mark.anyio
+async def test_a_task_belongs_to_the_episode_of_its_context(where):
+    contexts: list[contextvars.Context] = []
+    keep: list[asyncio.Task[None]] = []
+
+    async def spin() -> None:
+        while True:  # never blocks: fails the episode it belongs to, once that episode's time moves
+            await checkpoint()
+
+    async def run(ep: EpisodeContext) -> None:
+        contexts.append(contextvars.copy_context())
+        if where.startswith("inside"):
+            keep.append(asyncio.get_running_loop().create_task(spin(), context=contextvars.Context()))
+        async for req in ep.observations():
+            await _reply(req)
+
+    server = Daemon(run, step_dt=0.25)
+    async with serving(server):
+        (rid,) = await start(server)
+        await observe(server, rid, 0)
+        if where.startswith("outside"):
+            keep.append(asyncio.get_running_loop().create_task(spin(), context=contexts[0]))
+        pending = await observe(server, rid, 1)
+        for task in keep:
+            task.cancel()
+    if where.startswith("inside"):
+        assert not pending.errors
+    else:
+        assert "sim time cannot move on" in str(pending.errors[0])
+
+
+@pytest.mark.skipif(sys.version_info < (3, 12), reason="eager task factories are Python 3.12+")
+@pytest.mark.anyio
+async def test_episodes_keep_an_eager_task_factory_working():
+    loop = asyncio.get_running_loop()
+    done: list[tuple[int, float, float]] = []
+
+    async def work(rid: int, t: float, ep: EpisodeContext) -> None:
+        with anyio.CancelScope():  # anyio's cancel-scope bookkeeping needs its non-eager child construction
+            for _ in range(50):
+                await checkpoint()
+            await ep.call(time.sleep, 0.002)
+            done.append((rid, t, ep.clock.now()))
+
+    async def ticker(ep: EpisodeContext) -> None:
+        async with anyio.create_task_group() as tg:
+            async for t in ep.clock.every(0.25):
+                tg.start_soon(work, ep.row_id, t, ep)
+
+    async def run(ep: EpisodeContext) -> None:
+        ep.start_soon(ticker, ep)
+        async for req in ep.observations():
+            await _reply(req)
+
+    previous = loop.get_task_factory()
+    loop.set_task_factory(asyncio.eager_task_factory)  # ty: ignore[unresolved-attribute]
+    try:
+        server = Daemon(run, step_dt=0.125)
+        async with serving(server):
+            rids = await start(server, n=2)
+            for v in range(5):
+                for rid in rids:
+                    pending = await observe(server, rid, v)
+                    assert not pending.errors
+    finally:
+        loop.set_task_factory(previous)
+    assert sorted(done) == sorted((rid, t, t) for rid in rids for t in (0.25, 0.5))
 
 
 @pytest.mark.anyio

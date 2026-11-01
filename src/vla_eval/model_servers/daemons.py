@@ -8,6 +8,7 @@ import asyncio
 import contextvars
 import logging
 import math
+import sys
 import weakref
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
@@ -207,7 +208,7 @@ class EpisodeContext:
         self._exited = anyio.Event()
         self._tg: TaskGroup | None = None
         self._scope = anyio.CancelScope()
-        self._mine: weakref.WeakSet[asyncio.Task[Any]] = weakref.WeakSet()  # asyncio: this episode's tasks
+        self._mine: weakref.WeakSet[asyncio.Task[Any]] = weakref.WeakSet()  # Python < 3.12: this episode's tasks
 
     @property
     def closing(self) -> bool:
@@ -315,11 +316,17 @@ class EpisodeContext:
             return
         for _ in range(_MAX_SETTLE_ROUNDS):
             await checkpoint()
-            if not any(_runnable(task) for task in self._mine):
+            if not any(_runnable(task) for task in self._own_tasks()):
                 return
         raise RuntimeError(
             f"sim time cannot move on: an episode task ran {_MAX_SETTLE_ROUNDS} checkpoints without blocking"
         )
+
+    def _own_tasks(self) -> list[asyncio.Task[Any]]:
+        """The asyncio tasks whose context is this episode's (see ``_join``)."""
+        if sys.version_info >= (3, 12):
+            return [task for task in asyncio.all_tasks() if task.get_context().get(_EPISODE) is self]
+        return list(self._mine)
 
     def _owns(self, request: ObservationRequest) -> bool:
         return (
@@ -345,27 +352,28 @@ class EpisodeContext:
 
 
 def _join(ep: EpisodeContext) -> None:
-    """Make the current task one of ``ep``'s, and every task created in its context too (anyio task groups, e.g. a
-    chrono ``Supervisor``'s daemons, and ``asyncio.create_task`` / ``gather``): those hold ``ep``'s sim time."""
+    """Make the current task's context ``ep``'s.  Tasks created in it inherit that (anyio task groups, e.g. a chrono
+    ``Supervisor``'s daemons, ``asyncio.create_task`` / ``gather``), and those whose context is ``ep``'s hold its sim
+    time.  Python < 3.12 has no ``Task.get_context()``: a wrapping task factory records them (no eager factories)."""
     try:
         task = asyncio.current_task()
     except RuntimeError:  # not asyncio: settling falls back to a checkpoint budget
         return
     if task is None:
         return
-    loop = task.get_loop()
-    if not getattr(loop.get_task_factory(), "_vla_eval_episodes", False):
-        loop.set_task_factory(_episode_task_factory(loop.get_task_factory()))
     _EPISODE.set(ep)
-    ep._mine.add(task)
+    if sys.version_info < (3, 12):
+        ep._mine.add(task)
+        loop = task.get_loop()
+        if not getattr(loop.get_task_factory(), "_vla_eval_episodes", False):
+            loop.set_task_factory(_episode_task_factory(loop.get_task_factory()))
 
 
 def _episode_task_factory(inner: Any) -> Any:
-    """Wrap a loop's task factory: a task created where ``_EPISODE`` is set (its creator's context) joins it."""
-
     def factory(loop: asyncio.AbstractEventLoop, coro: Any, **kwargs: Any) -> asyncio.Task[Any]:
         task = asyncio.Task(coro, loop=loop, **kwargs) if inner is None else inner(loop, coro, **kwargs)
-        if (ep := _EPISODE.get()) is not None:
+        context = kwargs.get("context")
+        if (ep := _EPISODE.get() if context is None else context.get(_EPISODE)) is not None:
             ep._mine.add(task)
         return task
 
