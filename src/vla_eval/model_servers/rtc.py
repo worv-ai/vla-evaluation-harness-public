@@ -101,7 +101,8 @@ class KinetixRTCServer(DaemonModelServer):
     carries one (Kinetix holds its env until the first action), else its index.  A boundary's chunk lands ``delay``
     steps later (``latency="steps"``) or after ``(delay - 1/2) / hz`` (``"wall"``) / ``delay / hz`` (``"wall_exact"``) seconds
     since its observation's admission, compute included (live only).  The initial chunk (official: computed with
-    no delay before the loop) is exempt unless ``first_chunk_delayed``, in which case the first steps get no action.
+    no delay before the loop) is exempt unless ``first_chunk_delayed``, in which case the first steps get no action
+    (needs a benchmark that steps on holds).
 
     Args:
         checkpoint_dir: ``worlds_l_<level>.pkl`` files (the paper evaluates epoch 31, ``bc/31/policies``).
@@ -308,6 +309,11 @@ class KinetixRTCServer(DaemonModelServer):
             j = int(req.obs.get("env_step", req.row.step))
             row: dict[str, Any] = {"step": req.row.step, "p": j, "admitted_wall": admitted}
             if j == last_j:  # the env did not move: same slot again, latency counted from this observation
+                if plan is None:  # a delayed first chunk would never land: the env waits for it
+                    raise ValueError(
+                        "first_chunk_delayed needs a benchmark that steps on holds (Kinetix: "
+                        "start_on_first_action=false)"
+                    )
                 anchors[j] = admitted
                 row["repeat"] = True
             else:

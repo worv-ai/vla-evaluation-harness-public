@@ -105,3 +105,15 @@ def test_rejects_an_impossible_schedule():
     ):
         with pytest.raises(ValueError):
             make()
+
+
+@pytest.mark.anyio
+async def test_a_delayed_first_chunk_fails_against_a_gated_start(free_port):
+    task = await start_server(FakeSampler(delay=1, horizon=1, latency="wall", first_chunk_delayed=True), free_port)
+    bench = Recorder(steps=5)
+    try:
+        async with Connection(f"ws://127.0.0.1:{free_port}") as conn:
+            with pytest.raises(Exception, match="first_chunk_delayed"):
+                await LiveEpisodeRunner(hz=20.0).run_episode(bench, bench.get_tasks()[0], conn, max_steps=10)
+    finally:
+        await stop_server(task)
