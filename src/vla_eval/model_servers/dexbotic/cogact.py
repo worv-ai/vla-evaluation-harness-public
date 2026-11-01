@@ -7,6 +7,7 @@
 #     "transformers>=4.40,<5",
 #     "pillow>=9.0",
 #     "numpy>=1.24",
+#     "pyarrow<26",  # 26 requires numpy>=2 at import; dexbotic pins numpy 1.26
 #     "accelerate",
 #     "einops",
 #     "timm",

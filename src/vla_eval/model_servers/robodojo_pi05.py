@@ -51,8 +51,6 @@ action chunk is executed open-loop, then the policy is queried again
 from __future__ import annotations
 
 import logging
-import os
-import sys
 from typing import Any
 
 import numpy as np
@@ -61,11 +59,6 @@ from vla_eval.model_servers.base import Row
 from vla_eval.model_servers.predict import PredictModelServer
 from vla_eval.specs import IMAGE_RGB, LANGUAGE, RAW, DimSpec
 from vla_eval.types import Action, Observation
-
-# uv run puts this file's dir on sys.path, where the sibling lerobot.py model server
-# shadows the installed lerobot package openpi imports — drop it (same as lerobot.py).
-_here = os.path.dirname(os.path.abspath(__file__))
-sys.path[:] = [p for p in sys.path if p and os.path.abspath(p) != _here]
 
 logger = logging.getLogger(__name__)
 
