@@ -2,8 +2,7 @@
 
 RTC_SOLVED=terminal_reward: success = the terminal step's reward is +1 (Kinetix v3 semantics) instead of the
 last frame-skip substep's GoalR (cf7453e, the paper's metric).
-RTC_INITIAL_HOLD=1: one zero action (with actuation noise) before step 0, the sync counterpart of live's tick 0.
-usage: python ref_eval.py <rtc_repo_src> <run_path> <out.jsonl> <group> ; group in {core, horizon, bid, bid_default, all}
+usage: python ref_eval.py <rtc_repo_src> <run_path> <out.jsonl> <group> ; group in {core, horizon, bid, bid_h, all}
 run_path holds numeric checkpoint dirs (e.g. 7/, 31/) with policies/worlds_l_<level>.pkl; strong = last, weak = first.
 """
 
@@ -37,24 +36,6 @@ if os.environ.get("RTC_SOLVED") == "terminal_reward":  # Kinetix v3's GoalR: the
     W.LogWrapper = _LogWrapper
 
 import eval_flow as E  # noqa: E402
-
-HOLD = os.environ.get("RTC_INITIAL_HOLD") == "1"  # one zero action (+ actuation noise) before step 0, as live's tick 0
-
-
-class _InitialHold(W.UnderspecifiedEnvWrapper):
-    def step_env(self, key, state, action, params):
-        return self._env.step_env(key, state, action, params)
-
-    def reset_to_level(self, rng, level, params):
-        rng, k_noise, k_step = jax.random.split(rng, 3)
-        obs, state = self._env.reset_to_level(rng, level, params)
-        action = jax.random.normal(k_noise, (self.action_space(params).shape[0],)) * T.ACTION_NOISE_STD
-        obs, state, _, _, _ = self._env.step_env(k_step, state, action, params)
-        return obs, state
-
-    def action_space(self, params):
-        return self._env.action_space(params)
-
 
 import model as M  # noqa: E402
 import train_expert as T  # noqa: E402
@@ -109,7 +90,7 @@ def _eval(config, rng, level, state_dict, weak_state_dict):
     g, s = nnx.split(pol)
     s.replace_by_pure_dict(weak_state_dict)
     weak = nnx.merge(g, s)
-    info, _ = E.eval(config, _InitialHold(env) if HOLD else env, rng, level, pol, ep, sp, weak)
+    info, _ = E.eval(config, env, rng, level, pol, ep, sp, weak)
     return info
 
 
@@ -118,20 +99,17 @@ METHODS = {
     "rtc": E.RealtimeMethodConfig(),
     "rtc_hard": E.RealtimeMethodConfig(prefix_attention_schedule="zeros"),
     "bid": E.BIDMethodConfig(n_samples=32, bid_k=3),
-    "bid_default": E.BIDMethodConfig(),
 }
 core = [(m, d, max(d, 1)) for m in ("naive", "rtc", "rtc_hard") for d in range(5)]
 horizon = [(m, 1, s) for m in ("naive", "rtc", "rtc_hard") for s in range(2, 8)]
 bid = [("bid", d, max(d, 1)) for d in range(5)]
 bid_h = [("bid", 1, s) for s in range(2, 8)]
-bid_default = [("bid_default", d, max(d, 1)) for d in range(5)]
 combos = {
     "core": core,
     "horizon": horizon,
     "bid": bid,
     "bid_h": bid_h,
-    "bid_default": bid_default,
-    "all": core + horizon + bid + bid_default,
+    "all": core + horizon + bid,
 }[group]
 done = set()
 if pathlib.Path(out).exists():
@@ -153,7 +131,6 @@ for m, d, s in combos:
                 s=s,
                 n=2048,
                 metric=os.environ.get("RTC_SOLVED", "goal_last_substep"),
-                initial_hold=HOLD,
                 solved=float(r["returned_episode_solved"][i]),
                 ret=float(r["returned_episode_returns"][i]),
                 length=float(r["returned_episode_lengths"][i]),
