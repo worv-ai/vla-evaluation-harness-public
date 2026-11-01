@@ -12,7 +12,7 @@
 # vla-eval = { path = "../../..", editable = true }
 #
 # [tool.uv]
-# exclude-newer = "2026-10-31T00:00:00Z"
+# exclude-newer = "2026-11-01T13:00:00Z"
 # ///
 """Real-Time Chunking (arXiv:2506.07339) on Kinetix, with the official sampling code.
 
@@ -111,7 +111,7 @@ class KinetixRTCServer(DaemonModelServer):
         method: ``naive``, ``rtc`` (soft masking, ``exp``), ``rtc_hard`` (``zeros``) or ``bid``.
         delay / horizon: d and s, ``0 <= d <= s``, ``s + d <= 8``.
         bid_n / bid_k: BID samples and K (``bid_k=None``: backward loss only); beta: RTC's max guidance weight.
-        hz: ``1 / dt`` when ``EPISODE_START`` carries no ``control_hz``.
+        hz: ``1 / step_dt`` when ``EPISODE_START`` carries no ``step_dt``.
     """
 
     def __init__(
@@ -142,7 +142,7 @@ class KinetixRTCServer(DaemonModelServer):
             raise ValueError(f"need 0 <= delay <= horizon, horizon >= 1, horizon + delay <= {H}")
         if method == "bid" and bid_k is not None and weak_checkpoint_dir is None:
             raise ValueError("BID with bid_k needs weak_checkpoint_dir")
-        super().__init__(backlog=64, control_hz=hz, max_rows=max_rows)
+        super().__init__(backlog=64, step_dt=1.0 / hz, max_rows=max_rows)
         self.checkpoint_dir, self.rtc_src_path, self.weak_checkpoint_dir = (
             checkpoint_dir,
             rtc_src_path,
@@ -280,8 +280,8 @@ class KinetixRTCServer(DaemonModelServer):
     async def run(self, ep: EpisodeContext) -> None:
         st = self._eps_state[ep.row_id]
         d, s = self.delay, self.horizon
-        assert ep.sim_dt is not None  # control_hz always has a default
-        land_after = {"steps": None, "wall": (d - 0.5) * ep.sim_dt, "wall_exact": d * ep.sim_dt}[self.latency]
+        assert ep.step_dt is not None  # hz always gives a default
+        land_after = {"steps": None, "wall": (d - 0.5) * ep.step_dt, "wall_exact": d * ep.step_dt}[self.latency]
         plan: _Inference | None = None  # the landed chunk in effect: plan.chunk[i] is the action for step plan.t + i
         pending: dict[int, _Inference] = {}  # boundaries the loop lands itself (step latency, or d = 0), by step
         dispensed_k: int | None = None

@@ -17,7 +17,7 @@
 # vla-eval = { path = "../../..", editable = true }
 #
 # [tool.uv]
-# exclude-newer = "2026-10-31T00:00:00Z"
+# exclude-newer = "2026-11-01T13:00:00Z"
 # ///
 """VLANeXt model server (DravenALG/VLANeXt, the VLANeXt-Family codebase).
 
