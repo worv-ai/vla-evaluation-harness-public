@@ -5,6 +5,9 @@
 #   "beautifulsoup4>=4.12",
 #   "markdownify>=0.14",
 # ]
+#
+# [tool.ty.rules]  # ty checks scripts on their own, against the host env without their deps
+# unresolved-import = "ignore"
 # ///
 """Extract benchmark scores from arxiv papers via LLM.
 

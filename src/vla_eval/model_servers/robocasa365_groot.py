@@ -20,6 +20,9 @@
 # # The pinned fork's bundled Eagle backbone imports flash_attn directly, so the
 # # Transformers `kernels` extra cannot stand in for it.
 # no-build-isolation-package = ["flash-attn"]
+#
+# [tool.ty.rules]  # ty checks scripts on their own, against the host env without their deps
+# unresolved-import = "ignore"
 # ///
 """GR00T N1.5 server for the RoboCasa365 Panda-Omron contract."""
 

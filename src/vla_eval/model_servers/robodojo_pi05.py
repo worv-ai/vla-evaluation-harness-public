@@ -28,6 +28,9 @@
 #     "numpy>=1.22.4,<2.0.0",
 #     "tensorstore==0.1.74",
 # ]
+#
+# [tool.ty.rules]  # ty checks scripts on their own, against the host env without their deps
+# unresolved-import = "ignore"
 # ///
 """π₀.₅ model server for RoboDojo leaderboard checkpoints.
 

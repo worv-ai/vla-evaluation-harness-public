@@ -16,6 +16,9 @@
 # [tool.uv]
 # exclude-newer = "2026-11-01T13:00:00Z"
 # no-build-isolation-package = ["flash-attn"]
+#
+# [tool.ty.rules]  # ty checks scripts on their own, against the host env without their deps
+# unresolved-import = "ignore"
 # ///
 """GR00T N1.6 model server.
 

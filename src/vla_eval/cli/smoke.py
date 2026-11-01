@@ -405,7 +405,7 @@ def run_server_test(test: SmokeTest, timeout: int, *, gpu_id: str | None = None)
     t0 = time.monotonic()
     captured_stderr: list[bytes] = []  # shared with _run() closure
 
-    async def _run() -> dict:
+    async def _run() -> dict:  # ty: ignore[invalid-return-type]  # the body returns or raises; tg cancels only after
         from vla_eval.docker_resources import gpu_visibility_env
 
         visibility = gpu_visibility_env(gpu_id)
