@@ -1,2 +1,2 @@
-# RTC model server — sync / live (chunk buffer, no CI)
+# RTC model server — sync / live (chunk buffer)
 extends: _base.yaml
