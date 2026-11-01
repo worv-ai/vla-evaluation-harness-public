@@ -180,6 +180,43 @@ async def test_tasks_an_episode_task_creates_hold_time_too(spawn):
     assert done == [(t, t) for t in (0.25, 0.5, 0.75, 1.0)]
 
 
+@pytest.mark.parametrize("join", ["gather", "wait"])
+@pytest.mark.anyio
+async def test_a_task_resumed_by_a_completion_callback_runs_before_time_moves_on(join):
+    log: list[tuple[str, float]] = []
+
+    async def work() -> None:
+        for _ in range(5):
+            await checkpoint()
+
+    async def first(ep: EpisodeContext) -> None:
+        await ep.clock.sleep(0.1)
+        log.append(("first", ep.clock.now()))
+        if join == "gather":
+            await asyncio.gather(work())
+        else:
+            await asyncio.wait([asyncio.ensure_future(work())])
+        await ep.clock.sleep(0.05)  # resumed through the join's callbacks: due at 0.15
+        log.append(("first again", ep.clock.now()))
+
+    async def second(ep: EpisodeContext) -> None:
+        await ep.clock.sleep(0.2)
+        log.append(("second", ep.clock.now()))
+
+    async def run(ep: EpisodeContext) -> None:
+        ep.start_soon(first, ep)
+        ep.start_soon(second, ep)
+        async for req in ep.observations():
+            await _reply(req)
+
+    server = Daemon(run, step_dt=0.25)
+    async with serving(server):
+        (rid,) = await start(server)
+        for v in range(2):
+            assert not (await observe(server, rid, v)).errors
+    assert log == [("first", 0.1), ("first again", 0.15000000000000002), ("second", 0.2)]
+
+
 @pytest.mark.parametrize("where", ["inside, fresh context", "outside, the episode's context"])
 @pytest.mark.anyio
 async def test_a_task_belongs_to_the_episode_of_its_context(where):

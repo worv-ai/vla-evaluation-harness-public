@@ -52,7 +52,9 @@ __all__ = [
 
 logger = logging.getLogger(__name__)
 
-_SETTLE_ROUNDS = 8  # off asyncio: checkpoints a woken sync task gets to block before time moves on
+# asyncio: checkpoints in a row an episode's tasks must all be blocked (a completion callback chain that resumes one,
+# e.g. gather's, runs a hop per checkpoint); other backends: checkpoints a woken sync task gets to block
+_SETTLE_ROUNDS = 8
 _MAX_SETTLE_ROUNDS = 10_000  # an episode task still running after this many checkpoints fails its sync episode
 _EPS = 1e-9  # sim seconds: deadlines this close are one instant (float error between n * period and k * step_dt)
 _EPISODE: contextvars.ContextVar[EpisodeContext | None] = contextvars.ContextVar("vla_eval_episode", default=None)
@@ -306,8 +308,8 @@ class EpisodeContext:
             await self._drained.wait()
 
     async def _quiesce(self) -> None:
-        """Checkpoint until every task of this episode waits on something (``anyio.wait_all_tasks_blocked``'s
-        asyncio predicate, on this episode's tasks only and without its 0.1 s polls).  Other backends get
+        """Checkpoint until every task of this episode has waited on something for ``_SETTLE_ROUNDS`` checkpoints
+        (``anyio.wait_all_tasks_blocked``'s asyncio predicate, on this episode's tasks only).  Other backends get
         ``_SETTLE_ROUNDS`` checkpoints."""
         try:
             asyncio.current_task()
@@ -315,9 +317,11 @@ class EpisodeContext:
             for _ in range(_SETTLE_ROUNDS):
                 await checkpoint()
             return
+        quiet = 0
         for _ in range(_MAX_SETTLE_ROUNDS):
             await checkpoint()
-            if not any(_runnable(task) for task in self._own_tasks()):
+            quiet = 0 if any(_runnable(task) for task in self._own_tasks()) else quiet + 1
+            if quiet == _SETTLE_ROUNDS:
                 return
         raise RuntimeError(
             f"sim time cannot move on: an episode task ran {_MAX_SETTLE_ROUNDS} checkpoints without blocking"
