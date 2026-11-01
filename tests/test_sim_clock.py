@@ -18,7 +18,7 @@ from chrono_daemon import WallClock
 
 from vla_eval.benchmarks.base import VectorStepBenchmark
 from vla_eval.connection import Connection
-from vla_eval.model_servers.daemons import EpisodeContext, ObservationRequest, SimClock
+from vla_eval.model_servers.daemons import _SETTLE_ROUNDS, EpisodeContext, ObservationRequest, SimClock
 from vla_eval.recording import NullEpisodeRecorder
 from vla_eval.runners.base import ModelActError
 from vla_eval.runners.live_runner import LiveEpisodeRunner
@@ -180,7 +180,7 @@ async def test_tasks_an_episode_task_creates_hold_time_too(spawn):
     assert done == [(t, t) for t in (0.25, 0.5, 0.75, 1.0)]
 
 
-@pytest.mark.parametrize("join", ["gather", "wait"])
+@pytest.mark.parametrize("join", ["gather", "wait", "nested gather"])
 @pytest.mark.anyio
 async def test_a_task_resumed_by_a_completion_callback_runs_before_time_moves_on(join):
     log: list[tuple[str, float]] = []
@@ -194,6 +194,11 @@ async def test_a_task_resumed_by_a_completion_callback_runs_before_time_moves_on
         log.append(("first", ep.clock.now()))
         if join == "gather":
             await asyncio.gather(work())
+        elif join == "nested gather":  # a completion chain longer than any checkpoint budget
+            joined: Any = work()
+            for _ in range(3 * _SETTLE_ROUNDS):
+                joined = asyncio.gather(joined)
+            await joined
         else:
             await asyncio.wait([asyncio.ensure_future(work())])
         await ep.clock.sleep(0.05)  # resumed through the join's callbacks: due at 0.15

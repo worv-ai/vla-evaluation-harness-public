@@ -52,9 +52,7 @@ __all__ = [
 
 logger = logging.getLogger(__name__)
 
-# asyncio: checkpoints in a row an episode's tasks must all be blocked (a completion callback chain that resumes one,
-# e.g. gather's, runs a hop per checkpoint); other backends: checkpoints a woken sync task gets to block
-_SETTLE_ROUNDS = 8
+_SETTLE_ROUNDS = 8  # no asyncio ready queue to read: checkpoints a woken sync task gets to block before time moves on
 _MAX_SETTLE_ROUNDS = 10_000  # an episode task still running after this many checkpoints fails its sync episode
 _EPS = 1e-9  # sim seconds: deadlines this close are one instant (float error between n * period and k * step_dt)
 _EPISODE: contextvars.ContextVar[EpisodeContext | None] = contextvars.ContextVar("vla_eval_episode", default=None)
@@ -308,20 +306,26 @@ class EpisodeContext:
             await self._drained.wait()
 
     async def _quiesce(self) -> None:
-        """Checkpoint until every task of this episode has waited on something for ``_SETTLE_ROUNDS`` checkpoints
-        (``anyio.wait_all_tasks_blocked``'s asyncio predicate, on this episode's tasks only).  Other backends get
-        ``_SETTLE_ROUNDS`` checkpoints."""
+        """Checkpoint until no task of this episode can run (``anyio.wait_all_tasks_blocked``'s asyncio predicate, on
+        this episode's tasks only) and no callback in its context is queued (a completion chain, e.g. gather's, that
+        resumes one).  Without a readable ready queue (or off asyncio), ``_SETTLE_ROUNDS`` checkpoints."""
         try:
             asyncio.current_task()
         except RuntimeError:  # not asyncio
             for _ in range(_SETTLE_ROUNDS):
                 await checkpoint()
             return
+        ready = getattr(asyncio.get_running_loop(), "_ready", None)  # private, as _fut_waiter: BaseEventLoop's queue
+        if not isinstance(ready, deque):
+            ready = None
         quiet = 0
         for _ in range(_MAX_SETTLE_ROUNDS):
             await checkpoint()
-            quiet = 0 if any(_runnable(task) for task in self._own_tasks()) else quiet + 1
-            if quiet == _SETTLE_ROUNDS:
+            busy = any(_runnable(task) for task in self._own_tasks()) or (
+                ready is not None and any(_queued_for(handle, self) for handle in ready)
+            )
+            quiet = 0 if busy else quiet + 1
+            if quiet == (1 if ready is not None else _SETTLE_ROUNDS):
                 return
         raise RuntimeError(
             f"sim time cannot move on: an episode task ran {_MAX_SETTLE_ROUNDS} checkpoints without blocking"
@@ -391,6 +395,11 @@ def _own(task: asyncio.Task[Any], ep: EpisodeContext) -> None:
         previous._mine.discard(task)
     _OWNER[task] = ep
     ep._mine.add(task)
+
+
+def _queued_for(handle: asyncio.Handle, ep: EpisodeContext) -> bool:
+    context = getattr(handle, "_context", None)  # private: the context the callback runs in
+    return not handle.cancelled() and context is not None and context.get(_EPISODE) is ep
 
 
 def _runnable(task: asyncio.Task[Any]) -> bool:
