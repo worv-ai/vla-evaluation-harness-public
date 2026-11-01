@@ -64,7 +64,7 @@ def compare(R: dict, X: dict) -> dict:
     half = Z * math.sqrt(var_r + var_x) / 12
     nx_min = min(X[lv]["n"] for lv in LEVELS)
     crit1 = abs(avg_x - avg_r) <= half
-    crit2 = outside <= 2 and (worst <= 0.05 or nx_min < 2048)
+    crit2 = outside <= 2 and (worst <= 0.05 or nx_min < 1024)  # the 5 pp cap is set for the 2048-rollout arms
     return dict(
         rows=rows,
         avg_R=avg_r,

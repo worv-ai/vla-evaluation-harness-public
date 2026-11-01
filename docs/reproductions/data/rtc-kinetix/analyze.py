@@ -48,46 +48,52 @@ for key, st in rows.items():
     n = steps_by_ep.get(key)
     if n is None:
         continue
-    first = {}  # chunk k -> first protocol step it was dispensed
-    off = 1 if (st.get(0) or {}).get("p") == -1 else 0  # live / initial_hold: protocol step 0 is harness step 1
+    first = {}  # chunk k -> (first protocol step it was dispensed, its harness step)
+    adm = {}  # protocol step -> admission of its latest observation
+    for step in sorted(st):
+        if "p" in st[step] and st[step]["p"] >= 0:
+            adm[st[step]["p"]] = st[step]["admitted_wall"]
+    infer_steps = {r["p"] if "p" in r else h for h, r in st.items() if "infer_k" in r}
+    last_j = -1
     for step in range(n):
-        r = st.get(step)
-        j = step - off  # protocol step
-        if j < 0:
+        r = st.get(step) or {}
+        if r.get("pre_start"):
+            inst["pre_start_ticks"] += 1
             continue
-        if r is None or "action" not in r:
+        if "action" not in r:
             inst["missing_bench_row"] += 1
             continue
         if "intended_action" not in r:
-            inst["missing_server_row"] += 1
+            if r.get("p", 0) >= 0:
+                inst["missing_server_row"] += 1
+            continue
+        j = r.get("p", step)  # protocol step (the server's), else the harness index
+        if j < 0:
             continue
         inst["steps"] += 1
-        if ("infer_k" in r) != (j % s == 0):
-            inst["cadence_violation"] += 1
+        last_j = max(last_j, j)
         k = r.get("chunk_k")
         if k is not None and k not in first:
-            first[k] = j
-        same = np.allclose(r["action"], r["intended_action"], atol=1e-6)
-        if not same:
+            first[k] = (j, step)
+        if not np.allclose(r["action"], r["intended_action"], atol=1e-6):
             inst["stale"] += 1
         elif "dispense_wall" in r and "t_wall" in r:
             lag.append(r["t_wall"] - r["dispense_wall"])
         if "infer_ms" in r:
             infer_ms.append(r["infer_ms"])
-    for k, j in first.items():
+    inst["cadence_violation"] += len(infer_steps ^ {j for j in range(last_j + 1) if j % s == 0})
+    for k, (j, h) in first.items():
         if k < 0:
             continue
         t = k * s
         eff[j - t - d] += 1
-        lw = st[j + off].get("landed_wall")
-        if a.live and lw is not None and d > 0:  # landed between obs t+d-1 and obs t+d admissions
-            prev_adm = st.get(t + d - 1 + off, {}).get("admitted_wall")
-            if prev_adm is not None:
-                margin_lo.append(lw - prev_adm)
-            margin_hi.append(st[j + off]["admitted_wall"] - lw)
-    ks = sorted(k for k in first if k >= 0)
-    expected = {k for k in range(0, (n - off - 1) // s + 1) if k * s + d < n - off}
-    inst["boundary_never_dispensed"] += len(expected - set(ks))
+        lw = st[h].get("landed_wall")
+        if a.live and lw is not None and d > 0:  # landed between the admissions of obs t+d-1 and obs t+d
+            if t + d - 1 in adm:
+                margin_lo.append(lw - adm[t + d - 1])
+            margin_hi.append(st[h]["admitted_wall"] - lw)
+    expected = {k for k in range(last_j // s + 1) if k * s + d <= last_j}
+    inst["boundary_never_dispensed"] += len(expected - {k for k in first if k >= 0})
 
 out = {"levels": {}, "errors": dict(errors)}
 tot = [0, 0]
@@ -114,6 +120,8 @@ if margin_lo:
     out["land_after_prev_obs_ms_min"] = float(np.min(margin_lo) * 1e3)
 if margin_hi:
     out["land_before_obs_ms_min"] = float(np.min(margin_hi) * 1e3)
+if rt.get("step_time_max"):
+    out["eps_step_over_half_period"] = int(sum(x > 0.5 / a.hz for x in rt["step_time_max"]))
 for k in ("step_time_max", "stale_action_ratio"):
     if rt.get(k):
         out[f"rt_{k}_max"] = float(np.max(rt[k]))
