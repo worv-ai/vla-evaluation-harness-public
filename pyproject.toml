@@ -36,6 +36,7 @@ dev = [
 # `--dev --group leaderboard --no-install-project` without pulling vla_eval's runtime.
 leaderboard = [
     "beautifulsoup4>=4.12",
+    "jsonschema>=4",
     "markdownify>=0.14",
     "typer>=0.12",
 ]
