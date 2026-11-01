@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import pytest
@@ -96,6 +96,11 @@ async def test_sync_initial_hold_replays_the_live_first_tick(free_port):
 
 
 def test_rejects_an_impossible_schedule():
-    for kw in ({"delay": 2, "horizon": 1}, {"delay": 3, "horizon": 6}, {"horizon": 0}, {"method": "x"}):
+    for make in (
+        lambda: KinetixRTCServer("unused", delay=2, horizon=1),
+        lambda: KinetixRTCServer("unused", delay=3, horizon=6),
+        lambda: KinetixRTCServer("unused", horizon=0),
+        lambda: KinetixRTCServer("unused", method=cast(Any, "x")),
+    ):
         with pytest.raises(ValueError):
-            KinetixRTCServer(checkpoint_dir="unused", **kw)  # type: ignore[arg-type]
+            make()

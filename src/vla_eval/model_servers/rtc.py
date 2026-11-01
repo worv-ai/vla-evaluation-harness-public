@@ -47,6 +47,7 @@ except ImportError:
 
 import anyio
 import numpy as np
+from anyio.to_thread import run_sync as _run_in_thread
 
 from vla_eval.model_servers.base import Rows
 from vla_eval.model_servers.daemons import DaemonModelServer, EpisodeContext, ObservationRequest
@@ -79,7 +80,7 @@ class _Inference:
     t: int  # the boundary step (its observation's step)
     prev_k: int  # the chunk it was guided by
     done: anyio.Event = field(default_factory=anyio.Event)
-    chunk: np.ndarray | None = None
+    chunk: np.ndarray = field(default_factory=lambda: np.zeros((0, 0), np.float32))
     infer_ms: float = 0.0
     landed_wall: float = 0.0
 
@@ -318,7 +319,7 @@ class KinetixRTCServer(DaemonModelServer):
             if j % s == 0:
                 prev = np.zeros((1, H, self.action_dim), np.float32)
                 if plan is not None:
-                    tail = plan.chunk[j - plan.t :]  # type: ignore[index]
+                    tail = plan.chunk[j - plan.t :]
                     prev[0, : len(tail)] = tail  # the official frame shift, zero-padded
                 inf = _Inference(j // s, j, -2 if plan is None else plan.k)
                 if land_after is None or d == 0:
@@ -329,10 +330,9 @@ class KinetixRTCServer(DaemonModelServer):
                     land(pending.pop(j))
                 row.update(infer_k=inf.k, prev_k=inf.prev_k)
             age = None if plan is None else j - plan.t
-            if plan is None or age >= H:  # type: ignore[operator]
-                action = np.zeros(self.action_dim, np.float32)
-            else:
-                action = plan.chunk[age]  # type: ignore[index]
+            action = np.zeros(self.action_dim, np.float32)  # nothing planned for this step
+            if plan is not None and j - plan.t < H:
+                action = plan.chunk[j - plan.t]
             row.update(intended_action=action.tolist(), chunk_k=None if plan is None else plan.k, chunk_age=age)
             if plan is not None and plan.k != dispensed_k:
                 dispensed_k = plan.k
@@ -351,7 +351,7 @@ class KinetixRTCServer(DaemonModelServer):
         await super().on_episode_end(rows, results)
         for rec in recorders:  # SQLite I/O off the model thread
             try:
-                await anyio.to_thread.run_sync(rec.close)
+                await _run_in_thread(rec.close)
             except Exception:
                 logger.exception("server step rows were not saved")
 
