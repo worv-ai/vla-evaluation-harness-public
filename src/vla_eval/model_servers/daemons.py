@@ -1,14 +1,17 @@
-"""Episode daemons: ``run(ep)`` once per episode owns its loop (when to infer, reply or publish; a sync episode's
-``SimClock`` advances only as it does).  Guard rails, not a scheduler: one mailbox, one model thread, drain, fail."""
+"""Episode daemons: ``run(ep)`` once per episode owns its loop (when to infer, reply or publish).  A sync episode's
+clock is sim time, advanced ``step_dt`` per env step; a live one's is wall time.  Guard rails, not a scheduler: one
+mailbox, one model thread, drain, fail."""
 
 from __future__ import annotations
 
+import heapq
+import itertools
 import logging
 import math
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Literal, TypeVar
+from typing import TYPE_CHECKING, Any, Literal, NoReturn, TypeVar
 
 import anyio
 from anyio.lowlevel import checkpoint
@@ -41,11 +44,14 @@ __all__ = [
     "MailboxOverflow",
     "ObservationRequest",
     "SimClock",
+    "StepClock",
     "WallClock",
     "episode_daemon",
 ]
 
 logger = logging.getLogger(__name__)
+
+_SETTLE_ROUNDS = 8  # checkpoints a woken sync task gets to start its model call (or sleep) before time moves on
 
 T = TypeVar("T")
 Mode = Literal["sync", "live"]
@@ -65,13 +71,20 @@ class ObservationRequest:
 
     obs: Observation  # this row's observation, as predict() takes it
     rows: Rows  # exactly one row, bound to this observation
-    admitted_at: float  # ep.clock.now() at admission
+    _admitted_at: float | None  # None: the episode's clock is unknown
     seq: int | None  # the OBSERVATION's wire seq (None for a vector slot)
     _server: ModelServer = field(repr=False)
 
     @property
     def row(self) -> Row:
         return self.rows[0]
+
+    @property
+    def admitted_at(self) -> float:
+        """``ep.clock.now()`` at admission (a sync observation ``k``: ``k * step_dt``)."""
+        if self._admitted_at is None:
+            _unknown_step_dt()
+        return self._admitted_at
 
     async def reply(self, action: Action) -> None:
         await self._server.send_action(self.rows, columns.stack([action]))
@@ -134,6 +147,82 @@ class Mailbox:
             raise RuntimeError("an episode's observations have one receiving task")
 
 
+class StepClock:
+    """A sync episode's sim time (a chrono ``Clock``).  Before observation ``k`` is delivered the framework moves it
+    to ``k * step_dt``, waking one sleeper at a time (by deadline, then arrival), its tasks and model calls settled."""
+
+    def __init__(self, step_dt: float) -> None:
+        self.step_dt = step_dt
+        self._t = 0.0
+        self._sleepers: list[tuple[float, int, anyio.Event]] = []  # a heap by (deadline, arrival)
+        self._seq = itertools.count()
+
+    def now(self) -> float:
+        return self._t
+
+    async def sleep(self, seconds: float) -> None:
+        await self.wait_until(self._t + seconds)
+
+    async def wait_until(self, deadline: float) -> None:
+        await checkpoint()
+        if deadline <= self._t:
+            return
+        entry = (deadline, next(self._seq), anyio.Event())
+        heapq.heappush(self._sleepers, entry)
+        try:
+            await entry[2].wait()
+        finally:
+            if not entry[2].is_set():  # cancelled while asleep
+                self._sleepers.remove(entry)
+                heapq.heapify(self._sleepers)
+
+    async def every(self, period: float, *, first: Literal["now", "after"] = "after") -> AsyncIterator[float]:
+        """As chrono's: ticks every ``period`` from now (``"now"``) or ``now + period``; missed ticks are skipped."""
+        if period <= 0:
+            raise ValueError(f"every() period must be positive, got {period}")
+        tick = self._t if first == "now" else self._t + period
+        while True:
+            if tick > self._t:
+                await self.wait_until(tick)
+            yield tick
+            tick += period
+            while tick <= self._t:
+                tick += period
+
+    def _wake_next(self, t: float) -> bool:
+        """Move to the earliest deadline at or before ``t`` and wake its first sleeper; ``False`` if none."""
+        if not self._sleepers or self._sleepers[0][0] > t:
+            return False
+        self._t, _, event = heapq.heappop(self._sleepers)
+        event.set()
+        return True
+
+    def _move_to(self, t: float) -> None:
+        self._t = max(self._t, t)
+
+
+class _UnknownClock:
+    """A sync episode's clock when no ``step_dt`` is known: any use fails (the episode, from its tasks)."""
+
+    def now(self) -> NoReturn:
+        _unknown_step_dt()
+
+    async def sleep(self, seconds: float) -> NoReturn:
+        _unknown_step_dt()
+
+    async def wait_until(self, deadline: float) -> NoReturn:
+        _unknown_step_dt()
+
+    def every(self, period: float, *, first: Literal["now", "after"] = "after") -> NoReturn:
+        _unknown_step_dt()
+
+
+def _unknown_step_dt() -> NoReturn:
+    raise RuntimeError(
+        "step_dt unknown: the benchmark declares no step_dt and the server sets none, so a sync episode has no clock"
+    )
+
+
 class EpisodeContext:
     """One episode's scope, given to ``run(ep)`` and its tasks; invalid after ``on_episode_end``.  Event-loop only.
     ``start_soon`` makes it a task group for ``SupervisorHost.start(ep)``."""
@@ -143,7 +232,7 @@ class EpisodeContext:
         server: ModelServer,
         rows: Rows,
         clock: Clock,
-        sim_dt: float | None,
+        step_dt: float | None,
         mailbox: Mailbox,
         link: _Link | None,
     ) -> None:
@@ -152,7 +241,7 @@ class EpisodeContext:
         self.row_id = row.id
         self.mode: Mode = row.episode.mode
         self.clock = clock
-        self.sim_dt = sim_dt
+        self.step_dt = step_dt
         self.logger = logging.getLogger(f"vla_eval.episode.{row.episode.episode_id[:8]}")
         self.stop_event = anyio.Event()
         self.can_publish = self.mode == "live" and link is not None and link.publish is not None
@@ -245,6 +334,25 @@ class EpisodeContext:
                 return
         self._close()
 
+    async def _advance(self, t: float) -> None:
+        """Move a sync clock to ``t`` sleeper by sleeper; time stands still while a model call runs."""
+        clock = self.clock
+        assert isinstance(clock, StepClock)
+        while not self.closing:
+            await self._settle()
+            if not clock._wake_next(t):
+                clock._move_to(t)
+                return
+
+    async def _settle(self) -> None:
+        """Let woken tasks run until they wait, and this episode's model calls finish."""
+        while True:
+            for _ in range(_SETTLE_ROUNDS):
+                await checkpoint()
+            if not self._owned:
+                return
+            await self._drained.wait()
+
     def _owns(self, request: ObservationRequest) -> bool:
         return (
             int(request.rows.ids[0]) == self.row_id
@@ -304,7 +412,8 @@ def episode_daemon(
 
 class EpisodeDaemons:
     """One scope per started row running ``run(ep)``; a ``ModelServer`` forwards its callbacks, ``on_episode_failed``
-    too.  ``backlog``: ``"latest"`` or a FIFO bound; ``control_hz``: default rate; unmet ``requires`` fail starts."""
+    too.  ``backlog``: ``"latest"`` or a FIFO bound; ``step_dt``: default seconds per env step; unmet ``requires``
+    fail starts."""
 
     def __init__(
         self,
@@ -312,18 +421,18 @@ class EpisodeDaemons:
         run: Run,
         *,
         backlog: Backlog = "latest",
-        control_hz: float | None = None,
+        step_dt: float | None = None,
         reset: Reset | None = None,
         finish: Finish | None = None,
         requires: frozenset[str] = frozenset(),
     ) -> None:
         Mailbox(backlog)  # validates
-        if control_hz is not None:
-            _check_rate(control_hz)
+        if step_dt is not None:
+            _check_step_dt(step_dt)
         if unknown := set(requires) - set(CAPABILITIES):
             raise ValueError(f"unknown capabilities {sorted(unknown)}; known: {list(CAPABILITIES)}")
         self.server, self.run, self.backlog = server, run, backlog
-        self.control_hz, self.reset, self.finish = control_hz, reset, finish
+        self.step_dt, self.reset, self.finish = step_dt, reset, finish
         self.requires = frozenset(requires)
         self._eps: dict[int, EpisodeContext] = {}  # by row id
         self._tg: TaskGroup | None = None
@@ -377,10 +486,24 @@ class EpisodeDaemons:
             if ep is None or ep.closing or ep.episode is not one._episodes[0]:
                 await self.server.send_error(one, EpisodeClosed("the episode is not running"))
                 continue
-            try:
-                ep._mailbox.put(ObservationRequest(one_obs, one, ep.clock.now(), seq, self.server))
-            except MailboxOverflow as exc:
-                ep.fail(exc)
+            if isinstance(ep.clock, StepClock) and self._tg is not None:  # each episode's clock on its own
+                self._tg.start_soon(self._deliver, ep, one_obs, one, seq)
+            else:
+                await self._deliver(ep, one_obs, one, seq)
+
+    async def _deliver(self, ep: EpisodeContext, obs: Observation, rows: Rows, seq: int | None) -> None:
+        """Admit observation ``k`` once a sync clock reached ``k * step_dt`` (one per episode is in flight)."""
+        clock = ep.clock
+        try:
+            if isinstance(clock, StepClock):
+                await ep._advance(rows[0].step * clock.step_dt)
+            if ep.closing:
+                await self.server.send_error(rows, EpisodeClosed("the episode is not running"))
+                return
+            now = None if isinstance(clock, _UnknownClock) else clock.now()
+            ep._mailbox.put(ObservationRequest(obs, rows, now, seq, self.server))
+        except Exception as exc:
+            ep.fail(exc)
 
     async def on_episode_end(self, rows: Rows, results: list[EpisodeResult]) -> None:
         eps = [ep for rid in rows.ids.tolist() if (ep := self._eps.pop(rid, None)) is not None]
@@ -406,9 +529,11 @@ class EpisodeDaemons:
             raise MissingCapabilities(f"missing capabilities: {', '.join(sorted(missing))}")
         if "publish" in self.requires and episode.mode != "live":
             raise RuntimeError("this server publishes actions: it needs a live episode")
-        hz = episode.config.get("control_hz")
-        hz = self.control_hz if hz is None else _check_rate(hz)
-        return SimClock(0.0) if episode.mode == "sync" else WallClock(), None if hz is None else 1.0 / hz
+        dt = episode.config.get("step_dt")
+        dt = self.step_dt if dt is None else _check_step_dt(dt)
+        if episode.mode == "live":
+            return WallClock(), dt
+        return (_UnknownClock() if dt is None else StepClock(dt)), dt
 
     async def _host(self, ep: EpisodeContext) -> None:
         with anyio.CancelScope(shield=True):  # cancellation reaches the episode only through ep._close()
@@ -434,10 +559,10 @@ class EpisodeDaemons:
                 ep._close()
 
 
-def _check_rate(hz: Any) -> float:
-    if isinstance(hz, bool) or not isinstance(hz, (int, float)) or not math.isfinite(hz) or hz <= 0:
-        raise ValueError(f"control_hz must be a positive finite number, got {hz!r}")
-    return float(hz)
+def _check_step_dt(dt: Any) -> float:
+    if isinstance(dt, bool) or not isinstance(dt, (int, float)) or not math.isfinite(dt) or dt <= 0:
+        raise ValueError(f"step_dt must be a positive finite number of seconds, got {dt!r}")
+    return float(dt)
 
 
 class DaemonModelServer(ModelServer):
@@ -459,7 +584,7 @@ class DaemonModelServer(ModelServer):
         run: Run | None = None,
         *,
         backlog: Backlog = "latest",
-        control_hz: float | None = None,
+        step_dt: float | None = None,
         max_rows: int | None = None,
     ) -> None:
         super().__init__()
@@ -469,7 +594,7 @@ class DaemonModelServer(ModelServer):
             self,
             self.run,
             backlog=backlog,
-            control_hz=control_hz,
+            step_dt=step_dt,
             reset=self.reset_episodes,
             finish=self.finish_episodes,
             requires=self.requires,
