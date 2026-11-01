@@ -193,6 +193,45 @@ async def test_a_fires_model_call_finishes_before_time_moves_on(latency):
 
 
 @pytest.mark.anyio
+async def test_a_call_an_observation_starts_lands_before_the_next_timer_whatever_its_latency():
+    async def once(latency: float) -> list[tuple[str, float, float]]:
+        log: list[tuple[str, float, float]] = []
+        plan = {"v": -1.0}
+
+        def infer(v: float) -> float:
+            time.sleep(latency)
+            return v
+
+        async def background(ep: EpisodeContext, v: float) -> None:
+            plan["v"] = await ep.call(infer, v)
+            log.append(("landed", ep.clock.now(), plan["v"]))
+
+        async def timer(ep: EpisodeContext) -> None:
+            async for t in ep.clock.every(0.1):
+                log.append(("timer", t, plan["v"]))
+
+        async def run(ep: EpisodeContext) -> None:
+            ep.start_soon(timer, ep)
+            async for req in ep.observations():
+                ep.start_soon(background, ep, float(req.obs["value"]))  # infer in the background, reply at once
+                await _reply(req)
+
+        server = Daemon(run, step_dt=0.25)
+        async with serving(server):
+            (rid,) = await start(server)
+            for v in range(4):
+                assert not (await observe(server, rid, v)).errors
+        return log
+
+    fast, slow = (
+        [e for e in log if e[1] <= 0.5] for log in (await once(0.0), await once(0.02))
+    )  # the last observation's call may land or be dropped at close
+    assert fast == slow
+    assert [e for e in fast if e[0] == "landed"] == [("landed", k * 0.25, float(k)) for k in range(3)]
+    assert ("timer", 0.1, 0.0) in fast  # obs 0's call landed at 0, before the 0.1 timer
+
+
+@pytest.mark.anyio
 async def test_a_sleeper_cancelled_while_asleep_is_never_woken():
     log: list[str] = []
 
