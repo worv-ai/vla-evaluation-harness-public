@@ -5,6 +5,7 @@ mailbox, one model thread, drain, fail."""
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import logging
 import math
 import weakref
@@ -53,6 +54,7 @@ logger = logging.getLogger(__name__)
 _SETTLE_ROUNDS = 8  # off asyncio: checkpoints a woken sync task gets to block before time moves on
 _MAX_SETTLE_ROUNDS = 10_000  # an episode task still running after this many checkpoints fails its sync episode
 _EPS = 1e-9  # sim seconds: deadlines this close are one instant (float error between n * period and k * step_dt)
+_EPISODE: contextvars.ContextVar[EpisodeContext | None] = contextvars.ContextVar("vla_eval_episode", default=None)
 
 T = TypeVar("T")
 Mode = Literal["sync", "live"]
@@ -205,10 +207,7 @@ class EpisodeContext:
         self._exited = anyio.Event()
         self._tg: TaskGroup | None = None
         self._scope = anyio.CancelScope()
-        self._host_id: int | None = None  # anyio id of the task hosting this episode's task group
-        # asyncio tasks seen while settling, classified once: this episode's (``_tasks_now``) or not
-        self._mine: weakref.WeakSet[asyncio.Task[Any]] = weakref.WeakSet()
-        self._others: weakref.WeakSet[asyncio.Task[Any]] = weakref.WeakSet()
+        self._mine: weakref.WeakSet[asyncio.Task[Any]] = weakref.WeakSet()  # asyncio: this episode's tasks
 
     @property
     def closing(self) -> bool:
@@ -316,27 +315,11 @@ class EpisodeContext:
             return
         for _ in range(_MAX_SETTLE_ROUNDS):
             await checkpoint()
-            if not any(_runnable(task) for task in self._tasks_now()):
+            if not any(_runnable(task) for task in self._mine):
                 return
         raise RuntimeError(
             f"sim time cannot move on: an episode task ran {_MAX_SETTLE_ROUNDS} checkpoints without blocking"
         )
-
-    def _tasks_now(self) -> list[asyncio.Task[Any]]:
-        """This episode's live asyncio tasks: the host's descendants through anyio's parent links (``run``,
-        ``start_soon`` children, and task groups they open, e.g. a chrono ``Supervisor``'s daemons)."""
-        tasks = asyncio.all_tasks()
-        new = [task for task in tasks if task not in self._mine and task not in self._others]
-        if new:
-            parents = {info.id: info.parent_id for info in anyio.get_running_tasks()}
-            for task in new:
-                tid: int | None = id(task)
-                for _ in range(len(parents) + 1):  # a chain, never a cycle; bounded anyway
-                    if tid is None or tid == self._host_id:
-                        break
-                    tid = parents.get(tid)
-                (self._mine if tid is not None and tid == self._host_id else self._others).add(task)
-        return [task for task in tasks if task in self._mine]
 
     def _owns(self, request: ObservationRequest) -> bool:
         return (
@@ -351,6 +334,7 @@ class EpisodeContext:
         self._scope.cancel()
 
     async def _task(self, fn: Callable[..., Awaitable[Any]], args: tuple[Any, ...]) -> None:
+        _join(self)
         try:
             if not self.closing:
                 await _guarded(self, fn, *args)
@@ -360,7 +344,38 @@ class EpisodeContext:
                 self.fail(RuntimeError("no task is left to answer observations"))
 
 
+def _join(ep: EpisodeContext) -> None:
+    """Make the current task one of ``ep``'s, and every task created in its context too (anyio task groups, e.g. a
+    chrono ``Supervisor``'s daemons, and ``asyncio.create_task`` / ``gather``): those hold ``ep``'s sim time."""
+    try:
+        task = asyncio.current_task()
+    except RuntimeError:  # not asyncio: settling falls back to a checkpoint budget
+        return
+    if task is None:
+        return
+    loop = task.get_loop()
+    if not getattr(loop.get_task_factory(), "_vla_eval_episodes", False):
+        loop.set_task_factory(_episode_task_factory(loop.get_task_factory()))
+    _EPISODE.set(ep)
+    ep._mine.add(task)
+
+
+def _episode_task_factory(inner: Any) -> Any:
+    """Wrap a loop's task factory: a task created where ``_EPISODE`` is set (its creator's context) joins it."""
+
+    def factory(loop: asyncio.AbstractEventLoop, coro: Any, **kwargs: Any) -> asyncio.Task[Any]:
+        task = asyncio.Task(coro, loop=loop, **kwargs) if inner is None else inner(loop, coro, **kwargs)
+        if (ep := _EPISODE.get()) is not None:
+            ep._mine.add(task)
+        return task
+
+    factory._vla_eval_episodes = True  # ty: ignore[unresolved-attribute]
+    return factory
+
+
 def _runnable(task: asyncio.Task[Any]) -> bool:
+    if task.done():
+        return False
     waiter = task._fut_waiter  # ty: ignore[unresolved-attribute]  # private, as anyio's asyncio backend reads it
     return waiter is None or waiter.done()
 
@@ -531,7 +546,6 @@ class EpisodeDaemons:
         return (_UnknownClock() if dt is None else SimClock(0.0)), dt
 
     async def _host(self, ep: EpisodeContext) -> None:
-        ep._host_id = anyio.get_current_task().id
         with anyio.CancelScope(shield=True):  # cancellation reaches the episode only through ep._close()
             try:
                 with ep._scope:

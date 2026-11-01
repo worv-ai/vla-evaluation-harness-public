@@ -3,6 +3,7 @@ delivered, waking one sleeper at a time and settling its model calls; live episo
 
 from __future__ import annotations
 
+import asyncio
 import random
 import time
 from typing import Any
@@ -139,9 +140,11 @@ async def test_async_work_and_child_tasks_before_a_call_finish_before_time_moves
     assert sorted(done) == sorted((who, t, t) for who in ("child", "ticker") for t in (0.25, 0.5, 0.75, 1.0))
 
 
+@pytest.mark.parametrize("spawn", ["task group", "gather", "create_task"])
 @pytest.mark.anyio
-async def test_tasks_of_a_task_group_opened_inside_the_episode_hold_time_too():
+async def test_tasks_an_episode_task_creates_hold_time_too(spawn):
     done: list[tuple[float, float]] = []  # (tick, clock when its call returned)
+    keep: list[asyncio.Task[None]] = []
 
     async def work(t: float, ep: EpisodeContext) -> None:
         for _ in range(50):
@@ -150,9 +153,15 @@ async def test_tasks_of_a_task_group_opened_inside_the_episode_hold_time_too():
         done.append((t, ep.clock.now()))
 
     async def ticker(ep: EpisodeContext) -> None:
-        async with anyio.create_task_group() as tg:  # as a chrono Supervisor hosts its daemons
-            async for t in ep.clock.every(0.25):
-                tg.start_soon(work, t, ep)
+        if spawn == "task group":  # as a chrono Supervisor hosts its daemons
+            async with anyio.create_task_group() as tg:
+                async for t in ep.clock.every(0.25):
+                    tg.start_soon(work, t, ep)
+        async for t in ep.clock.every(0.25):
+            if spawn == "gather":
+                await asyncio.gather(work(t, ep))
+            else:
+                keep.append(asyncio.create_task(work(t, ep)))
 
     async def run(ep: EpisodeContext) -> None:
         ep.start_soon(ticker, ep)

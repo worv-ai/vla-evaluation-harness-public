@@ -169,9 +169,10 @@ A `DaemonModelServer` episode's `ep.clock` follows the transport:
 
 The sync clock is chrono's `SimClock`, which the framework advances through its settle hook (`advance_to(t,
 settle=...)`); a loop never calls `advance`. Timers due at `k * step_dt` (within 1 ns) fire before observation `k` is
-delivered. The episode's tasks are `run`, its `ep.start_soon` children and the task groups they open (e.g. a chrono
-`Supervisor`'s daemons); other tasks never hold its time, and one that never blocks fails only its own episode. With
-no `step_dt` known, a sync episode's clock raises on use (loops that never touch it still work).
+delivered. The episode's tasks are `run`, its `ep.start_soon` children and every task they create (anyio task groups
+such as a chrono `Supervisor`'s daemons, `asyncio.create_task` / `gather`); other tasks never hold its time, and one
+that never blocks fails only its own episode. With no `step_dt` known, a sync episode's clock raises on use (loops that
+never touch it still work).
 
 The server runner (`model_servers/serve.py`) wraps any `ModelServer` into a WebSocket server with `serve(model_server, host, port)`.
 
