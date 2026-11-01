@@ -1,7 +1,5 @@
-"""Real-time chunking (RTC) on episode daemons: an execution policy built from vla-eval's core primitives.
-
-``RTCServer`` streams a chunk's actions on a time grid (``PUBLISH``), refilling it ahead of time.  Subclass it and
-override ``predict``; ``tests/test_example_rtc.py`` covers it."""
+"""Real-time chunking (RTC) as an episode-daemon loop: ``RTCServer`` streams each chunk on a time grid (``PUBLISH``)
+and refills it ahead of time.  Subclass it and override ``predict``; ``tests/test_example_rtc.py`` covers it."""
 
 from __future__ import annotations
 
@@ -21,8 +19,8 @@ class RTCServer(DaemonModelServer):
     slots are skipped, and the newest observation is inferred once ``refill_at`` or fewer actions remain.  Live clients
     with ``publish`` and ``episode_error`` only.  Skipping the slots its latency outlived is LAAS-style selection.
 
-    Override ``predict`` to return a ``[T, D]`` chunk (model thread).  ``warmup_obs``: predicted once before the first
-    episode starts; a cold inference longer than the chunk's horizon (``chunk_size / hz``) is dropped unpublished.
+    Override ``predict`` to return a ``[T, D]`` chunk (model thread).  ``warmup_obs``: predicted in the first
+    ``reset_episodes`` (call ``super()``): a cold inference longer than ``chunk_size / hz`` is dropped unpublished.
     """
 
     requires = frozenset({"publish", "episode_error"})
@@ -36,9 +34,11 @@ class RTCServer(DaemonModelServer):
         self.chunk_size, self.hz, self.refill_at = chunk_size, hz, refill_at
         self.warmup_obs = warmup_obs
 
-    def warmup(self, rows: Rows) -> None:
-        if self.warmup_obs is not None:
+    def reset_episodes(self, rows: Rows) -> dict[int, Exception] | None:
+        if self.warmup_obs is not None:  # once, before the first episode is ready; a failure retries next start
             self.predict(self.warmup_obs, rows[0])
+            self.warmup_obs = None
+        return None
 
     def predict(self, obs: Observation, row: Row) -> np.ndarray:
         """A ``[T, D]`` action chunk for one observation.  Blocking."""

@@ -45,7 +45,7 @@ import websockets
 from websockets.asyncio.server import serve as ws_serve
 
 from vla_eval import columns
-from vla_eval.model_servers.base import CAPABILITIES, MissingCapabilities, ModelServer, _Link, _Pending
+from vla_eval.model_servers.base import CAPABILITIES, MissingCapabilities, ModelServer, _leaves, _Link, _Pending
 from vla_eval.protocol.messages import Message, MessageType, make_hello_payload, pack_message, unpack_message
 
 logger = logging.getLogger(__name__)
@@ -83,7 +83,6 @@ async def _handle_connection(ws: Any, model_server: ModelServer, tg: TaskGroup) 
     closed = False
     waiting: _Pending | None = None
     caps: frozenset[str] = frozenset()  # the client's HELLO capabilities (exactly true)
-    told_legacy = False
 
     async def watch() -> None:  # a disconnect wakes the observation waiting for replies
         nonlocal closed
@@ -195,9 +194,6 @@ async def _handle_connection(ws: Any, model_server: ModelServer, tg: TaskGroup) 
             elif msg.type == MessageType.EPISODE_START:
                 await end(_RESTARTED)  # the client may start over without ending
                 live = msg.payload.get("mode") == "live"
-                if live and "episode_error" not in caps and not told_legacy:
-                    told_legacy = True
-                    logger.info("session=%s: the client cannot be told of failed episodes", session_id[:8])
                 (out,) = await model_server._start_episodes(
                     [(msg.payload, session_id)],
                     mode="live" if live else "sync",
@@ -506,12 +502,6 @@ def serve(
     finally:
         signal.signal(signal.SIGINT, previous)
         model_server._model_thread.shutdown(cancel_futures=True)
-
-
-def _leaves(exc: BaseException) -> list[BaseException]:
-    if isinstance(exc, BaseExceptionGroup):
-        return [leaf for e in exc.exceptions for leaf in _leaves(e)]
-    return [exc]
 
 
 # ---------------------------------------------------------------------------

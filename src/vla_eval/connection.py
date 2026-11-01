@@ -80,7 +80,6 @@ class Connection:
         self._publish_index = -1  # the episode's last applied PUBLISH
         self._benchmark: str | None = None
         self.server_info: dict[str, Any] = {}
-        self._offered: dict[str, Any] = {}  # the capabilities our last HELLO advertised
 
     @property
     def is_connected(self) -> bool:
@@ -96,8 +95,7 @@ class Connection:
     async def _hello_handshake(self) -> None:
         """Exchange HELLO messages with the server."""
         extra: dict[str, Any] = {"benchmark": self._benchmark} if self._benchmark else {}
-        self._offered = dict(CAPABILITIES)
-        payload = make_hello_payload(capabilities=self._offered, **extra)
+        payload = make_hello_payload(capabilities=dict(CAPABILITIES), **extra)
         await self.send(MessageType.HELLO, payload)
         reply = await self.recv(timeout=self.timeout)
         if reply.type != MessageType.HELLO:
@@ -175,8 +173,8 @@ class Connection:
             TimeoutError: No ``EPISODE_READY`` within ``timeout``.
         """
         seq = await self.send(MessageType.EPISODE_START, config)
-        if not (self._offered.get("episode_ready") and self.server_info.get("capabilities", {}).get("episode_ready")):
-            return  # an older peer: a failed start surfaces at the first reply
+        if not self.server_info.get("capabilities", {}).get("episode_ready"):
+            return  # an older server: a failed start surfaces at the first reply
         try:
             with anyio.fail_after(self.timeout):
                 reply = await self.recv()
@@ -240,12 +238,8 @@ class Connection:
 
     @asynccontextmanager
     async def listening(self) -> AsyncIterator[None]:
-        """Run the listener for the block's duration (live mode): ACTIONs go to ``on_action``, PUBLISHes to
-        ``on_publish``.
-
-        If the listener fails (e.g. the connection dropped, or ``ServerEpisodeError`` when the server failed the
-        episode), the block is cancelled and the error re-raised.
-        """
+        """Run the listener for the block (live mode): ACTION to ``on_action``, PUBLISH to ``on_publish``.  A listener
+        error (a dropped connection, ``ServerEpisodeError``) cancels the block and is re-raised."""
         error: Exception | None = None
 
         async def listen() -> None:

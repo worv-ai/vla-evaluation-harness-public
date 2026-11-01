@@ -177,11 +177,10 @@ Every running episode is a row; inference and the episode hooks are batched over
 - `chunk_size`: `[T, D]` per row, served from a per-episode buffer (`rows.episodes[i].chunk_size` overrides it).
 
 Your own real-time loop: subclass `DaemonModelServer` (`model_servers/daemons.py`) and write `run(self, ep)`, once
-per episode: answer `ep.observations()` with `req.reply(action)`, call the model via `ep.call` (or a shared
-`PredictionEngine.infer_one` to batch episodes), stream with `ep.publish` (live only). `ep.clock` is a fresh `SimClock`
-per sync episode that the loop advances (by `ep.sim_dt`), else `WallClock`. An exception escaping the loop fails the
-episode (`model_act`); `EPISODE_END` drains its tasks and model calls before `finish_episodes`. `warmup(rows)` runs
-once on the model thread before the first `reset_episodes`, so `EPISODE_READY` implies steady-state latency.
+per episode: answer `ep.observations()` with `req.reply(action)`, call the model via `ep.call`, stream with
+`ep.publish` (live only). `ep.clock` is a fresh `SimClock` per sync episode that the loop advances (by `ep.sim_dt`),
+else `WallClock`. An exception escaping the loop fails the episode (`model_act`); `EPISODE_END` drains its tasks and
+model calls before `finish_episodes`. Warm up in `__init__` or `reset_episodes`, as above.
 Continuous inference (`backlog="latest"`, the default) is the whole loop:
 
 ```python

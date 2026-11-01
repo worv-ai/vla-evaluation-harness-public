@@ -1,5 +1,5 @@
 """The RTC example (examples/live_servers/rtc.py): its time grid against chrono's ticker semantics on a scripted
-clock, warmup, and streaming to a live runner."""
+clock; warm-up and streaming to a live runner."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from examples.live_servers.rtc import RTCServer
 from vla_eval.connection import Connection
 from vla_eval.runners.live_runner import LiveEpisodeRunner
 
-from tests.conftest import StubBenchmark, start_server, stop_server
+from tests.conftest import StubBenchmark, running
 
 
 class Chunker(RTCServer):
@@ -52,8 +52,8 @@ class ScriptClock:
 class FakeEp:
     """The parts of EpisodeContext RTCServer uses; requests arrive as scripted ``(time, value)``."""
 
-    def __init__(self, server: RTCServer, clock: ScriptClock, arrivals: list[tuple[float, float, float]]) -> None:
-        self.server, self.clock, self.arrivals = server, clock, list(arrivals)  # (arrival, admitted_at, value)
+    def __init__(self, clock: ScriptClock, arrivals: list[tuple[float, float, float]]) -> None:
+        self.clock, self.arrivals = clock, list(arrivals)  # (arrival, admitted_at, value)
         self.logger = logging.getLogger("tests.rtc")
         self.closing = False
         self.published: list[tuple[float, float]] = []
@@ -92,7 +92,7 @@ class FakeEp:
 
 
 async def _rtc(server: RTCServer, wakes: list[float], arrivals: list[tuple[float, float, float]]) -> FakeEp:
-    ep = FakeEp(server, ScriptClock(wakes), arrivals)
+    ep = FakeEp(ScriptClock(wakes), arrivals)
     async with anyio.create_task_group() as tg:
         ep.tg = tg
         await server.run(cast(Any, ep))
@@ -115,9 +115,7 @@ async def test_rtc_publishes_a_landing_chunk_whose_tick_had_nothing_to_send():
 
 
 @pytest.mark.anyio
-async def test_rtc_skips_expired_slots_and_discards_a_fully_expired_chunk():
-    ep = await _rtc(Chunker(chunk=2, hz=1.0), [5.0, 5.5, 6.0], [(5.0, 0.0, 1.0)])  # admitted 5 s before
-    assert ep.published == []
+async def test_rtc_skips_expired_slots():
     ep = await _rtc(Chunker(hz=10.0), [0.0, 0.1, 0.35, 0.4], [(0.0, 0.0, 1.0)])
     assert ep.published == [(0.0, 100.0), (0.1, 101.0), (0.35, 103.0), (0.4, 104.0)]  # slot 2 expired unseen
 
@@ -134,37 +132,13 @@ async def test_rtc_warns_once_per_episode_when_a_chunk_is_dropped(caplog):
     ]
 
 
-@pytest.mark.anyio
-async def test_rtc_warms_up_on_warmup_obs_once_before_the_first_episode(free_port):
-    class Logged(Chunker):
-        def __init__(self, **kw: Any) -> None:
-            super().__init__(**kw)
-            self.values: list[float] = []
-
-        def predict(self, obs, row):
-            self.values.append(float(obs["value"]))
-            return super().predict(obs, row)
-
-    server = Logged(hz=20.0, warmup_obs={"value": 7.0})
-    task = await start_server(server, free_port)
-    try:
-        for _ in range(2):
-            async with Connection(f"ws://127.0.0.1:{free_port}") as conn:
-                await LiveEpisodeRunner(hz=20.0).run_episode(
-                    StubBenchmark(done_at_step=5), {"name": "t"}, conn, max_steps=5
-                )
-    finally:
-        await stop_server(task)
-    assert server.values[0] == 7.0 and server.values.count(7.0) == 1 and len(server.values) > 1
-
-
 @pytest.mark.parametrize("blocked", [False, True])
 @pytest.mark.anyio
 async def test_rtc_refills_ahead_and_a_replacement_during_a_blocked_publish_keeps_its_cursor(blocked):
     """Plan 1 (admitted 0.0) streams slots 0 (as it lands), 1, 2; at 2.0 two slots are left, so the observation
     admitted at 1.0 is inferred; its plan (anchored at 1.0, slot 0 expired) takes over at slot 2 even mid-publish."""
     server = Chunker(chunk=4, hz=1.0, refill_at=2)
-    ep = FakeEp(server, ScriptClock([0.0, 1.0, 2.0, 3.0, 4.0]), [(0.0, 0.0, 1.0), (1.0, 1.0, 2.0)])
+    ep = FakeEp(ScriptClock([0.0, 1.0, 2.0, 3.0, 4.0]), [(0.0, 0.0, 1.0), (1.0, 1.0, 2.0)])
     ep.block = anyio.Event() if blocked else None
     async with anyio.create_task_group() as tg:
         ep.tg = tg
@@ -190,14 +164,23 @@ def test_rtc_validates_its_parameters():
 
 
 @pytest.mark.anyio
-async def test_rtc_streams_to_a_live_runner(free_port):
-    server = Chunker(hz=20.0)
-    task = await start_server(server, free_port)
-    try:
-        async with Connection(f"ws://127.0.0.1:{free_port}") as conn:
-            result = await LiveEpisodeRunner(hz=20.0).run_episode(
-                StubBenchmark(done_at_step=30), {"name": "t"}, conn, max_steps=30
-            )
+async def test_rtc_warms_up_once_before_the_first_episode_and_streams_to_a_live_runner(free_port):
+    class Logged(Chunker):
+        def __init__(self, **kw: Any) -> None:
+            super().__init__(**kw)
+            self.values: list[float] = []
+
+        def predict(self, obs, row):
+            self.values.append(float(obs["value"]))
+            return super().predict(obs, row)
+
+    server = Logged(hz=20.0, warmup_obs={"value": 7.0})
+    results = []
+    async with running(server, free_port) as url:
+        for _ in range(2):
+            async with Connection(url) as conn:
+                bench = StubBenchmark(done_at_step=30)
+                results.append(await LiveEpisodeRunner(hz=20.0).run_episode(bench, {"name": "t"}, conn, max_steps=30))
+    assert server.values[0] == 7.0 and server.values.count(7.0) == 1 and len(server.values) > 1
+    for result in results:
         assert result["rt_metrics"]["update_count"] >= 10 and result["rt_metrics"]["fresh_count"] >= 10
-    finally:
-        await stop_server(task)

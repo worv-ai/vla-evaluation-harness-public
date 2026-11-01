@@ -22,16 +22,24 @@ from vla_eval.runners.base import ModelStartError, failure_reason
 from vla_eval.runners.live_runner import LiveEpisodeRunner
 from vla_eval.runners.sync_runner import SyncEpisodeRunner
 
-from tests.conftest import BatchLogServer, LogServer, StubBenchmark, start_server, stop_server
-from tests.test_daemons import Daemon, _observe, _start, echo, serving
-
-LIVE = {"task": {"name": "t"}, "mode": "live"}
+from tests.conftest import (
+    LIVE,
+    BatchLogServer,
+    Daemon,
+    LogServer,
+    StubBenchmark,
+    echo,
+    observe,
+    running,
+    serving,
+    start,
+)
 
 
 @pytest.fixture
 def legacy(monkeypatch):
-    """Clients that advertise no capabilities, as before this protocol addition."""
-    monkeypatch.setattr(connection_module, "CAPABILITIES", {})
+    """Clients before this protocol addition: their HELLO advertises ``episode_ready`` only."""
+    monkeypatch.setattr(connection_module, "CAPABILITIES", {"episode_ready": True})
 
 
 async def _until(cond: Any, timeout: float = 3.0) -> None:
@@ -53,45 +61,21 @@ async def test_capabilities_round_trip_and_only_exactly_true_counts(free_port):
         seen.append(ep.episode.capabilities)
         await echo(ep)
 
-    server = Daemon(run)
-    task = await start_server(server, free_port)
-    try:
-        async with Connection(f"ws://127.0.0.1:{free_port}") as conn:
+    async with running(Daemon(run), free_port) as url:
+        async with Connection(url) as conn:
             assert {k: conn.server_info["capabilities"][k] for k in ("publish", "episode_error")} == {
                 "publish": True,
                 "episode_error": True,
             }
             await conn.start_episode(LIVE)
             await conn.end_episode({})
-        async with websockets.connect(f"ws://127.0.0.1:{free_port}") as ws:
+        async with websockets.connect(url) as ws:
             hello = {"harness_version": "x", "capabilities": {"publish": "yes", "episode_error": 1}}
             await ws.send(pack_message(Message(MessageType.HELLO, hello, 1)))
             await ws.recv()
             await ws.send(pack_message(Message(MessageType.EPISODE_START, LIVE, 2)))
             await _until(lambda: len(seen) == 2)
-    finally:
-        await stop_server(task)
     assert seen == [frozenset({"publish", "episode_error"}), frozenset()]
-
-
-@pytest.mark.anyio
-async def test_a_server_requiring_a_capability_refuses_an_old_client_and_closes_its_socket(free_port, legacy):
-    class Needs(Daemon):
-        requires = frozenset({"episode_error"})
-
-    task = await start_server(Needs(echo), free_port)
-    try:
-        conn = Connection(f"ws://127.0.0.1:{free_port}")
-        await conn.connect()
-        await conn.start_episode(LIVE)
-        msg = await conn.recv(timeout=2)
-        assert msg.type == MessageType.ERROR and "missing capabilities: episode_error" in msg.payload["error"]
-        with pytest.raises(websockets.exceptions.ConnectionClosed) as info:
-            await conn.recv(timeout=2)
-        assert info.value.rcvd is not None and info.value.rcvd.code == 1008
-        await conn.close()
-    finally:
-        await stop_server(task)
 
 
 class Streams(Daemon):
@@ -99,55 +83,41 @@ class Streams(Daemon):
 
 
 @pytest.mark.anyio
-async def test_an_old_live_client_against_a_publishing_server_ends_connection_closed(free_port, legacy):
-    task = await start_server(Streams(echo), free_port)
-    try:
-        async with Connection(f"ws://127.0.0.1:{free_port}") as conn:
-            with pytest.raises(websockets.exceptions.ConnectionClosed) as info:
-                await LiveEpisodeRunner(hz=50.0).run_episode(StubBenchmark(), {"name": "t"}, conn, max_steps=200)
-        assert failure_reason(info.value) == "connection_closed"
-    finally:
-        await stop_server(task)
+async def test_a_server_requiring_capabilities_fails_an_old_clients_start_and_closes_its_socket(free_port, legacy):
+    async with running(Streams(echo), free_port) as url, Connection(url) as conn:
+        with anyio.fail_after(3), pytest.raises(ModelStartError, match="missing capabilities") as info:
+            await LiveEpisodeRunner(hz=50.0).run_episode(StubBenchmark(), {"name": "t"}, conn, max_steps=200)
+        assert failure_reason(info.value) == "model_start"
+        with pytest.raises(websockets.exceptions.ConnectionClosed) as closed:
+            await conn.recv(timeout=2)
+        assert closed.value.rcvd is not None and closed.value.rcvd.code == 1008
 
 
 @pytest.mark.anyio
-async def test_a_ready_capable_client_lacking_publish_fails_a_publishing_start_model_start(free_port, monkeypatch):
-    monkeypatch.setattr(connection_module, "CAPABILITIES", {"episode_ready": True})  # a client before PUBLISH
-    task = await start_server(Streams(echo), free_port)
-    try:
-        async with Connection(f"ws://127.0.0.1:{free_port}") as conn:
-            with anyio.fail_after(3), pytest.raises(ModelStartError, match="missing capabilities") as info:
-                await LiveEpisodeRunner(hz=50.0).run_episode(StubBenchmark(), {"name": "t"}, conn, max_steps=200)
-            assert failure_reason(info.value) == "model_start"
-            with pytest.raises(websockets.exceptions.ConnectionClosed) as closed:
-                await conn.recv(timeout=2)
-            assert closed.value.rcvd is not None and closed.value.rcvd.code == 1008
-    finally:
-        await stop_server(task)
+async def test_an_observation_without_a_start_from_a_client_without_capabilities_is_refused(free_port):
+    async with running(Streams(echo), free_port) as url, websockets.connect(url) as ws:
+        await ws.send(pack_message(Message(MessageType.HELLO, {"capabilities": {}}, 1)))
+        await ws.recv()
+        await ws.send(pack_message(Message(MessageType.OBSERVATION, {"value": 1.0}, 2)))
+        msg = unpack_message(cast(bytes, await ws.recv()))
+    assert msg.type == MessageType.ERROR and "missing capabilities" in msg.payload["error"]
 
 
 @pytest.mark.anyio
-async def test_episode_ready_follows_warmup_and_reset_with_the_run_installed(free_port):
+async def test_episode_ready_follows_reset_with_the_run_installed(free_port):
     class Slow(Daemon):
-        def warmup(self, rows: Rows) -> None:
-            time.sleep(0.2)
-
         def reset_episodes(self, rows: Rows) -> dict[int, Exception] | None:
-            time.sleep(0.1)
+            time.sleep(0.3)
             return super().reset_episodes(rows)
 
     server = Slow(echo)
-    task = await start_server(server, free_port)
-    try:
-        async with Connection(f"ws://127.0.0.1:{free_port}") as conn:
-            t0 = time.monotonic()
-            await conn.start_episode(LIVE)
-            assert time.monotonic() - t0 >= 0.3 and server.log == [("reset", [0])] and 0 in server.daemons._eps
-            await conn.send_observation({"value": 2.0})
-            assert (await conn.recv(timeout=2)).payload["actions"].tolist() == [2.0, 2.0]
-            await conn.end_episode({})
-    finally:
-        await stop_server(task)
+    async with running(server, free_port) as url, Connection(url) as conn:
+        t0 = time.monotonic()
+        await conn.start_episode(LIVE)
+        assert time.monotonic() - t0 >= 0.3 and server.log == [("reset", [0])] and 0 in server.daemons._eps
+        await conn.send_observation({"value": 2.0})
+        assert (await conn.recv(timeout=2)).payload["actions"].tolist() == [2.0, 2.0]
+        await conn.end_episode({})
 
 
 # ---------------------------------------------------------------------------
@@ -169,68 +139,61 @@ class FailingAtStart(BatchLogServer):
 @pytest.mark.anyio
 async def test_a_sync_episode_failed_before_its_first_observation_errors_it(free_port):
     server = FailingAtStart()
-    task = await start_server(server, free_port)
-    try:
-        async with Connection(f"ws://127.0.0.1:{free_port}") as conn:
-            with pytest.raises(Exception) as info:
-                await SyncEpisodeRunner().run_episode(StubBenchmark(), {"name": "t", "doomed": True}, conn)
-            assert failure_reason(info.value) == "model_act" and "model gave up" in str(info.value)
-            await _until(lambda: server.results)
-        assert server.predicted == [] and server.results == [{"status": "error", "failure_reason": "model_act"}]
-    finally:
-        await stop_server(task)
+    async with running(server, free_port) as url, Connection(url) as conn:
+        with pytest.raises(Exception) as info:
+            await SyncEpisodeRunner().run_episode(StubBenchmark(), {"name": "t", "doomed": True}, conn)
+        assert failure_reason(info.value) == "model_act" and "model gave up" in str(info.value)
+        await _until(lambda: server.results)
+    assert server.predicted == [] and server.results == [{"status": "error", "failure_reason": "model_act"}]
 
 
 @pytest.mark.anyio
 async def test_a_vector_slot_failed_at_start_fails_alone(free_port):
     server = FailingAtStart()
-    task = await start_server(server, free_port)
-    try:
-        async with Connection(f"ws://127.0.0.1:{free_port}") as conn:
-            starts = [[0, {"task": {"doomed": True}}], [1, {"task": {}}]]
-            reply = await conn.exchange(
-                {"ends": [], "starts": starts, "slots": [0, 1], "observations": {"value": np.asarray([1.0, 2.0])}}
-            )
-        assert [s for s, _ in reply["errors"]] == [0] and "model gave up" in reply["errors"][0][1]
-        assert np.asarray(reply["actions"]["actions"])[:, 0].tolist() == [2.0] and server.batches == [[1]]
-    finally:
-        await stop_server(task)
+    async with running(server, free_port) as url, Connection(url) as conn:
+        starts = [[0, {"task": {"doomed": True}}], [1, {"task": {}}]]
+        reply = await conn.exchange(
+            {"ends": [], "starts": starts, "slots": [0, 1], "observations": {"value": np.asarray([1.0, 2.0])}}
+        )
+    assert [s for s, _ in reply["errors"]] == [0] and "model gave up" in reply["errors"][0][1]
+    assert np.asarray(reply["actions"]["actions"])[:, 0].tolist() == [2.0] and server.batches == [[1]]
 
 
 @pytest.mark.anyio
 async def test_fail_episode_completes_pending_positions_once_and_ignores_stale_rows():
-    server = LogServer()
-    hooks: list[tuple[int, int]] = []
+    hooks: list[tuple[int, Episode]] = []
     sent: list[str] = []
 
-    def bad_hook(rid: int, gen: int, episode: Episode, error: Exception) -> None:
-        raise RuntimeError("hook exploded")
+    class Hooked(LogServer):
+        def on_episode_failed(self, row_id: int, episode: Episode, error: Exception) -> None:
+            hooks.append((row_id, episode))
+            raise RuntimeError("hook exploded")  # logged: EPISODE_ERROR still goes out
 
     async def sink(error: Exception) -> None:
         sent.append(str(error))
         raise RuntimeError("sink exploded")
 
-    server._fail_hooks += [bad_hook, lambda rid, gen, ep, err: hooks.append((rid, gen))]
+    server = Hooked()
     async with serving(server):
-        a, b = await _start(server, 2)
-        server._sinks[a] = sink
+        a, b = await start(server, 2)
+        server._links[a] = _Link(sink, None)
         stale = server._rows([b])
         await server._end_episodes([b], [{}])
-        (b2,) = await _start(server)  # the same id, another incarnation
+        (b2,) = await start(server)  # the same id, another incarnation
         pending = _Pending(3)
         pending.ids = np.asarray([a, a, b2])
         pending.gens = server._gen[pending.ids].copy()
         server._open.add(pending)
-        gen_a = int(server._gen[a])
+        episode_a = server._table[a]
         server.fail_episode(server._rows([a, a]), ValueError("first"))  # a row listed twice: once
         server.fail_episode(server._rows([a]), ValueError("second"))  # first failure wins
         server.fail_episode(stale, ValueError("stale"))  # an ended incarnation: ignored
         await anyio.sleep(0.05)
-    assert hooks == [(a, gen_a)] and sent == ["first"]
+    assert hooks == [(a, episode_a)] and sent == ["first"]
     assert {i: str(e) for i, e in pending.errors.items()} == {0: "first", 1: "first"} and pending.left == 1
     assert server._failed == {a: server._failed[a]} and str(server._failed[a]) == "first"
     await server._end_episodes([a], [{}])
-    assert a not in server._failed and a not in server._sinks
+    assert a not in server._failed and a not in server._links
 
 
 @pytest.mark.anyio
@@ -240,7 +203,7 @@ async def test_a_cancelled_observation_leaves_nothing_tracked():
             await anyio.sleep_forever()
 
     server = Hang()
-    (rid,) = await _start(server)
+    (rid,) = await start(server)
     pending = _Pending(1)
     with anyio.move_on_after(0.05):
         with server._track(pending):
@@ -276,19 +239,15 @@ class Breaks(Daemon):
 @pytest.mark.anyio
 async def test_a_failed_live_episode_ends_model_act_through_the_runner(free_port):
     server = Breaks(after=2)
-    task = await start_server(server, free_port)
-    try:
-        async with Connection(f"ws://127.0.0.1:{free_port}") as conn:
-            with anyio.fail_after(5), pytest.raises(ServerEpisodeError) as info:
-                await LiveEpisodeRunner(hz=50.0).run_episode(StubBenchmark(), {"name": "t"}, conn, max_steps=10_000)
-            assert failure_reason(info.value) == "model_act" and "context overflow" in str(info.value)
-            await _until(lambda: server.results)
-            # the connection goes on: a sync episode next
-            server.after = 100
-            await SyncEpisodeRunner().run_episode(StubBenchmark(), {"name": "t"}, conn, max_steps=2)
-        assert server.results[0] == {"status": "error", "failure_reason": "model_act"}
-    finally:
-        await stop_server(task)
+    async with running(server, free_port) as url, Connection(url) as conn:
+        with anyio.fail_after(5), pytest.raises(ServerEpisodeError) as info:
+            await LiveEpisodeRunner(hz=50.0).run_episode(StubBenchmark(), {"name": "t"}, conn, max_steps=10_000)
+        assert failure_reason(info.value) == "model_act" and "context overflow" in str(info.value)
+        await _until(lambda: server.results)
+        # the connection goes on: a sync episode next
+        server.after = 100
+        await SyncEpisodeRunner().run_episode(StubBenchmark(), {"name": "t"}, conn, max_steps=2)
+    assert server.results[0] == {"status": "error", "failure_reason": "model_act"}
 
 
 def _raw_server(on_message: Any) -> Any:
@@ -319,6 +278,7 @@ async def test_the_listener_takes_publish_and_episode_error_for_the_running_epis
                 (MessageType.PUBLISH, {"action": {"a": 0}, "index": 0}, s),
                 (MessageType.PUBLISH, {"action": {"a": -1}, "index": 0}, s),  # stale index
                 (MessageType.ACTION, {"a": 1}, s + 1),
+                (MessageType.ERROR, {"error": "logged only"}, s + 1),
                 (MessageType.PUBLISH, {"action": {"a": 2}, "index": 3}, s),
             ]
             for t, p, q in send:
@@ -411,7 +371,6 @@ class Publisher(Daemon):
     def __init__(self, n: int = 3) -> None:
         super().__init__()
         self.n = n
-        self.errors: list[str] = []
 
     async def run(self, ep: EpisodeContext) -> None:
         async for req in ep.observations():
@@ -422,22 +381,17 @@ class Publisher(Daemon):
 
 @pytest.mark.anyio
 async def test_publish_sends_indexed_actions_bound_to_the_episode(free_port):
-    server = Publisher(n=4)
-    task = await start_server(server, free_port)
-    try:
-        async with websockets.connect(f"ws://127.0.0.1:{free_port}") as ws:
-            caps = {"capabilities": {"publish": True, "episode_error": True}}
-            await ws.send(pack_message(Message(MessageType.HELLO, caps, 1)))
-            await ws.recv()
-            await ws.send(pack_message(Message(MessageType.EPISODE_START, LIVE, 2)))
-            await ws.send(pack_message(Message(MessageType.OBSERVATION, {"value": 1.0}, 3)))
-            msgs = [unpack_message(cast(bytes, await ws.recv())) for _ in range(5)]
-        assert {m.type for m in msgs} == {MessageType.PUBLISH} and {m.seq for m in msgs} == {2}
-        assert [m.payload["index"] for m in msgs] == [0, 1, 2, 3, 4]  # unique, increasing in send order
-        sources = {float(m.payload["action"]["actions"][0]): m.payload["source_seq"] for m in msgs}
-        assert sources == {0.0: None, 1.0: None, 2.0: None, 3.0: None, 100.0: 3}
-    finally:
-        await stop_server(task)
+    async with running(Publisher(n=4), free_port) as url, websockets.connect(url) as ws:
+        caps = {"capabilities": {"publish": True, "episode_error": True}}
+        await ws.send(pack_message(Message(MessageType.HELLO, caps, 1)))
+        await ws.recv()
+        await ws.send(pack_message(Message(MessageType.EPISODE_START, LIVE, 2)))
+        await ws.send(pack_message(Message(MessageType.OBSERVATION, {"value": 1.0}, 3)))
+        msgs = [unpack_message(cast(bytes, await ws.recv())) for _ in range(5)]
+    assert {m.type for m in msgs} == {MessageType.PUBLISH} and {m.seq for m in msgs} == {2}
+    assert [m.payload["index"] for m in msgs] == [0, 1, 2, 3, 4]  # unique, increasing in send order
+    sources = {float(m.payload["action"]["actions"][0]): m.payload["source_seq"] for m in msgs}
+    assert sources == {0.0: None, 1.0: None, 2.0: None, 3.0: None, 100.0: 3}
 
 
 @pytest.mark.anyio
@@ -466,11 +420,11 @@ async def test_publish_needs_a_live_capable_episode_and_its_own_source():
 
     server = Daemon(run)
     async with serving(server):
-        (sync,) = await _start(server, capabilities=frozenset({"publish"}))
-        (live_old,) = await _start(server, mode="live")  # no publish capability
-        (live,) = await _start(server, mode="live", capabilities=frozenset({"publish"}), link=_Link(None, publish))
+        (sync,) = await start(server, capabilities=frozenset({"publish"}))
+        (live_old,) = await start(server, mode="live")  # no publish capability
+        (live,) = await start(server, mode="live", capabilities=frozenset({"publish"}), link=_Link(None, publish))
         for rid in (sync, live_old, live):
-            await _observe(server, rid, 1.0, wait=False)
+            await observe(server, rid, 1.0, wait=False)
             await anyio.sleep(0.05)
     assert [e[0] for e in errors] == ["sync", "live", "foreign"]
     assert sent == [0]
@@ -502,7 +456,7 @@ async def test_no_publish_starts_after_closing_even_while_one_is_blocked_in_send
 
     server = Daemon(run)
     async with serving(server):
-        (rid,) = await _start(server, mode="live", capabilities=frozenset({"publish"}), link=_Link(None, publish))
+        (rid,) = await start(server, mode="live", capabilities=frozenset({"publish"}), link=_Link(None, publish))
         await entered.wait()
         await anyio.sleep(0.02)
         async with anyio.create_task_group() as tg:
@@ -517,30 +471,25 @@ async def test_a_live_episode_left_without_tasks_is_failed_before_any_observatio
     async def run(ep: EpisodeContext) -> None:
         return
 
-    task = await start_server(Daemon(run), free_port)
-    try:
-        async with Connection(f"ws://127.0.0.1:{free_port}") as conn:
-            with anyio.fail_after(3), pytest.raises(ServerEpisodeError, match="no task is left"):
-                await conn.start_episode(LIVE)  # EPISODE_READY precedes the run's EPISODE_ERROR
-                async with conn.listening():
-                    await anyio.sleep_forever()
-    finally:
-        await stop_server(task)
+    async with running(Daemon(run), free_port) as url, Connection(url) as conn:
+        with anyio.fail_after(3), pytest.raises(ServerEpisodeError, match="no task is left"):
+            await conn.start_episode(LIVE)  # EPISODE_READY precedes the run's EPISODE_ERROR
+            async with conn.listening():
+                await anyio.sleep_forever()
 
 
 @pytest.mark.anyio
-async def test_serving_twice_registers_the_failure_hook_once():
-    server = Daemon(echo)
-    for _ in range(2):
+async def test_a_stopped_dispatcher_fails_the_queued_observation_and_every_later_one():
+    server = LogServer(max_batch_size=8, max_wait_time=5.0)
+    queued: list[_Pending] = []
+    async with anyio.create_task_group() as outer:
         async with serving(server):
-            pass
-    assert server._fail_hooks == [server.daemons._on_fail]
+            (rid,) = await start(server)
 
+            async def first() -> None:
+                queued.append(await observe(server, rid, 1.0))
 
-@pytest.mark.anyio
-async def test_an_observation_after_the_dispatcher_stopped_fails_instead_of_waiting():
-    server = LogServer()
-    async with serving(server):
-        (rid,) = await _start(server)
-    pending = await _observe(server, rid, 1.0)
-    assert "stopped" in str(pending.errors[0]) and server.predicted == []
+            outer.start_soon(first)  # waits up to 5 s for a batch when the server stops
+            await anyio.sleep(0.05)
+    later = await observe(server, rid, 2.0)
+    assert ["stopped" in str(p.errors[0]) for p in (*queued, later)] == [True, True] and server.predicted == []

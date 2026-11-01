@@ -12,7 +12,7 @@ import uuid
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable, Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple, TypeVar
 
 import anyio
@@ -57,7 +57,7 @@ class Episode:
     recording_db_path: str = ""
     chunk_size: int | None = None
     mode: Literal["sync", "live"] = "sync"
-    capabilities: frozenset[str] = field(default_factory=frozenset)
+    capabilities: frozenset[str] = frozenset()
 
 
 class Row(NamedTuple):
@@ -102,19 +102,16 @@ class _Pending:
         return actions if (np.diff(pos) > 0).all() else columns.take(actions, np.argsort(pos))
 
 
-class _Link(NamedTuple):
-    """A live episode's server-initiated messages (framework-private): ``EPISODE_ERROR`` and ``PUBLISH`` senders,
-    each ``None`` when the client did not negotiate it."""
+class _Link:
+    """A live episode's ``EPISODE_ERROR`` / ``PUBLISH`` senders (framework-private), ``None`` unless negotiated.
+    A publish takes its ``index`` and sends under ``lock``."""
 
-    error: Callable[[Exception], Awaitable[None]] | None
-    publish: Callable[[Action, int, int | None], Awaitable[None]] | None
-
-
-class _Publisher:
-    """One live episode's ``PUBLISH`` sender: the index and the send happen under ``lock``."""
-
-    def __init__(self, send: Callable[[Action, int, int | None], Awaitable[None]]) -> None:
-        self.send = send
+    def __init__(
+        self,
+        error: Callable[[Exception], Awaitable[None]] | None,
+        publish: Callable[[Action, int, int | None], Awaitable[None]] | None,
+    ) -> None:
+        self.error, self.publish = error, publish
         self.lock = anyio.Lock()
         self.index = 0
 
@@ -187,9 +184,7 @@ class ModelServer(ABC):
         self._size = 0  # row ids ever used
         self._failed: dict[int, Exception] = {}  # by row id: fail_episode's error, until the row is released
         self._open: set[_Pending] = set()  # sync/vector observations waiting for replies
-        self._fail_hooks: list[Callable[[int, int, Episode, Exception], None]] = []
-        self._sinks: dict[int, Callable[[Exception], Awaitable[None]]] = {}  # live rows' EPISODE_ERROR senders
-        self._publishers: dict[int, _Publisher] = {}  # live rows' PUBLISH senders
+        self._links: dict[int, _Link] = {}  # live rows' server-initiated senders
         self._serve_tg: TaskGroup | None = None  # set by serve_async
 
     async def run_on_model_thread(self, fn: Callable[..., T], *args: Any) -> T:
@@ -220,6 +215,9 @@ class ModelServer(ABC):
     async def on_episode_end(self, rows: Rows, results: list[EpisodeResult]) -> None:
         """Episodes in ``rows`` ended (``results[i]``: the ``EPISODE_END`` payload, ``status`` and
         ``failure_reason`` included); their replies are dropped from now on.  Errors are logged."""
+
+    def on_episode_failed(self, row_id: int, episode: Episode, error: Exception) -> None:
+        """``fail_episode`` failed ``episode`` (row ``row_id``).  Event-loop only; errors are logged."""
 
     async def send_action(self, rows: Rows, actions: Batch) -> None:
         """Answer ``rows`` (of an ``on_observation`` call, or taken from them) with ``actions``, a row each.
@@ -266,7 +264,7 @@ class ModelServer(ABC):
                 continue
             if self._gen[rid] != rows._gen[i] or self._closing[rid] or rid in self._failed:
                 continue
-            gen0, episode = int(self._gen[rid]), self._table[rid]
+            gen0 = int(self._gen[rid])
             self._failed[rid] = error
             self._gen[rid] += 1
             for p in list(self._open):
@@ -279,15 +277,14 @@ class ModelServer(ABC):
                     p.left -= 1
                 if len(hit) and not p.left:
                     p.done.set()
-            for hook in list(self._fail_hooks):
+            try:
+                self.on_episode_failed(rid, rows._episodes[i], error)
+            except Exception:
+                logger.exception("on_episode_failed failed")
+            link = self._links.get(rid)
+            if link is not None and link.error is not None and self._serve_tg is not None:
                 try:
-                    hook(rid, gen0, episode, error)
-                except Exception:
-                    logger.exception("episode failure hook failed")
-            sink = self._sinks.get(rid)
-            if sink is not None and self._serve_tg is not None:
-                try:
-                    self._serve_tg.start_soon(_run_sink, sink, error)
+                    self._serve_tg.start_soon(_run_sink, link.error, error)
                 except Exception:
                     logger.exception("EPISODE_ERROR not scheduled")
 
@@ -378,8 +375,7 @@ class ModelServer(ABC):
         self._table[rid] = None
         self._closing[rid] = False
         self._failed.pop(rid, None)
-        self._sinks.pop(rid, None)
-        self._publishers.pop(rid, None)
+        self._links.pop(rid, None)
         heapq.heappush(self._free, rid)
 
     @contextlib.contextmanager
@@ -418,10 +414,8 @@ class ModelServer(ABC):
                 mode=mode,
                 capabilities=capabilities,
             )
-            if link is not None and link.error is not None:
-                self._sinks[rid] = link.error
-            if link is not None and link.publish is not None:
-                self._publishers[rid] = _Publisher(link.publish)
+            if link is not None:
+                self._links[rid] = link
             self._gen[rid] += 1
             self._steps[rid] = 0
             ids.append(rid)
@@ -483,6 +477,13 @@ class ModelServer(ABC):
 
     def _running(self) -> int:
         return self._size - len(self._free)
+
+
+def _leaves(exc: BaseException) -> list[BaseException]:
+    """The non-group exceptions of ``exc``, depth first."""
+    if isinstance(exc, BaseExceptionGroup):
+        return [leaf for e in exc.exceptions for leaf in _leaves(e)]
+    return [exc]
 
 
 async def _run_sink(sink: Callable[[Exception], Awaitable[None]], error: Exception) -> None:

@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-
 from anyio.abc import TaskGroup
 
 from vla_eval.types import Action, Batch, EpisodeResult, Observation
@@ -86,11 +85,9 @@ class PredictModelServer(ModelServer):
         raise NotImplementedError(f"{type(self).__name__} must override predict() or predict_batch()")
 
     def predict_batch(self, obs: Batch, rows: Rows) -> Batch:
-        """Observation columns of ``rows`` to action columns, a row each.  Blocking."""
-        actions, errors = self._engine._predict_rows(obs, rows)
-        if errors:
-            raise next(iter(errors.values()))
-        return actions
+        """Observation columns of ``rows`` to action columns, a row each.  Blocking.  Not overridden, the engine
+        runs ``predict`` per row."""
+        raise NotImplementedError(f"{type(self).__name__} does not override predict_batch()")
 
     # ------------------------------------------------------------------
     # ModelServer callbacks
