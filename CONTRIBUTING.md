@@ -49,6 +49,8 @@ vla-eval test                                           # fast config validation
 vla-eval test --all                                     # run all available categories
 ```
 
+A server the default stub cannot drive declares a top-level `smoke: {task: {...}, obs: {key: shape}}` in its config (merged into the stub task; float32 zeros).
+
 Server tests require `uv` + model weights + GPU. Benchmark tests require Docker + the benchmark image (pulled via `docker pull`). Unavailable tests are auto-skipped.
 
 ## Linting, Formatting & Type Checking
