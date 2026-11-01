@@ -28,6 +28,9 @@
 #
 # [tool.uv]
 # exclude-newer = "2026-11-01T13:00:00Z"
+#
+# [tool.ty.rules]  # ty checks scripts on their own, against the host env without their deps
+# unresolved-import = "ignore"
 # ///
 """starVLA model server — supports all Qwen* frameworks.
 
@@ -42,7 +45,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
-from collections.abc import Iterator
+from collections.abc import Generator
 from pathlib import Path
 from typing import Any
 
@@ -105,7 +108,7 @@ class _AdaptiveEnsembler:
 
 
 @contextlib.contextmanager
-def _block_logging_hijack() -> Iterator[None]:
+def _block_logging_hijack() -> Generator[None]:
     """Prevent starVLA from clobbering the caller's logging configuration.
 
     starVLA's ``overwatch.py`` calls ``logging.config.dictConfig()`` with

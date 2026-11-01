@@ -30,7 +30,7 @@ dev = [
     "jsonschema>=4.0",
     "pytest>=8.0",
     "ruff>=0.9",
-    "ty>=0.0.18,<0.0.62",  # 0.0.62 checks PEP 723 scripts as their own projects, outside [tool.ty.rules]
+    "ty>=0.0.95",
 ]
 # leaderboard/scripts runtime deps. Tooling comes from `dev`, so CI can sync
 # `--dev --group leaderboard --no-install-project` without pulling vla_eval's runtime.

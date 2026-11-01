@@ -7,7 +7,7 @@ import contextlib
 import threading
 import time
 import socket
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from typing import Any, NamedTuple
 
 import anyio
@@ -291,7 +291,7 @@ async def stop_server(task: asyncio.Task) -> None:
 
 
 @contextlib.asynccontextmanager
-async def running(model_server: Any, port: int) -> AsyncIterator[str]:
+async def running(model_server: Any, port: int) -> AsyncGenerator[str]:
     """``model_server`` on a socket for the block; yields its URL."""
     task = await start_server(model_server, port)
     try:
@@ -301,7 +301,7 @@ async def running(model_server: Any, port: int) -> AsyncIterator[str]:
 
 
 @contextlib.asynccontextmanager
-async def serving(server: ModelServer) -> AsyncIterator[Any]:
+async def serving(server: ModelServer) -> AsyncGenerator[Any]:
     """``server`` as serve_async runs it, without a socket: yields its task group."""
     async with anyio.create_task_group() as tg:
         server._serve_tg = tg

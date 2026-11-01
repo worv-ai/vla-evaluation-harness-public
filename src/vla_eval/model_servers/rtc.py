@@ -13,6 +13,9 @@
 #
 # [tool.uv]
 # exclude-newer = "2026-11-01T13:00:00Z"
+#
+# [tool.ty.rules]  # ty checks scripts on their own, against the host env without their deps
+# unresolved-import = "ignore"
 # ///
 """Real-Time Chunking (arXiv:2506.07339) on Kinetix, with the official sampling code.
 
@@ -250,7 +253,7 @@ class KinetixRTCServer(DaemonModelServer):
         failed: dict[int, Exception] = {}
         for i, (rid, episode) in enumerate(zip(rows.ids.tolist(), rows.episodes)):
             level = (episode.config.get("task") or {}).get("level")
-            if level not in self._states:
+            if not isinstance(level, str) or level not in self._states:
                 failed[i] = ValueError(f"no checkpoint for level {level!r}; have {sorted(self._states)}")
                 continue
             if self.latency != "steps" and episode.mode != "live":
