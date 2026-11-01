@@ -1,6 +1,5 @@
 """PredictionEngine: a model's per-row ``predict`` / column ``predict_batch`` behind one dispatcher that coalesces
-requests across episodes into batches on the server's model thread.  ``PredictModelServer`` is one instance;
-episode loops call ``infer`` / ``infer_one`` for fresh inference with cross-episode batching."""
+requests across episodes into batches on the server's model thread (``PredictModelServer`` forwards to one)."""
 
 from __future__ import annotations
 
@@ -37,28 +36,15 @@ class _Request:
     obs: Batch
     rows: Rows
     wait: bool  # may wait max_wait_time for other connections' requests
-    raw: bool = False  # infer(): the model's full output, no chunk buffers
     done: anyio.Event = field(default_factory=anyio.Event)
     actions: Batch = field(default_factory=dict)
     errors: dict[int, Exception] = field(default_factory=dict)
     queued_at: float = field(default_factory=anyio.current_time)
-    dispatched: bool = False
-
-
-@dataclass
-class PredictionResult:
-    actions: Batch  # successful rows, in their relative order
-    errors: dict[int, Exception]  # by position in the submitted Rows
 
 
 class PredictionEngine:
-    """Args:
-    predict / predict_batch: the model (``predict_batch`` wins; the default runs ``predict`` per row).
-    reset / finish: the episode hooks, on the model thread.
-    chunk_size: Actions per inference for the observation path; the rest of each ``[T, D]`` chunk is buffered.
-    max_batch_size: Most rows per ``predict_batch`` call (``None``: no limit).
-    max_wait_time: Seconds to wait for other requests before inferring a partial batch.
-    """
+    """``predict_batch`` wins over per-row ``predict``; ``reset`` / ``finish`` run on the model thread; the rest is
+    ``PredictModelServer``'s (``chunk_size``, ``max_batch_size``, ``max_wait_time``)."""
 
     def __init__(
         self,
@@ -119,7 +105,17 @@ class PredictionEngine:
         self._queue.append(req)
         self._wake.set()
         await req.done.wait()
-        await reply_prediction(self.server, rows, PredictionResult(req.actions, req.errors))
+        if not req.errors:
+            await self.server.send_action(rows, req.actions)
+            return
+        ok = [i for i in range(len(rows)) if i not in req.errors]
+        if ok:
+            await self.server.send_action(rows.take(ok), req.actions)
+        by_error: dict[int, tuple[Exception, list[int]]] = {}
+        for i, exc in req.errors.items():
+            by_error.setdefault(id(exc), (exc, []))[1].append(i)
+        for exc, positions in by_error.values():
+            await self.server.send_error(rows.take(positions), exc)
 
     async def on_episode_end(self, rows: Rows, results: list[EpisodeResult]) -> None:
         try:
@@ -128,47 +124,6 @@ class PredictionEngine:
         finally:
             for rid in rows.ids.tolist():
                 self._buffers.pop(rid, None)
-
-    # ------------------------------------------------------------------
-    # Raw inference for episode loops
-    # ------------------------------------------------------------------
-
-    async def infer(self, obs: Batch, rows: Rows, *, wait_for_batch: bool = True) -> PredictionResult:
-        """Fresh inference of ``rows`` (a row each of ``obs``) on the model thread, batched with other callers'
-        requests within ``max_wait_time``; the full output, no chunk buffers.  Rows that ended fail."""
-        await checkpoint()
-        if self._stopping:
-            raise RuntimeError("model server stopped")
-        req = _Request(obs, rows, wait=wait_for_batch, raw=True)
-        self._queue.append(req)
-        self._wake.set()
-        try:
-            await req.done.wait()
-        except BaseException:
-            if not req.dispatched:  # still queued: withdrawn
-                if req in self._queue:
-                    self._queue.remove(req)
-                self._wake.set()
-            else:  # running: returns only after the model call
-                with anyio.CancelScope(shield=True):
-                    await req.done.wait()
-            raise
-        return PredictionResult(req.actions, req.errors)
-
-    async def infer_one(self, obs: Observation, row: Row, *, wait_for_batch: bool = True) -> Action:
-        """:meth:`infer` for one row of a running episode; raises that row's error."""
-        server, rid = self.server, row.id
-        if not (0 <= rid < server._size and server._table[rid] is row.episode) or server._closing[rid]:
-            raise EpisodeClosed("the episode ended")
-        if rid in server._failed:
-            raise EpisodeClosed("the episode failed")
-        idx = np.asarray([rid], np.int64)  # this incarnation, at the row's own step
-        rows = Rows(idx, np.asarray([row.step], np.int64), server._table[idx], server._gen[idx])
-        result = await self.infer(columns.stack([obs]), rows, wait_for_batch=wait_for_batch)
-        if result.errors:
-            error = result.errors[0]
-            raise EpisodeClosed(str(error)) if error is _ENDED else error
-        return columns.split(result.actions, 1)[0]
 
     # ------------------------------------------------------------------
     # Dispatch: coalesce requests, serve chunk buffers, infer
@@ -193,23 +148,15 @@ class PredictionEngine:
                 if self.max_wait_time > 0 and not self._full() and all(r.wait for r in self._queue):
                     deadline = self._queue[0].queued_at + self.max_wait_time  # from the oldest request's arrival
                     with anyio.CancelScope(deadline=deadline):
-                        while self._queue and not self._full() and all(r.wait for r in self._queue):
+                        while not self._full() and all(r.wait for r in self._queue):
                             await self._wake.wait()
                             self._wake = anyio.Event()
-                    if not self._queue:  # withdrawn meanwhile
-                        continue
                 batch = [self._queue.pop(0)]
                 rows = len(batch[0].rows)
                 limit = self.max_batch_size
-                while (
-                    self._queue
-                    and self._queue[0].raw == batch[0].raw
-                    and (limit is None or rows + len(self._queue[0].rows) <= limit)
-                ):
+                while self._queue and (limit is None or rows + len(self._queue[0].rows) <= limit):
                     rows += len(self._queue[0].rows)
                     batch.append(self._queue.pop(0))
-                for r in batch:
-                    r.dispatched = True
                 await self._run(batch)
 
     def _full(self) -> bool:
@@ -230,7 +177,7 @@ class PredictionEngine:
         else:
             obs, rows = batch[0].obs, batch[0].rows
         try:
-            actions, errors = await self._infer(obs, rows, batch[0].raw)
+            actions, errors = await self._infer(obs, rows)
             start = ok_seen = 0
             for r in batch:
                 n = len(r.rows)
@@ -247,7 +194,7 @@ class PredictionEngine:
         finally:  # cancelled
             _fail(batch, _STOPPED)
 
-    async def _infer(self, obs: Batch, rows: Rows, raw: bool = False) -> tuple[Batch, dict[int, Exception]]:
+    async def _infer(self, obs: Batch, rows: Rows) -> tuple[Batch, dict[int, Exception]]:
         """The actions of every position that did not fail, in order, and the failures by position.  One
         model-thread call."""
         n = len(rows)
@@ -257,7 +204,7 @@ class PredictionEngine:
         errors: dict[int, Exception] = {}
         if not current.all():  # ended while queued: not inferred
             errors = dict.fromkeys(np.flatnonzero(~current).tolist(), _ENDED)
-        chunked = [] if raw else np.flatnonzero(self._chunked[ids] & current).tolist()
+        chunked = np.flatnonzero(self._chunked[ids] & current).tolist()
         served: dict[int, Any] = {}
         for i in chunked:
             buffer = self._buffers.get(int(ids[i]))
@@ -268,8 +215,6 @@ class PredictionEngine:
         if todo:
             failed, parts = await self.server._run_submitted(self._work, obs, rows, todo)
             errors.update(failed)
-        if raw and parts and not (current := self.server._current(rows)).all():  # ended during the call
-            parts = [_drop_ended(positions, out, current, errors) for positions, out in parts]
         if not chunked:
             return columns.concat([p for _, p in parts]), errors
         # A chunked row returns its chunk's first action and keeps the rest; every row returns "actions" only.
@@ -334,31 +279,6 @@ class PredictionEngine:
             except Exception as exc:
                 failed[i] = exc
         return columns.stack(out), failed
-
-
-async def reply_prediction(server: ModelServer, rows: Rows, result: PredictionResult) -> None:
-    """Answer ``rows`` with ``result``: its actions to the rows that succeeded, each error to its rows."""
-    actions, errors = result.actions, result.errors
-    if not errors:
-        await server.send_action(rows, actions)
-        return
-    ok = [i for i in range(len(rows)) if i not in errors]
-    if ok:
-        await server.send_action(rows.take(ok), actions)
-    by_error: dict[int, tuple[Exception, list[int]]] = {}
-    for i, exc in errors.items():
-        by_error.setdefault(id(exc), (exc, []))[1].append(i)
-    for exc, positions in by_error.values():
-        await server.send_error(rows.take(positions), exc)
-
-
-def _drop_ended(
-    positions: list[int], out: Batch, current: np.ndarray, errors: dict[int, Exception]
-) -> tuple[list[int], Batch]:
-    """``positions`` and their rows of ``out`` whose episode still runs; the others fail as ended."""
-    keep = [j for j, i in enumerate(positions) if current[i]]
-    errors.update({i: _ENDED for i in positions if not current[i]})
-    return [positions[j] for j in keep], columns.take(out, keep) if len(keep) < len(positions) else out
 
 
 def _fail(requests: list[_Request], exc: Exception) -> None:

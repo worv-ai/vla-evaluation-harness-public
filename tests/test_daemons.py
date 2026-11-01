@@ -1,5 +1,5 @@
 """Episode daemons: one scope per episode (mailbox, tasks, model calls, clock), the one exception policy and the
-teardown order; PredictionEngine's raw inference; chrono's SupervisorHost inside an episode."""
+teardown order; chrono's SupervisorHost inside an episode."""
 
 from __future__ import annotations
 
@@ -27,7 +27,6 @@ from vla_eval.model_servers.daemons import (
     ObservationRequest,
     episode_daemon,
 )
-from vla_eval.model_servers.engine import PredictionEngine
 from vla_eval.protocol.messages import MessageType
 from vla_eval.runners.live_runner import LiveEpisodeRunner
 from vla_eval.runners.sync_runner import SyncEpisodeRunner
@@ -760,112 +759,6 @@ async def test_end_stops_the_host_after_the_daemons_call_and_before_finish():
 
 
 # ---------------------------------------------------------------------------
-# PredictionEngine: raw inference from episode loops
-# ---------------------------------------------------------------------------
-
-
-class Raw(Daemon):
-    """Each episode's loop calls a shared engine's infer_one: cross-episode batches on the model thread."""
-
-    def __init__(self, **kw: Any) -> None:
-        super().__init__(**kw)
-        self.batches: list[tuple[list[int], str]] = []
-        self.steps: list[list[int]] = []
-        self.engine = PredictionEngine(self, predict_batch=self._forward, max_batch_size=8, max_wait_time=0.2)
-
-    def _forward(self, obs, rows):
-        self.batches.append((rows.ids.tolist(), threading.current_thread().name))
-        self.steps.append(rows.step.tolist())
-        v = np.asarray(obs["value"], np.float32)
-        return {"actions": v[:, None, None] + np.arange(6, dtype=np.float32).reshape(1, 3, 2)}  # full chunks
-
-    async def on_serve_start(self, tg):
-        await super().on_serve_start(tg)
-        await self.engine.on_serve_start(tg)
-
-    async def run(self, ep: EpisodeContext) -> None:
-        async for req in ep.observations():
-            chunk = await self.engine.infer_one(req.obs, req.row)
-            await req.reply({"actions": chunk["actions"][0]})
-            ep.logger.debug("chunk %s", chunk["actions"].shape)
-            self.shapes.append(np.shape(chunk["actions"]))
-
-    shapes: list[tuple[int, ...]] = []
-
-
-@pytest.mark.anyio
-async def test_infer_one_batches_episodes_on_the_model_thread_and_returns_full_chunks():
-    server = Raw()
-    server.shapes = []
-    async with serving(server):
-        a, b = await _start(server, 2)
-        async with anyio.create_task_group() as tg:
-            tg.start_soon(_observe, server, a, 1.0)
-            tg.start_soon(_observe, server, b, 2.0)
-    assert server.batches == [([a, b], "model_0")] and server.shapes == [(3, 2), (3, 2)]
-    assert server.steps == [[0, 0]]  # each observation's own step
-
-
-@pytest.mark.anyio
-async def test_infer_one_refuses_a_stale_row():
-    server = Raw()
-    async with serving(server):
-        (rid,) = await _start(server)
-        row = server._rows([rid])[0]
-        await server._end_episodes([rid], [{}])
-        await _start(server)  # the same id, another episode
-        with pytest.raises(EpisodeClosed):
-            await server.engine.infer_one({"value": np.float32(1.0)}, row)
-    assert server.batches == []
-
-
-@pytest.mark.anyio
-async def test_infer_cancelled_while_queued_is_withdrawn_and_while_running_waits_for_the_call():
-    server = Raw()
-    server.engine.max_wait_time = 0.5
-    async with serving(server):
-        (rid,) = await _start(server)
-        rows = server._rows([rid])
-        obs = {"value": np.asarray([1.0], np.float32)}
-        with anyio.move_on_after(0.05):  # queued, waiting for a batch
-            await server.engine.infer(obs, rows)
-        assert server.engine._queue == [] and server.batches == []
-
-        def slow_forward(o, r):
-            time.sleep(0.2)
-            return {"actions": np.zeros((len(r), 2), np.float32)}
-
-        server.engine.predict_batch = slow_forward
-        t0 = time.monotonic()
-        with anyio.move_on_after(0.05):
-            await server.engine.infer(obs, rows, wait_for_batch=False)
-        assert time.monotonic() - t0 >= 0.2  # joined the model call before re-raising
-
-
-@pytest.mark.anyio
-async def test_a_stopped_engine_refuses_and_fails_whats_queued():
-    server = Raw()
-    server.engine.max_wait_time = 5.0
-    got: list[Any] = []
-    async with serving(server) as tg:
-        (rid,) = await _start(server)
-
-        async def infer() -> None:
-            try:
-                await server.engine.infer({"value": np.asarray([1.0], np.float32)}, server._rows([rid]))
-            except Exception as exc:
-                got.append(exc)
-            else:
-                got.append("result")
-
-        tg.start_soon(infer)
-        await anyio.sleep(0.05)
-    assert server.engine._stopping
-    with pytest.raises(RuntimeError, match="stopped"):
-        await server.engine.infer({"value": np.asarray([1.0], np.float32)}, server._rows([rid]))
-
-
-# ---------------------------------------------------------------------------
 # A plain-function run over a real socket
 # ---------------------------------------------------------------------------
 
@@ -914,29 +807,3 @@ async def test_the_hooks_run_on_the_model_thread():
         await _observe(server, rid, 1.0)
         await server._end_episodes([rid], [{}])
     assert server.threads == {"model_0"}
-
-
-@pytest.mark.anyio
-async def test_infer_drops_a_row_that_ended_during_the_model_call():
-    server = Raw()
-
-    def slow_forward(o, r):
-        time.sleep(0.2)
-        return {"actions": np.zeros((len(r), 2), np.float32)}
-
-    server.engine.predict_batch = slow_forward
-    async with serving(server):
-        a, b = await _start(server, 2)
-        rows = server._rows([a, b])
-        got: list[Any] = []
-
-        async def infer() -> None:
-            got.append(await server.engine.infer({"value": np.asarray([1.0, 2.0], np.float32)}, rows))
-
-        async with anyio.create_task_group() as tg:
-            tg.start_soon(infer)
-            await anyio.sleep(0.05)
-            server._gen[a] += 1  # a ends while the call runs
-    (result,) = got
-    assert list(result.errors) == [0] and isinstance(result.errors[0], EpisodeClosed)
-    assert np.asarray(result.actions["actions"]).shape == (1, 2)  # b's alone
