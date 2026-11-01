@@ -12,7 +12,7 @@
 # vla-eval = { path = "../../..", editable = true }
 #
 # [tool.uv]
-# exclude-newer = "2026-10-31T00:00:00Z"
+# exclude-newer = "2026-11-01T13:00:00Z"
 # ///
 """Real-Time Chunking (arXiv:2506.07339) on Kinetix, with the official sampling code.
 
