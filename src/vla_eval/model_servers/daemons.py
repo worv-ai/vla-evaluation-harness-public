@@ -56,6 +56,7 @@ _SETTLE_ROUNDS = 8  # off asyncio: checkpoints a woken sync task gets to block b
 _MAX_SETTLE_ROUNDS = 10_000  # an episode task still running after this many checkpoints fails its sync episode
 _EPS = 1e-9  # sim seconds: deadlines this close are one instant (float error between n * period and k * step_dt)
 _EPISODE: contextvars.ContextVar[EpisodeContext | None] = contextvars.ContextVar("vla_eval_episode", default=None)
+_OWNER: weakref.WeakKeyDictionary[asyncio.Task[Any], EpisodeContext] = weakref.WeakKeyDictionary()  # Python < 3.12
 
 T = TypeVar("T")
 Mode = Literal["sync", "live"]
@@ -363,7 +364,7 @@ def _join(ep: EpisodeContext) -> None:
         return
     _EPISODE.set(ep)
     if sys.version_info < (3, 12):
-        ep._mine.add(task)
+        _own(task, ep)
         loop = task.get_loop()
         if not getattr(loop.get_task_factory(), "_vla_eval_episodes", False):
             loop.set_task_factory(_episode_task_factory(loop.get_task_factory()))
@@ -374,11 +375,18 @@ def _episode_task_factory(inner: Any) -> Any:
         task = asyncio.Task(coro, loop=loop, **kwargs) if inner is None else inner(loop, coro, **kwargs)
         context = kwargs.get("context")
         if (ep := _EPISODE.get() if context is None else context.get(_EPISODE)) is not None:
-            ep._mine.add(task)
+            _own(task, ep)
         return task
 
     factory._vla_eval_episodes = True  # ty: ignore[unresolved-attribute]
     return factory
+
+
+def _own(task: asyncio.Task[Any], ep: EpisodeContext) -> None:
+    if (previous := _OWNER.get(task)) is not None:
+        previous._mine.discard(task)
+    _OWNER[task] = ep
+    ep._mine.add(task)
 
 
 def _runnable(task: asyncio.Task[Any]) -> bool:

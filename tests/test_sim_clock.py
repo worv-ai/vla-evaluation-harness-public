@@ -212,6 +212,36 @@ async def test_a_task_belongs_to_the_episode_of_its_context(where):
         assert "sim time cannot move on" in str(pending.errors[0])
 
 
+@pytest.mark.anyio
+async def test_a_task_started_on_another_episode_belongs_to_that_episode():
+    eps: dict[int, EpisodeContext] = {}
+    go = anyio.Event()
+
+    async def spin() -> None:
+        while True:
+            await checkpoint()
+
+    async def run(ep: EpisodeContext) -> None:
+        eps[ep.row_id] = ep
+        async for req in ep.observations():
+            if req.row.step == 1 and ep.row_id == a:
+                eps[b].start_soon(spin)  # from a's task, onto b
+                go.set()
+            await _reply(req)
+
+    server = Daemon(run, step_dt=0.25)
+    async with serving(server):
+        a, b = await start(server, n=2)
+        await observe(server, b, 0)
+        for v in range(2):
+            assert not (await observe(server, a, v)).errors
+        await go.wait()
+        for v in range(2, 5):  # a's time moves on while b's spinner runs
+            assert not (await observe(server, a, v)).errors
+        failed = await observe(server, b, 1)
+    assert "sim time cannot move on" in str(failed.errors[0])
+
+
 @pytest.mark.skipif(sys.version_info < (3, 12), reason="eager task factories are Python 3.12+")
 @pytest.mark.anyio
 async def test_episodes_keep_an_eager_task_factory_working():
