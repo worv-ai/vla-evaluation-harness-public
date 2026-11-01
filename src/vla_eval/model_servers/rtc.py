@@ -141,7 +141,7 @@ class KinetixRTCServer(DaemonModelServer):
             raise ValueError(f"need 0 <= delay <= horizon, horizon >= 1, horizon + delay <= {H}")
         if method == "bid" and bid_k is not None and weak_checkpoint_dir is None:
             raise ValueError("BID with bid_k needs weak_checkpoint_dir")
-        super().__init__(backlog=64, control_hz=hz, max_rows=max_rows, warn_unadvanced=False)
+        super().__init__(backlog=64, control_hz=hz, max_rows=max_rows)
         self.checkpoint_dir, self.rtc_src_path, self.weak_checkpoint_dir = (
             checkpoint_dir,
             rtc_src_path,
@@ -196,7 +196,8 @@ class KinetixRTCServer(DaemonModelServer):
 
         return model
 
-    def warmup(self, rows: Rows) -> None:
+    def _warm(self) -> None:
+        """Load every level and compile once (model thread, before the first EPISODE_READY)."""
         import flax.nnx as nnx
         import jax
 
@@ -243,6 +244,8 @@ class KinetixRTCServer(DaemonModelServer):
         return np.asarray(self._sample_fn(self._states[level], self._weak.get(level), key, obs, prev))
 
     def reset_episodes(self, rows: Rows) -> dict[int, Exception] | None:
+        if not self._states:
+            self._warm()
         failed: dict[int, Exception] = {}
         for i, (rid, episode) in enumerate(zip(rows.ids.tolist(), rows.episodes)):
             level = (episode.config.get("task") or {}).get("level")
@@ -301,14 +304,15 @@ class KinetixRTCServer(DaemonModelServer):
         last_j: int | None = None
         async for req in ep.observations():
             # The benchmark's env step, when it sends one: a gated start repeats step 0 until the first action.
-            j = int(req.obs.get("env_step", req.step))
-            row: dict[str, Any] = {"step": req.step, "p": j, "admitted_wall": req.admitted_wall}
+            admitted = req.admitted_at if ep.can_publish else time.monotonic()  # live: WallClock, monotonic
+            j = int(req.obs.get("env_step", req.row.step))
+            row: dict[str, Any] = {"step": req.row.step, "p": j, "admitted_wall": admitted}
             if j == last_j:  # the env did not move: same slot again, latency counted from this observation
-                anchors[j] = req.admitted_wall
+                anchors[j] = admitted
                 row["repeat"] = True
             else:
                 last_j = j
-                anchors[j] = req.admitted_wall
+                anchors[j] = admitted
                 if j == 0 and not self.first_chunk_delayed:
                     init = _Inference(-1, 0, -1)
                     await infer(init, req, None)  # official: no delay for the initial chunk

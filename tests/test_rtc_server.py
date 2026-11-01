@@ -22,9 +22,7 @@ class FakeSampler(KinetixRTCServer):
     def __init__(self, **kw: Any) -> None:
         super().__init__(checkpoint_dir="unused", action_dim=1, **kw)
         self.calls = 0
-
-    def warmup(self, rows: Any) -> None:
-        self._states = {"lvl": None}
+        self._states = {"lvl": None}  # no checkpoints: _warm never runs
 
     def _infer(self, st: _RowState, obs: np.ndarray, prev: np.ndarray | None) -> tuple[np.ndarray, float]:
         i, self.calls = self.calls, self.calls + 1
