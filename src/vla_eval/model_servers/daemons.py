@@ -303,9 +303,8 @@ def episode_daemon(
 
 
 class EpisodeDaemons:
-    """One scope per started row running ``run(ep)``; a ``ModelServer`` forwards its lifecycle callbacks and
-    ``on_episode_failed``.  ``backlog``: ``"latest"`` or a FIFO bound; ``control_hz``: the default ``ep.sim_dt``
-    rate; ``reset`` / ``finish``: model-thread hooks; ``requires``: client capabilities (unmet starts fail)."""
+    """One scope per started row running ``run(ep)``; a ``ModelServer`` forwards its callbacks, ``on_episode_failed``
+    too.  ``backlog``: ``"latest"`` or a FIFO bound; ``control_hz``: default rate; unmet ``requires`` fail starts."""
 
     def __init__(
         self,
