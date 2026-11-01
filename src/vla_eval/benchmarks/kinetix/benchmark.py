@@ -33,6 +33,9 @@ ACTION_DIM = 6
 # Default max timesteps per episode (RTC paper)
 MAX_TIMESTEPS = 256
 
+# Most ticks a gated start waits for the first action before env time starts anyway
+MAX_PRE_START_TICKS = 64
+
 # The 12 tasks from the RTC paper (arXiv:2506.07339, Table 1).
 # Each level file lives under the "l/" (large) size directory.
 RTC_12_TASKS = [
@@ -89,9 +92,13 @@ class KinetixBenchmark(StepBenchmark):
             levels. Falls back to kinetix built-in levels if None.
         observation_type: ``"pixels"`` (default) for rendered images, or
             ``"symbolic"`` for the flat symbolic state vector used by RTC.
+        action_noise_std: Gaussian noise added to every applied action (RTC: 0.1).
+        start_on_first_action: Env time starts with the first policy action: holds before it (live ticks while
+            the first inference runs) do not step the env, at most ``MAX_PRE_START_TICKS`` of them.  Observations
+            carry ``env_step``.
     """
 
-    _ALL_RECORD_FIELDS = frozenset({"reward", "done", "success", "action", "t_wall"})
+    _ALL_RECORD_FIELDS = frozenset({"reward", "done", "success", "action", "t_wall", "hold", "pre_start"})
 
     # No GL involved: frames are computed in JAX, so "CPU rendering" is just a CPU device.
     render_backends = frozenset({"gpu", "cpu"})
@@ -108,6 +115,7 @@ class KinetixBenchmark(StepBenchmark):
         rtc_worlds_dir: str | None = None,
         observation_type: str = "pixels",
         action_noise_std: float = 0.0,
+        start_on_first_action: bool = True,
     ) -> None:
         super().__init__()
         self._task_names = tasks
@@ -118,6 +126,10 @@ class KinetixBenchmark(StepBenchmark):
             raise ValueError(f"observation_type must be 'pixels' or 'symbolic', got {observation_type!r}")
         self._observation_type = observation_type
         self._action_noise_std = action_noise_std
+        self._start_on_first_action = start_on_first_action
+        self._started = False
+        self._pre_start_ticks = 0
+        self._raw_obs: Any = None
 
         # Lazy-initialized JAX state
         self._env = None
@@ -239,6 +251,9 @@ class KinetixBenchmark(StepBenchmark):
         self._rng = rng
         self._step_count = 0
         self._episode_success = False
+        self._started = not self._start_on_first_action
+        self._pre_start_ticks = 0
+        self._raw_obs = obs
 
         self._recorder.record_video(self._extract_frame(obs))
         return obs
@@ -248,6 +263,13 @@ class KinetixBenchmark(StepBenchmark):
         t_wall = time.monotonic()
         jax = self._jax
         jnp = self._jnp
+
+        if not self._started and action.get("hold") and self._pre_start_ticks < MAX_PRE_START_TICKS:
+            # Gated start: the scene is released by the first policy action, so a hold before it does not step.
+            self._pre_start_ticks += 1
+            self._recorder.record_step(reward=0.0, done=False, success=False, pre_start=True, t_wall=t_wall)
+            return StepResult(obs=self._raw_obs, reward=0.0, done=False, info={})
+        self._started = True
 
         raw_action = action.get("actions", action.get("action"))
         raw_action = np.atleast_1d(np.asarray(raw_action, dtype=np.float32))
@@ -275,6 +297,7 @@ class KinetixBenchmark(StepBenchmark):
 
         obs, env_state, reward, done, info = self._jit_step(step_rng, self._env_state, jax_action, self._env_params)
         self._env_state = env_state
+        self._raw_obs = obs
         self._step_count += 1
 
         # Convert JAX scalars to Python
@@ -287,7 +310,12 @@ class KinetixBenchmark(StepBenchmark):
 
         self._recorder.record_video(self._extract_frame(obs))
         self._recorder.record_step(
-            reward=reward_val, done=done_val, success=self._episode_success, action=raw_action.tolist(), t_wall=t_wall
+            reward=reward_val,
+            done=done_val,
+            success=self._episode_success,
+            action=raw_action.tolist(),
+            t_wall=t_wall,
+            **({"hold": True} if action.get("hold") else {}),
         )
 
         return StepResult(obs=obs, reward=reward_val, done=done_val, info=info)
@@ -305,7 +333,7 @@ class KinetixBenchmark(StepBenchmark):
         if self._observation_type == "symbolic":
             # raw_obs is a flat JAX array (symbolic state vector, ~679-dim)
             state = np.asarray(raw_obs, dtype=np.float32)
-            return {"state": state, "task_description": task["name"]}
+            return {"state": state, "task_description": task["name"], "env_step": self._step_count}
 
         # raw_obs is a PixelsObservation with .image (H×W×3 float32 in [0,1])
         img = np.asarray(raw_obs.image)
@@ -317,6 +345,7 @@ class KinetixBenchmark(StepBenchmark):
         obs_dict: dict[str, Any] = {
             "images": {"viewport": img},
             "task_description": task["name"],
+            "env_step": self._step_count,
         }
         return obs_dict
 
@@ -325,17 +354,17 @@ class KinetixBenchmark(StepBenchmark):
 
     def get_step_result(self, step_result: StepResult) -> EpisodeResult:
         # Success if the goal was reached at any step (Kinetix's ``returned_episode_solved``)
-        return {"success": self._episode_success}
+        return {"success": self._episode_success, "pre_start_ticks": self._pre_start_ticks}
 
     def get_metadata(self) -> dict[str, Any]:
         return {
-            "max_steps": self._max_episode_steps,
+            "max_steps": self._max_episode_steps + (MAX_PRE_START_TICKS if self._start_on_first_action else 0),
             "action_dim": ACTION_DIM,
         }
 
     def get_hold_action(self, last_action: Action | None) -> Action:
         # Motors take a velocity target (0 = motor off), thrusters a force: zero is Kinetix's noop_action.
-        return {"actions": np.zeros(ACTION_DIM, dtype=np.float32)}
+        return {"actions": np.zeros(ACTION_DIM, dtype=np.float32), "hold": True}
 
     def get_action_spec(self) -> dict[str, DimSpec]:
         return {"actions": RAW}

@@ -13,6 +13,7 @@ from vla_eval.runners.live_runner import LiveEpisodeRunner
 from vla_eval.runners.sync_runner import SyncEpisodeRunner
 
 from tests.conftest import StubBenchmark, start_server, stop_server
+from vla_eval.benchmarks.base import StepResult
 
 
 class FakeSampler(KinetixRTCServer):
@@ -31,17 +32,30 @@ class FakeSampler(KinetixRTCServer):
 
 
 class Recorder(StubBenchmark):
+    """Observations carry ``env_step``; a hold before the first action does not step (Kinetix's gated start)."""
+
     def __init__(self, steps: int) -> None:
         super().__init__(done_at_step=steps, num_tasks=1)
         self.applied: list[float] = []
+        self.pre_start = 0
 
     def get_tasks(self) -> list[dict[str, Any]]:
         return [{"name": "t", "level": "lvl"}]
 
+    def reset(self, task: dict[str, Any]) -> Any:
+        self.applied, self.pre_start = [], 0
+        return super().reset(task)
+
     def make_obs(self, raw_obs: Any, task: dict[str, Any]) -> dict[str, Any]:
-        return {"state": np.zeros(3, np.float32)}
+        return {"state": np.zeros(3, np.float32), "env_step": len(self.applied)}
+
+    def get_hold_action(self, last_action: Any) -> dict[str, Any]:
+        return {"actions": np.zeros(1, np.float32), "hold": True}
 
     def step(self, action: dict[str, Any]) -> Any:
+        if action.get("hold") and not self.applied:
+            self.pre_start += 1
+            return StepResult(obs=None, reward=0.0, done=False, info={})
         self.applied.append(float(np.asarray(action["actions"]).reshape(-1)[0]))
         return super().step(action)
 
@@ -71,28 +85,17 @@ async def test_sync_steps_latency_executes_the_official_schedule(free_port, d, s
 
 
 @pytest.mark.anyio
-async def test_live_wall_latency_lands_mid_period_after_the_holding_first_tick(free_port):
+async def test_live_wall_latency_lands_mid_period_after_a_gated_start(free_port):
     d, s, n = 1, 2, 16
     task = await start_server(FakeSampler(delay=d, horizon=s, latency="wall"), free_port)
     bench = Recorder(steps=n)
     try:
         async with Connection(f"ws://127.0.0.1:{free_port}") as conn:
-            await LiveEpisodeRunner(hz=10.0).run_episode(bench, bench.get_tasks()[0], conn, max_steps=n)
+            await LiveEpisodeRunner(hz=10.0).run_episode(bench, bench.get_tasks()[0], conn, max_steps=n + 4)
     finally:
         await stop_server(task)
-    assert bench.applied == [0.0, *official(d, s, n - 1)]  # tick 0 holds; protocol step j is tick j + 1
-
-
-@pytest.mark.anyio
-async def test_sync_initial_hold_replays_the_live_first_tick(free_port):
-    task = await start_server(FakeSampler(delay=2, horizon=2, initial_hold=True), free_port)
-    bench = Recorder(steps=12)
-    try:
-        async with Connection(f"ws://127.0.0.1:{free_port}") as conn:
-            await SyncEpisodeRunner().run_episode(bench, bench.get_tasks()[0], conn, max_steps=12)
-    finally:
-        await stop_server(task)
-    assert bench.applied == [0.0, *official(2, 2, 11)]
+    assert bench.pre_start >= 1  # tick 0 comes before any action
+    assert bench.applied == official(d, s, n)
 
 
 def test_rejects_an_impossible_schedule():

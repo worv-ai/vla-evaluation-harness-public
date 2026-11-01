@@ -97,9 +97,9 @@ class KinetixRTCServer(DaemonModelServer):
     """Official RTC / BID / naive chunk execution for the 12 Kinetix levels (one checkpoint per level).
 
     Each observation is answered with the plan's action for its step (``reply`` in sync, ``publish`` in live), so
-    the step index, not a time grid, decides which slot a tick gets.  Live, protocol step 0 is the second observation:
-    the first is sent right before tick 0, which holds; ``initial_hold`` applies the same zero action first in sync.  A boundary's chunk lands ``delay`` steps later
-    (``latency="steps"``) or after ``(delay - 1/2) / hz`` (``"wall"``) / ``delay / hz`` (``"wall_exact"``) seconds
+    the step index, not a time grid, decides which slot a tick gets: the benchmark's ``env_step`` when the observation
+    carries one (Kinetix holds its env until the first action), else its index.  A boundary's chunk lands ``delay``
+    steps later (``latency="steps"``) or after ``(delay - 1/2) / hz`` (``"wall"``) / ``delay / hz`` (``"wall_exact"``) seconds
     since its observation's admission, compute included (live only).  The initial chunk (official: computed with
     no delay before the loop) is exempt unless ``first_chunk_delayed``, in which case the first steps get no action.
 
@@ -124,7 +124,6 @@ class KinetixRTCServer(DaemonModelServer):
         horizon: int = 1,
         latency: Latency = "steps",
         first_chunk_delayed: bool = False,
-        initial_hold: bool = False,
         bid_n: int = 32,
         bid_k: int | None = 3,
         beta: float = 5.0,
@@ -149,7 +148,7 @@ class KinetixRTCServer(DaemonModelServer):
             weak_checkpoint_dir,
         )
         self.method, self.delay, self.horizon, self.latency = method, delay, horizon, latency
-        self.first_chunk_delayed, self.initial_hold = first_chunk_delayed, initial_hold
+        self.first_chunk_delayed = first_chunk_delayed
         self.bid_n, self.bid_k, self.beta, self.flow_steps = bid_n, bid_k, beta, flow_steps
         self.obs_dim, self.action_dim = obs_dim, action_dim
         self._states: dict[str, Any] = {}  # level -> nnx.State
@@ -293,42 +292,43 @@ class KinetixRTCServer(DaemonModelServer):
             obs = np.asarray(req.obs["state"], np.float32)[None]
             inf.chunk, inf.infer_ms = await ep.call(self._infer, st, obs, prev)
             if land_after is not None and d > 0 and inf.k >= 0:  # injected latency, off the model thread
-                await anyio.sleep(max(0.0, req.admitted_wall + land_after - time.monotonic()))
+                while (wait := anchors[inf.t] + land_after - time.monotonic()) > 0:
+                    await anyio.sleep(wait)  # a repeated observation of step t moves the anchor
                 land(inf)
             inf.done.set()
 
-        # A live runner's tick 0 follows its first observation at once and holds, so protocol step 0 is the next one;
-        # ``initial_hold`` replays that hold in sync (the sync counterpart of a live run).
-        offset = 1 if ep.can_publish or self.initial_hold else 0
+        anchors: dict[int, float] = {}  # boundary step -> admission of its latest observation
+        last_j: int | None = None
         async for req in ep.observations():
-            j = req.step - offset
+            # The benchmark's env step, when it sends one: a gated start repeats step 0 until the first action.
+            j = int(req.obs.get("env_step", req.step))
             row: dict[str, Any] = {"step": req.step, "p": j, "admitted_wall": req.admitted_wall}
-            if j < 0:
-                if st.recorder is not None:
-                    st.recorder.record(row)
-                if not ep.can_publish:
-                    await req.reply({"actions": np.zeros(self.action_dim, np.float32)})
-                continue
-            if j == 0 and not self.first_chunk_delayed:
-                init = _Inference(-1, 0, -1)
-                await infer(init, req, None)  # official: no delay for the initial chunk
-                land(init)
-            if land_after is None and d > 0 and (inf := pending.pop(j - d, None)) is not None:
-                await inf.done.wait()
-                land(inf)
-            if j % s == 0:
-                prev = np.zeros((1, H, self.action_dim), np.float32)
-                if plan is not None:
-                    tail = plan.chunk[j - plan.t :]
-                    prev[0, : len(tail)] = tail  # the official frame shift, zero-padded
-                inf = _Inference(j // s, j, -2 if plan is None else plan.k)
-                if land_after is None or d == 0:
-                    pending[j] = inf
-                ep.start_soon(infer, inf, req, prev)
-                if d == 0:
+            if j == last_j:  # the env did not move: same slot again, latency counted from this observation
+                anchors[j] = req.admitted_wall
+                row["repeat"] = True
+            else:
+                last_j = j
+                anchors[j] = req.admitted_wall
+                if j == 0 and not self.first_chunk_delayed:
+                    init = _Inference(-1, 0, -1)
+                    await infer(init, req, None)  # official: no delay for the initial chunk
+                    land(init)
+                if land_after is None and d > 0 and (inf := pending.pop(j - d, None)) is not None:
                     await inf.done.wait()
-                    land(pending.pop(j))
-                row.update(infer_k=inf.k, prev_k=inf.prev_k)
+                    land(inf)
+                if j % s == 0:
+                    prev = np.zeros((1, H, self.action_dim), np.float32)
+                    if plan is not None:
+                        tail = plan.chunk[j - plan.t :]
+                        prev[0, : len(tail)] = tail  # the official frame shift, zero-padded
+                    inf = _Inference(j // s, j, -2 if plan is None else plan.k)
+                    if land_after is None or d == 0:
+                        pending[j] = inf
+                    ep.start_soon(infer, inf, req, prev)
+                    if d == 0:
+                        await inf.done.wait()
+                        land(pending.pop(j))
+                    row.update(infer_k=inf.k, prev_k=inf.prev_k)
             age = None if plan is None else j - plan.t
             action = np.zeros(self.action_dim, np.float32)  # nothing planned for this step
             if plan is not None and j - plan.t < H:
