@@ -1,12 +1,10 @@
 """Sync sim time: the framework moves a sync episode's clock to ``k * step_dt`` before observation ``k`` is
-delivered, waking one sleeper at a time and settling its model calls; live episodes keep wall time."""
+delivered, waking one sleeper at a time and settling its ``ep.call`` s; live episodes keep wall time."""
 
 from __future__ import annotations
 
-import asyncio
-import contextvars
 import random
-import sys
+import threading
 import time
 from typing import Any
 
@@ -18,7 +16,7 @@ from chrono_daemon import WallClock
 
 from vla_eval.benchmarks.base import VectorStepBenchmark
 from vla_eval.connection import Connection
-from vla_eval.model_servers.daemons import _SETTLE_ROUNDS, EpisodeContext, ObservationRequest, SimClock
+from vla_eval.model_servers.daemons import SETTLE_ROUNDS, EpisodeContext, ObservationRequest, SimClock
 from vla_eval.recording import NullEpisodeRecorder
 from vla_eval.runners.base import ModelActError
 from vla_eval.runners.live_runner import LiveEpisodeRunner
@@ -110,13 +108,10 @@ async def test_decimal_periods_land_on_their_observations_without_drift():
 
 
 @pytest.mark.anyio
-async def test_async_work_and_child_tasks_before_a_call_finish_before_time_moves_on():
+async def test_a_fires_child_task_calls_finish_before_time_moves_on():
     done: list[tuple[str, float, float]] = []  # (who, tick, clock when its call returned)
-    admitted: list[float] = []
 
     async def work(who: str, t: float, ep: EpisodeContext) -> None:
-        for _ in range(50):  # async preprocessing: many scheduler hops before the model call
-            await checkpoint()
         await ep.call(time.sleep, 0.002)
         done.append((who, t, ep.clock.now()))
 
@@ -128,8 +123,6 @@ async def test_async_work_and_child_tasks_before_a_call_finish_before_time_moves
     async def run(ep: EpisodeContext) -> None:
         ep.start_soon(ticker, ep)
         async for req in ep.observations():
-            admitted.append(ep.clock.now())
-            assert all(t <= ep.clock.now() for _, t, _ in done)
             assert len(done) == 2 * int(ep.clock.now() / 0.25)  # every fire due so far has finished
             await _reply(req)
 
@@ -137,203 +130,53 @@ async def test_async_work_and_child_tasks_before_a_call_finish_before_time_moves
     async with serving(server):
         (rid,) = await start(server)
         for v in range(9):  # the last at 1.0
-            await observe(server, rid, v)
-    assert admitted == [k * 0.125 for k in range(9)]
+            assert not (await observe(server, rid, v)).errors
     assert sorted(done) == sorted((who, t, t) for who in ("child", "ticker") for t in (0.25, 0.5, 0.75, 1.0))
 
 
-@pytest.mark.parametrize("spawn", ["task group", "gather", "create_task"])
+@pytest.mark.parametrize(("hops", "settle_rounds", "held"), [(4, None, True), (40, 64, True), (40, None, False)])
 @pytest.mark.anyio
-async def test_tasks_an_episode_task_creates_hold_time_too(spawn):
+async def test_async_hops_before_a_call_are_covered_within_settle_rounds(hops, settle_rounds, held):
+    """The heuristic boundary: settling waits on ``ep.call`` s only once one has started, so a fire's async hops
+    before its call must fit in ``settle_rounds`` checkpoints (configurable) for the call to hold time."""
     done: list[tuple[float, float]] = []  # (tick, clock when its call returned)
-    keep: list[asyncio.Task[None]] = []
-
-    async def work(t: float, ep: EpisodeContext) -> None:
-        for _ in range(50):
-            await checkpoint()
-        await ep.call(time.sleep, 0.002)
-        done.append((t, ep.clock.now()))
 
     async def ticker(ep: EpisodeContext) -> None:
-        if spawn == "task group":  # as a chrono Supervisor hosts its daemons
-            async with anyio.create_task_group() as tg:
-                async for t in ep.clock.every(0.25):
-                    tg.start_soon(work, t, ep)
         async for t in ep.clock.every(0.25):
-            if spawn == "gather":
-                await asyncio.gather(work(t, ep))
-            else:
-                keep.append(asyncio.create_task(work(t, ep)))
-
-    async def run(ep: EpisodeContext) -> None:
-        ep.start_soon(ticker, ep)
-        async for req in ep.observations():
-            assert len(done) == int(ep.clock.now() / 0.25)
-            await _reply(req)
-
-    server = Daemon(run, step_dt=0.125)
-    async with serving(server):
-        (rid,) = await start(server)
-        for v in range(9):
-            pending = await observe(server, rid, v)
-            assert not pending.errors
-    assert done == [(t, t) for t in (0.25, 0.5, 0.75, 1.0)]
-
-
-@pytest.mark.parametrize("join", ["gather", "wait", "nested gather"])
-@pytest.mark.anyio
-async def test_a_task_resumed_by_a_completion_callback_runs_before_time_moves_on(join):
-    log: list[tuple[str, float]] = []
-
-    async def work() -> None:
-        for _ in range(5):
-            await checkpoint()
-
-    async def first(ep: EpisodeContext) -> None:
-        await ep.clock.sleep(0.1)
-        log.append(("first", ep.clock.now()))
-        if join == "gather":
-            await asyncio.gather(work())
-        elif join == "nested gather":  # a completion chain longer than any checkpoint budget
-            joined: Any = work()
-            for _ in range(3 * _SETTLE_ROUNDS):
-                joined = asyncio.gather(joined)
-            await joined
-        else:
-            await asyncio.wait([asyncio.ensure_future(work())])
-        await ep.clock.sleep(0.05)  # resumed through the join's callbacks: due at 0.15
-        log.append(("first again", ep.clock.now()))
-
-    async def second(ep: EpisodeContext) -> None:
-        await ep.clock.sleep(0.2)
-        log.append(("second", ep.clock.now()))
-
-    async def run(ep: EpisodeContext) -> None:
-        ep.start_soon(first, ep)
-        ep.start_soon(second, ep)
-        async for req in ep.observations():
-            await _reply(req)
-
-    server = Daemon(run, step_dt=0.25)
-    async with serving(server):
-        (rid,) = await start(server)
-        for v in range(2):
-            assert not (await observe(server, rid, v)).errors
-    assert log == [("first", 0.1), ("first again", 0.15000000000000002), ("second", 0.2)]
-
-
-@pytest.mark.parametrize("where", ["inside, fresh context", "outside, the episode's context"])
-@pytest.mark.anyio
-async def test_a_task_belongs_to_the_episode_of_its_context(where):
-    contexts: list[contextvars.Context] = []
-    keep: list[asyncio.Task[None]] = []
-
-    async def spin() -> None:
-        while True:  # never blocks: fails the episode it belongs to, once that episode's time moves
-            await checkpoint()
-
-    async def run(ep: EpisodeContext) -> None:
-        contexts.append(contextvars.copy_context())
-        if where.startswith("inside"):
-            keep.append(asyncio.get_running_loop().create_task(spin(), context=contextvars.Context()))
-        async for req in ep.observations():
-            await _reply(req)
-
-    server = Daemon(run, step_dt=0.25)
-    async with serving(server):
-        (rid,) = await start(server)
-        await observe(server, rid, 0)
-        if where.startswith("outside"):
-            keep.append(asyncio.get_running_loop().create_task(spin(), context=contexts[0]))
-        pending = await observe(server, rid, 1)
-        for task in keep:
-            task.cancel()
-    if where.startswith("inside"):
-        assert not pending.errors
-    else:
-        assert "sim time cannot move on" in str(pending.errors[0])
-
-
-@pytest.mark.anyio
-async def test_a_task_started_on_another_episode_belongs_to_that_episode():
-    eps: dict[int, EpisodeContext] = {}
-    go = anyio.Event()
-
-    async def spin() -> None:
-        while True:
-            await checkpoint()
-
-    async def run(ep: EpisodeContext) -> None:
-        eps[ep.row_id] = ep
-        async for req in ep.observations():
-            if req.row.step == 1 and ep.row_id == a:
-                eps[b].start_soon(spin)  # from a's task, onto b
-                go.set()
-            await _reply(req)
-
-    server = Daemon(run, step_dt=0.25)
-    async with serving(server):
-        a, b = await start(server, n=2)
-        await observe(server, b, 0)
-        for v in range(2):
-            assert not (await observe(server, a, v)).errors
-        await go.wait()
-        for v in range(2, 5):  # a's time moves on while b's spinner runs
-            assert not (await observe(server, a, v)).errors
-        failed = await observe(server, b, 1)
-    assert "sim time cannot move on" in str(failed.errors[0])
-
-
-@pytest.mark.skipif(sys.version_info < (3, 12), reason="eager task factories are Python 3.12+")
-@pytest.mark.anyio
-async def test_episodes_keep_an_eager_task_factory_working():
-    loop = asyncio.get_running_loop()
-    done: list[tuple[int, float, float]] = []
-
-    async def work(rid: int, t: float, ep: EpisodeContext) -> None:
-        with anyio.CancelScope():  # anyio's cancel-scope bookkeeping needs its non-eager child construction
-            for _ in range(50):
+            for _ in range(hops):
                 await checkpoint()
             await ep.call(time.sleep, 0.002)
-            done.append((rid, t, ep.clock.now()))
-
-    async def ticker(ep: EpisodeContext) -> None:
-        async with anyio.create_task_group() as tg:
-            async for t in ep.clock.every(0.25):
-                tg.start_soon(work, ep.row_id, t, ep)
+            done.append((t, ep.clock.now()))
 
     async def run(ep: EpisodeContext) -> None:
         ep.start_soon(ticker, ep)
         async for req in ep.observations():
             await _reply(req)
 
-    previous = loop.get_task_factory()
-    loop.set_task_factory(asyncio.eager_task_factory)  # ty: ignore[unresolved-attribute]
-    try:
-        server = Daemon(run, step_dt=0.125)
-        async with serving(server):
-            rids = await start(server, n=2)
-            for v in range(5):
-                for rid in rids:
-                    pending = await observe(server, rid, v)
-                    assert not pending.errors
-    finally:
-        loop.set_task_factory(previous)
-    assert sorted(done) == sorted((rid, t, t) for rid in rids for t in (0.25, 0.5))
+    kw = {} if settle_rounds is None else {"settle_rounds": settle_rounds}
+    assert hops < (settle_rounds or SETTLE_ROUNDS) or not held
+    server = Daemon(run, step_dt=0.25, **kw)
+    async with serving(server):
+        (rid,) = await start(server)
+        for v in range(5):
+            assert not (await observe(server, rid, v)).errors
+    assert (done == [(t, t) for t in (0.25, 0.5, 0.75, 1.0)]) is held  # else a call ends after time moved on
 
 
+@pytest.mark.parametrize("latency", [0.01, 0.0])  # 0: a call can finish inside the rounds, before the next starts
 @pytest.mark.anyio
-async def test_a_fires_model_call_finishes_before_time_moves_on():
+async def test_a_fires_model_call_finishes_before_time_moves_on(latency):
     calls: list[tuple[float, float, float]] = []  # (tick, clock at the call's end, value)
 
     def slow(v: float) -> float:
-        time.sleep(0.01)
+        time.sleep(latency)
         return v
 
     async def ticker(ep: EpisodeContext) -> None:
         async for t in ep.clock.every(0.0625):
-            v = await ep.call(slow, t)
-            v = await ep.call(slow, v)  # a second call after the first: still the same instant
+            v = t
+            for _ in range(5):  # each call after the previous: still the same instant
+                v = await ep.call(slow, v)
             calls.append((t, ep.clock.now(), v))
 
     async def run(ep: EpisodeContext) -> None:
@@ -377,11 +220,17 @@ async def test_a_sleeper_cancelled_while_asleep_is_never_woken():
 
 
 @pytest.mark.anyio
-async def test_a_task_that_never_blocks_fails_the_episode_instead_of_skipping_time():
+async def test_a_fire_that_keeps_calling_at_one_instant_fails_the_episode_instead_of_skipping_time():
+    calls = 0
+
+    def noop() -> None:
+        nonlocal calls
+        calls += 1
+
     async def ticker(ep: EpisodeContext) -> None:
         async for _ in ep.clock.every(0.1):
-            for _ in range(10_050):  # never blocks within the settle bound
-                await checkpoint()
+            while True:  # sim time never gets to move on
+                await ep.call(noop)
 
     async def run(ep: EpisodeContext) -> None:
         ep.start_soon(ticker, ep)
@@ -393,27 +242,25 @@ async def test_a_task_that_never_blocks_fails_the_episode_instead_of_skipping_ti
         (rid,) = await start(server)
         await observe(server, rid, 0)
         pending = await observe(server, rid, 1)
-    assert "sim time cannot move on" in str(pending.errors[0])
+    assert "still waiting after 1000 settles" in str(pending.errors[0])
+    assert calls >= 1000
 
 
 @pytest.mark.anyio
-async def test_a_task_that_never_blocks_holds_only_its_own_episode():
-    go = anyio.Event()
-    busy: list[int] = []  # the spinning episode's row id
-    ticks: list[float] = []
+async def test_one_episodes_long_settle_does_not_hold_another_episodes_time():
+    gate = threading.Event()
+    ticks: list[tuple[int, float]] = []
 
-    async def spin(ep: EpisodeContext) -> None:
-        await go.wait()
-        if ep.row_id in busy:
-            while True:  # never blocks
-                await checkpoint()
+    def blocked() -> None:
+        assert gate.wait(5)
 
     async def ticker(ep: EpisodeContext) -> None:
         async for t in ep.clock.every(0.1):
-            ticks.append(t)
+            ticks.append((ep.row_id, t))
+            if ep.row_id == a and t > 0.15:
+                await ep.call(blocked)  # a's settle waits on this while b's time moves on
 
     async def run(ep: EpisodeContext) -> None:
-        ep.start_soon(spin, ep)
         ep.start_soon(ticker, ep)
         async for req in ep.observations():
             await _reply(req)
@@ -421,16 +268,17 @@ async def test_a_task_that_never_blocks_holds_only_its_own_episode():
     server = Daemon(run, step_dt=0.25)
     async with serving(server):
         a, b = await start(server, n=2)
-        busy.append(a)
-        go.set()
-        for v in range(5):  # b's time moves while a's task spins
-            pending = await observe(server, b, v)
-            assert not pending.errors
-        failed = await observe(server, a, 0)
-        after = await observe(server, b, 5)
-    assert "sim time cannot move on" in str(failed.errors[0])
-    assert not after.errors
-    assert ticks == [0.1 * n for n in range(1, 13)]  # b's ticker; a's never reached a deadline
+        await observe(server, a, 0)
+        held = await observe(server, a, 1, wait=False)  # at 0.25: the 0.2 fire's call blocks
+        for v in range(5):  # b reaches 1.0 meanwhile
+            assert not (await observe(server, b, v)).errors
+        assert not held.done.is_set()
+        gate.set()
+        with anyio.fail_after(3):
+            await held.done.wait()
+        assert not held.errors
+    assert [t for rid, t in ticks if rid == b] == [0.1 * n for n in range(1, 11)]
+    assert [t for rid, t in ticks if rid == a] == [0.1, 0.2]
 
 
 # ---------------------------------------------------------------------------

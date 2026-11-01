@@ -57,8 +57,8 @@ testpaths = ["tests", "leaderboard/tests"]
 exclude-newer = "2026-07-07"
 
 [tool.uv.sources]
-# Until chrono-daemon 0.1.2 (SimClock.next_deadline / advance_to(settle=)) is on PyPI: MilkClouds/chrono-daemon#6.
-chrono-daemon = { git = "https://github.com/MilkClouds/chrono-daemon", rev = "c31e1f22e5c2cecf6ec6050efccbaf7b29c6689e" }
+# Until chrono-daemon 0.1.2 (SimClock.advance_to(settle=, rtol=, atol=)) is on PyPI: MilkClouds/chrono-daemon#6.
+chrono-daemon = { git = "https://github.com/MilkClouds/chrono-daemon", rev = "1cc4a9dedabbae7d5553c7707b914850417225b2" }
 
 [tool.ruff]
 line-length = 119
