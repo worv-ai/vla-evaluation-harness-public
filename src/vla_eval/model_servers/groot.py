@@ -5,6 +5,7 @@
 #     "gr00t",
 #     "torch>=2.2,<2.8",
 #     "numpy>=1.24",
+#     "pyarrow<26",  # 26 requires numpy>=2 at import; gr00t pins numpy 1.26
 #     "pillow>=9.0",
 # ]
 #
