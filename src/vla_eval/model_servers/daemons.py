@@ -4,6 +4,7 @@ mailbox, one model thread, drain, fail."""
 
 from __future__ import annotations
 
+import asyncio
 import heapq
 import itertools
 import logging
@@ -51,7 +52,10 @@ __all__ = [
 
 logger = logging.getLogger(__name__)
 
-_SETTLE_ROUNDS = 8  # checkpoints a woken sync task gets to start its model call (or sleep) before time moves on
+_SETTLE_ROUNDS = 8  # off asyncio: checkpoints a woken sync task gets to block before time moves on
+_MAX_SETTLE_ROUNDS = 10_000  # a sync clock moves on (warning) if some task never blocks
+_EPS = 1e-9  # sim seconds: deadlines this close are one instant (float drift between n * period and k * step_dt)
+_DRIVERS: set[asyncio.Task[Any]] = set()  # tasks moving a sync clock: never counted as busy
 
 T = TypeVar("T")
 Mode = Literal["sync", "live"]
@@ -165,7 +169,7 @@ class StepClock:
 
     async def wait_until(self, deadline: float) -> None:
         await checkpoint()
-        if deadline <= self._t:
+        if deadline <= self._t + _EPS:
             return
         entry = (deadline, next(self._seq), anyio.Event())
         heapq.heappush(self._sleepers, entry)
@@ -180,20 +184,21 @@ class StepClock:
         """As chrono's: ticks every ``period`` from now (``"now"``) or ``now + period``; missed ticks are skipped."""
         if period <= 0:
             raise ValueError(f"every() period must be positive, got {period}")
-        tick = self._t if first == "now" else self._t + period
+        t0, n = self._t, 0 if first == "now" else 1
         while True:
-            if tick > self._t:
-                await self.wait_until(tick)
+            tick = t0 + n * period  # no drift accumulates
+            await self.wait_until(tick)
             yield tick
-            tick += period
-            while tick <= self._t:
-                tick += period
+            n += 1
+            while t0 + n * period <= self._t + _EPS:
+                n += 1
 
     def _wake_next(self, t: float) -> bool:
-        """Move to the earliest deadline at or before ``t`` and wake its first sleeper; ``False`` if none."""
-        if not self._sleepers or self._sleepers[0][0] > t:
+        """Move to the earliest deadline due by ``t`` and wake its first sleeper; ``False`` if none."""
+        if not self._sleepers or self._sleepers[0][0] > t + _EPS:
             return False
-        self._t, _, event = heapq.heappop(self._sleepers)
+        deadline, _, event = heapq.heappop(self._sleepers)
+        self._t = max(self._t, min(deadline, t))
         event.set()
         return True
 
@@ -335,7 +340,7 @@ class EpisodeContext:
         self._close()
 
     async def _advance(self, t: float) -> None:
-        """Move a sync clock to ``t`` sleeper by sleeper; time stands still while a model call runs."""
+        """Move a sync clock to ``t`` sleeper by sleeper; time stands still while a task runs or a model call does."""
         clock = self.clock
         assert isinstance(clock, StepClock)
         while not self.closing:
@@ -345,10 +350,8 @@ class EpisodeContext:
                 return
 
     async def _settle(self) -> None:
-        """Let woken tasks run until they wait, and this episode's model calls finish."""
         while True:
-            for _ in range(_SETTLE_ROUNDS):
-                await checkpoint()
+            await _quiesce(self)
             if not self._owned:
                 return
             await self._drained.wait()
@@ -373,6 +376,33 @@ class EpisodeContext:
             self._tasks -= 1
             if self._tasks == 0 and not self.closing:
                 self.fail(RuntimeError("no task is left to answer observations"))
+
+
+async def _quiesce(ep: EpisodeContext) -> None:
+    """Checkpoint until every task but the clock drivers waits on something (``anyio.wait_all_tasks_blocked``'s
+    asyncio predicate, without its 0.1 s polls); other backends get ``_SETTLE_ROUNDS`` checkpoints."""
+    try:
+        me = asyncio.current_task()
+    except RuntimeError:  # not asyncio
+        me = None
+    if me is None:
+        for _ in range(_SETTLE_ROUNDS):
+            await checkpoint()
+        return
+    _DRIVERS.add(me)
+    try:
+        for _ in range(_MAX_SETTLE_ROUNDS):
+            await checkpoint()
+            if not any(_runnable(task) for task in asyncio.all_tasks() if task not in _DRIVERS):
+                return
+        ep.logger.warning("a task never blocked in %d checkpoints; sim time moves on anyway", _MAX_SETTLE_ROUNDS)
+    finally:
+        _DRIVERS.discard(me)
+
+
+def _runnable(task: asyncio.Task[Any]) -> bool:
+    waiter = task._fut_waiter  # ty: ignore[unresolved-attribute]  # private, as anyio's asyncio backend reads it
+    return waiter is None or waiter.done()
 
 
 def _classify(ep: EpisodeContext, exc: BaseException) -> None:

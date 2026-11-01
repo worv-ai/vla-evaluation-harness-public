@@ -8,6 +8,7 @@ import time
 from typing import Any
 
 import anyio
+from anyio.lowlevel import checkpoint
 import numpy as np
 import pytest
 from chrono_daemon import WallClock
@@ -78,6 +79,64 @@ async def test_every_fires_once_per_deadline_even_several_per_step(period):
     fires = [t for t, kind in events if kind == "fire"]
     assert fires == [period * n for n in range(1, int(2.0 / period) + 1)]
     assert events == sorted(events, key=lambda e: (e[0], e[1] == "obs"))  # a fire due with an observation precedes it
+
+
+@pytest.mark.anyio
+async def test_decimal_periods_land_on_their_observations_without_drift():
+    events: list[tuple[float, str]] = []
+
+    async def ticker(ep: EpisodeContext, period: float) -> None:
+        async for _ in ep.clock.every(period):
+            events.append((round(ep.clock.now(), 9), f"every {period}"))
+
+    async def run(ep: EpisodeContext) -> None:
+        ep.start_soon(ticker, ep, 0.1)
+        ep.start_soon(ticker, ep, 0.5)
+        async for req in ep.observations():
+            events.append((round(ep.clock.now(), 9), "obs"))
+            await _reply(req)
+
+    server = Daemon(run, step_dt=0.02)  # 3 * 0.1 > 15 * 0.02 in floats
+    async with serving(server):
+        (rid,) = await start(server)
+        for v in range(151):  # the last at 3.0
+            await observe(server, rid, v)
+    kinds = [kind for _, kind in events]
+    assert kinds.count("every 0.1") == 30 and kinds.count("every 0.5") == 6
+    assert events == sorted(events, key=lambda e: (e[0], e[1] == "obs"))  # each fire before its instant's observation
+
+
+@pytest.mark.anyio
+async def test_async_work_and_child_tasks_before_a_call_finish_before_time_moves_on():
+    done: list[tuple[str, float, float]] = []  # (who, tick, clock when its call returned)
+    admitted: list[float] = []
+
+    async def work(who: str, t: float, ep: EpisodeContext) -> None:
+        for _ in range(50):  # async preprocessing: many scheduler hops before the model call
+            await checkpoint()
+        await ep.call(time.sleep, 0.002)
+        done.append((who, t, ep.clock.now()))
+
+    async def ticker(ep: EpisodeContext) -> None:
+        async for t in ep.clock.every(0.25):
+            ep.start_soon(work, "child", t, ep)  # handed off to another task
+            await work("ticker", t, ep)
+
+    async def run(ep: EpisodeContext) -> None:
+        ep.start_soon(ticker, ep)
+        async for req in ep.observations():
+            admitted.append(ep.clock.now())
+            assert all(t <= ep.clock.now() for _, t, _ in done)
+            assert len(done) == 2 * int(ep.clock.now() / 0.25)  # every fire due so far has finished
+            await _reply(req)
+
+    server = Daemon(run, step_dt=0.125)
+    async with serving(server):
+        (rid,) = await start(server)
+        for v in range(9):  # the last at 1.0
+            await observe(server, rid, v)
+    assert admitted == [k * 0.125 for k in range(9)]
+    assert sorted(done) == sorted((who, t, t) for who in ("child", "ticker") for t in (0.25, 0.5, 0.75, 1.0))
 
 
 @pytest.mark.anyio
