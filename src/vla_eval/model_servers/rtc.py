@@ -253,7 +253,7 @@ class KinetixRTCServer(DaemonModelServer):
         failed: dict[int, Exception] = {}
         for i, (rid, episode) in enumerate(zip(rows.ids.tolist(), rows.episodes)):
             level = (episode.config.get("task") or {}).get("level")
-            if level not in self._states:
+            if not isinstance(level, str) or level not in self._states:
                 failed[i] = ValueError(f"no checkpoint for level {level!r}; have {sorted(self._states)}")
                 continue
             if self.latency != "steps" and episode.mode != "live":
