@@ -53,7 +53,7 @@ __all__ = [
 logger = logging.getLogger(__name__)
 
 _SETTLE_ROUNDS = 8  # off asyncio: checkpoints a woken sync task gets to block before time moves on
-_MAX_SETTLE_ROUNDS = 10_000  # a sync clock moves on (warning) if some task never blocks
+_MAX_SETTLE_ROUNDS = 10_000  # a task still running after this many checkpoints fails the sync episode
 _EPS = 1e-9  # sim seconds: deadlines this close are one instant (float drift between n * period and k * step_dt)
 _DRIVERS: set[asyncio.Task[Any]] = set()  # tasks moving a sync clock: never counted as busy
 
@@ -351,7 +351,7 @@ class EpisodeContext:
 
     async def _settle(self) -> None:
         while True:
-            await _quiesce(self)
+            await _quiesce()
             if not self._owned:
                 return
             await self._drained.wait()
@@ -378,7 +378,7 @@ class EpisodeContext:
                 self.fail(RuntimeError("no task is left to answer observations"))
 
 
-async def _quiesce(ep: EpisodeContext) -> None:
+async def _quiesce() -> None:
     """Checkpoint until every task but the clock drivers waits on something (``anyio.wait_all_tasks_blocked``'s
     asyncio predicate, without its 0.1 s polls); other backends get ``_SETTLE_ROUNDS`` checkpoints."""
     try:
@@ -395,7 +395,7 @@ async def _quiesce(ep: EpisodeContext) -> None:
             await checkpoint()
             if not any(_runnable(task) for task in asyncio.all_tasks() if task not in _DRIVERS):
                 return
-        ep.logger.warning("a task never blocked in %d checkpoints; sim time moves on anyway", _MAX_SETTLE_ROUNDS)
+        raise RuntimeError(f"sim time cannot move on: a task ran {_MAX_SETTLE_ROUNDS} checkpoints without blocking")
     finally:
         _DRIVERS.discard(me)
 

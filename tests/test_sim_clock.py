@@ -193,6 +193,26 @@ async def test_a_sleeper_cancelled_while_asleep_is_never_woken():
     assert log == ["gave up at 0.0", "obs at 0.5"]
 
 
+@pytest.mark.anyio
+async def test_a_task_that_never_blocks_fails_the_episode_instead_of_skipping_time():
+    async def ticker(ep: EpisodeContext) -> None:
+        async for _ in ep.clock.every(0.1):
+            for _ in range(10_050):  # never blocks within the settle bound
+                await checkpoint()
+
+    async def run(ep: EpisodeContext) -> None:
+        ep.start_soon(ticker, ep)
+        async for req in ep.observations():
+            await _reply(req)
+
+    server = Daemon(run, step_dt=0.25)
+    async with serving(server):
+        (rid,) = await start(server)
+        await observe(server, rid, 0)
+        pending = await observe(server, rid, 1)
+    assert "sim time cannot move on" in str(pending.errors[0])
+
+
 # ---------------------------------------------------------------------------
 # A dual system (S2 every 0.5 s, S1 every 0.1 s, each observation answered from S1's latest chunk) is deterministic
 # ---------------------------------------------------------------------------
