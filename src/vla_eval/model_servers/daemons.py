@@ -351,34 +351,21 @@ class EpisodeDaemons:
                 out = dict.fromkeys(range(len(accepted)), exc)
             failed.update({accepted[j]: exc for j, exc in out.items()})
         ready = [i for i in accepted if i not in failed]
-        created: list[EpisodeContext] = []
-        try:
-            if self._stopping or self._tg is None:
-                raise RuntimeError("model server stopped")
-            for i in ready:  # no await: a context is registered once its host is
-                one = rows.take([i])
-                ep = EpisodeContext(
-                    self.server, one, *plans[i], Mailbox(self.backlog), self.server._links.get(one[0].id)
-                )
-                self._tg.start_soon(self._host, ep)
-                created.append(ep)
-                self._eps[ep.row_id] = ep
-        except BaseException as exc:  # roll back: close, join, finish the reset rows once, then fail them
-            for ep in created:
-                ep._close()
-                del self._eps[ep.row_id]
-            with anyio.CancelScope(shield=True):
-                for ep in created:
-                    await ep._exited.wait()
-                if self.finish is not None and ready:
-                    aborted: list[EpisodeResult] = [{"status": "aborted", "failure_reason": None}] * len(ready)
+        if self._stopping or self._tg is None:  # shut down during reset: finish the reset rows once, fail them
+            if self.finish is not None and ready:
+                aborted: list[EpisodeResult] = [{"status": "aborted", "failure_reason": None}] * len(ready)
+                with anyio.CancelScope(shield=True):
                     try:
                         await self.server.run_on_model_thread(self.finish, rows.take(ready), aborted)
                     except Exception:
                         logger.exception("finish failed while rolling back a start")
-            if not isinstance(exc, Exception):
-                raise
-            failed.update(dict.fromkeys(ready, exc))
+            failed.update(dict.fromkeys(ready, RuntimeError("model server stopped")))
+            return failed
+        for i in ready:  # no await: a context is registered once its host is
+            one = rows.take([i])
+            ep = EpisodeContext(self.server, one, *plans[i], Mailbox(self.backlog), self.server._links.get(one[0].id))
+            self._tg.start_soon(self._host, ep)
+            self._eps[ep.row_id] = ep
         return failed
 
     async def on_observation(self, obs: Batch, rows: Rows) -> None:
