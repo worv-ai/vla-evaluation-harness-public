@@ -5,10 +5,9 @@ mailbox, one model thread, drain, fail."""
 from __future__ import annotations
 
 import asyncio
-import heapq
-import itertools
 import logging
 import math
+import weakref
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
 from dataclasses import dataclass, field
@@ -45,7 +44,6 @@ __all__ = [
     "MailboxOverflow",
     "ObservationRequest",
     "SimClock",
-    "StepClock",
     "WallClock",
     "episode_daemon",
 ]
@@ -53,9 +51,8 @@ __all__ = [
 logger = logging.getLogger(__name__)
 
 _SETTLE_ROUNDS = 8  # off asyncio: checkpoints a woken sync task gets to block before time moves on
-_MAX_SETTLE_ROUNDS = 10_000  # a task still running after this many checkpoints fails the sync episode
-_EPS = 1e-9  # sim seconds: deadlines this close are one instant (float drift between n * period and k * step_dt)
-_DRIVERS: set[asyncio.Task[Any]] = set()  # tasks moving a sync clock: never counted as busy
+_MAX_SETTLE_ROUNDS = 10_000  # an episode task still running after this many checkpoints fails its sync episode
+_EPS = 1e-9  # sim seconds: deadlines this close are one instant (float error between n * period and k * step_dt)
 
 T = TypeVar("T")
 Mode = Literal["sync", "live"]
@@ -151,61 +148,6 @@ class Mailbox:
             raise RuntimeError("an episode's observations have one receiving task")
 
 
-class StepClock:
-    """A sync episode's sim time (a chrono ``Clock``).  Before observation ``k`` is delivered the framework moves it
-    to ``k * step_dt``, waking one sleeper at a time (by deadline, then arrival), its tasks and model calls settled."""
-
-    def __init__(self, step_dt: float) -> None:
-        self.step_dt = step_dt
-        self._t = 0.0
-        self._sleepers: list[tuple[float, int, anyio.Event]] = []  # a heap by (deadline, arrival)
-        self._seq = itertools.count()
-
-    def now(self) -> float:
-        return self._t
-
-    async def sleep(self, seconds: float) -> None:
-        await self.wait_until(self._t + seconds)
-
-    async def wait_until(self, deadline: float) -> None:
-        await checkpoint()
-        if deadline <= self._t + _EPS:
-            return
-        entry = (deadline, next(self._seq), anyio.Event())
-        heapq.heappush(self._sleepers, entry)
-        try:
-            await entry[2].wait()
-        finally:
-            if not entry[2].is_set():  # cancelled while asleep
-                self._sleepers.remove(entry)
-                heapq.heapify(self._sleepers)
-
-    async def every(self, period: float, *, first: Literal["now", "after"] = "after") -> AsyncIterator[float]:
-        """As chrono's: ticks every ``period`` from now (``"now"``) or ``now + period``; missed ticks are skipped."""
-        if period <= 0:
-            raise ValueError(f"every() period must be positive, got {period}")
-        t0, n = self._t, 0 if first == "now" else 1
-        while True:
-            tick = t0 + n * period  # no drift accumulates
-            await self.wait_until(tick)
-            yield tick
-            n += 1
-            while t0 + n * period <= self._t + _EPS:
-                n += 1
-
-    def _wake_next(self, t: float) -> bool:
-        """Move to the earliest deadline due by ``t`` and wake its first sleeper; ``False`` if none."""
-        if not self._sleepers or self._sleepers[0][0] > t + _EPS:
-            return False
-        deadline, _, event = heapq.heappop(self._sleepers)
-        self._t = max(self._t, min(deadline, t))
-        event.set()
-        return True
-
-    def _move_to(self, t: float) -> None:
-        self._t = max(self._t, t)
-
-
 class _UnknownClock:
     """A sync episode's clock when no ``step_dt`` is known: any use fails (the episode, from its tasks)."""
 
@@ -263,6 +205,10 @@ class EpisodeContext:
         self._exited = anyio.Event()
         self._tg: TaskGroup | None = None
         self._scope = anyio.CancelScope()
+        self._host_id: int | None = None  # anyio id of the task hosting this episode's task group
+        # asyncio tasks seen while settling, classified once: this episode's (``_tasks_now``) or not
+        self._mine: weakref.WeakSet[asyncio.Task[Any]] = weakref.WeakSet()
+        self._others: weakref.WeakSet[asyncio.Task[Any]] = weakref.WeakSet()
 
     @property
     def closing(self) -> bool:
@@ -340,21 +286,57 @@ class EpisodeContext:
         self._close()
 
     async def _advance(self, t: float) -> None:
-        """Move a sync clock to ``t`` sleeper by sleeper; time stands still while a task runs or a model call does."""
+        """Move a sync clock to ``t`` with chrono's settle hook: one due sleeper per settle, by deadline then
+        registration; deadlines within ``_EPS`` past ``t`` are due with it.  Time stands still while this episode's
+        tasks run or its model calls do."""
         clock = self.clock
-        assert isinstance(clock, StepClock)
-        while not self.closing:
-            await self._settle()
-            if not clock._wake_next(t):
-                clock._move_to(t)
-                return
+        assert isinstance(clock, SimClock)
+        await clock.advance_to(max(t, clock.now()), settle=self._settle)
+        while (deadline := clock.next_deadline()) is not None and deadline <= t + _EPS:
+            await clock.advance_to(deadline, settle=self._settle)
 
     async def _settle(self) -> None:
         while True:
-            await _quiesce()
+            if self.closing:
+                raise EpisodeClosed("the episode is closing")
+            await self._quiesce()
             if not self._owned:
                 return
             await self._drained.wait()
+
+    async def _quiesce(self) -> None:
+        """Checkpoint until every task of this episode waits on something (``anyio.wait_all_tasks_blocked``'s
+        asyncio predicate, on this episode's tasks only and without its 0.1 s polls).  Other backends get
+        ``_SETTLE_ROUNDS`` checkpoints."""
+        try:
+            asyncio.current_task()
+        except RuntimeError:  # not asyncio
+            for _ in range(_SETTLE_ROUNDS):
+                await checkpoint()
+            return
+        for _ in range(_MAX_SETTLE_ROUNDS):
+            await checkpoint()
+            if not any(_runnable(task) for task in self._tasks_now()):
+                return
+        raise RuntimeError(
+            f"sim time cannot move on: an episode task ran {_MAX_SETTLE_ROUNDS} checkpoints without blocking"
+        )
+
+    def _tasks_now(self) -> list[asyncio.Task[Any]]:
+        """This episode's live asyncio tasks: the host's descendants through anyio's parent links (``run``,
+        ``start_soon`` children, and task groups they open, e.g. a chrono ``Supervisor``'s daemons)."""
+        tasks = asyncio.all_tasks()
+        new = [task for task in tasks if task not in self._mine and task not in self._others]
+        if new:
+            parents = {info.id: info.parent_id for info in anyio.get_running_tasks()}
+            for task in new:
+                tid: int | None = id(task)
+                for _ in range(len(parents) + 1):  # a chain, never a cycle; bounded anyway
+                    if tid is None or tid == self._host_id:
+                        break
+                    tid = parents.get(tid)
+                (self._mine if tid is not None and tid == self._host_id else self._others).add(task)
+        return [task for task in tasks if task in self._mine]
 
     def _owns(self, request: ObservationRequest) -> bool:
         return (
@@ -376,28 +358,6 @@ class EpisodeContext:
             self._tasks -= 1
             if self._tasks == 0 and not self.closing:
                 self.fail(RuntimeError("no task is left to answer observations"))
-
-
-async def _quiesce() -> None:
-    """Checkpoint until every task but the clock drivers waits on something (``anyio.wait_all_tasks_blocked``'s
-    asyncio predicate, without its 0.1 s polls); other backends get ``_SETTLE_ROUNDS`` checkpoints."""
-    try:
-        me = asyncio.current_task()
-    except RuntimeError:  # not asyncio
-        me = None
-    if me is None:
-        for _ in range(_SETTLE_ROUNDS):
-            await checkpoint()
-        return
-    _DRIVERS.add(me)
-    try:
-        for _ in range(_MAX_SETTLE_ROUNDS):
-            await checkpoint()
-            if not any(_runnable(task) for task in asyncio.all_tasks() if task not in _DRIVERS):
-                return
-        raise RuntimeError(f"sim time cannot move on: a task ran {_MAX_SETTLE_ROUNDS} checkpoints without blocking")
-    finally:
-        _DRIVERS.discard(me)
 
 
 def _runnable(task: asyncio.Task[Any]) -> bool:
@@ -516,7 +476,7 @@ class EpisodeDaemons:
             if ep is None or ep.closing or ep.episode is not one._episodes[0]:
                 await self.server.send_error(one, EpisodeClosed("the episode is not running"))
                 continue
-            if isinstance(ep.clock, StepClock) and self._tg is not None:  # each episode's clock on its own
+            if isinstance(ep.clock, SimClock) and self._tg is not None:  # each episode's clock on its own
                 self._tg.start_soon(self._deliver, ep, one_obs, one, seq)
             else:
                 await self._deliver(ep, one_obs, one, seq)
@@ -525,8 +485,13 @@ class EpisodeDaemons:
         """Admit observation ``k`` once a sync clock reached ``k * step_dt`` (one per episode is in flight)."""
         clock = ep.clock
         try:
-            if isinstance(clock, StepClock):
-                await ep._advance(rows[0].step * clock.step_dt)
+            if isinstance(clock, SimClock):
+                assert ep.step_dt is not None
+                try:
+                    await ep._advance(rows[0].step * ep.step_dt)
+                except EpisodeClosed:
+                    if not ep.closing:
+                        raise
             if ep.closing:
                 await self.server.send_error(rows, EpisodeClosed("the episode is not running"))
                 return
@@ -563,9 +528,10 @@ class EpisodeDaemons:
         dt = self.step_dt if dt is None else _check_step_dt(dt)
         if episode.mode == "live":
             return WallClock(), dt
-        return (_UnknownClock() if dt is None else StepClock(dt)), dt
+        return (_UnknownClock() if dt is None else SimClock(0.0)), dt
 
     async def _host(self, ep: EpisodeContext) -> None:
+        ep._host_id = anyio.get_current_task().id
         with anyio.CancelScope(shield=True):  # cancellation reaches the episode only through ep._close()
             try:
                 with ep._scope:

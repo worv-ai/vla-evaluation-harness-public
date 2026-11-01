@@ -11,7 +11,7 @@ requires-python = ">=3.11"
 license = {text = "Apache-2.0"}
 dependencies = [
     "anyio>=4.2.0",  # module-level CapacityLimiter (serve.py) needs a lazy backend
-    "chrono-daemon==0.1.1",  # clocks for model-server episode loops (model_servers/daemons.py)
+    "chrono-daemon>=0.1.2",  # clocks for model-server episode loops (model_servers/daemons.py)
     "imageio[ffmpeg]",      # Streaming mp4 writer for benchmarks/video.py
     "jsonargparse[signatures]>=4.36",  # class-signature-driven argparse + yaml
     "lazyregistry>=0.4.0",
@@ -55,6 +55,10 @@ testpaths = ["tests", "leaderboard/tests"]
 # Fresh clones resolve to this date, so a newly published (possibly compromised) version is
 # never picked up without intent. Bump when upgrading on purpose.
 exclude-newer = "2026-07-07"
+
+[tool.uv.sources]
+# Until chrono-daemon 0.1.2 (SimClock.next_deadline / advance_to(settle=)) is on PyPI: MilkClouds/chrono-daemon#6.
+chrono-daemon = { git = "https://github.com/MilkClouds/chrono-daemon", rev = "c31e1f22e5c2cecf6ec6050efccbaf7b29c6689e" }
 
 [tool.ruff]
 line-length = 119

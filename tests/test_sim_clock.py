@@ -15,7 +15,7 @@ from chrono_daemon import WallClock
 
 from vla_eval.benchmarks.base import VectorStepBenchmark
 from vla_eval.connection import Connection
-from vla_eval.model_servers.daemons import EpisodeContext, ObservationRequest, StepClock
+from vla_eval.model_servers.daemons import EpisodeContext, ObservationRequest, SimClock
 from vla_eval.recording import NullEpisodeRecorder
 from vla_eval.runners.base import ModelActError
 from vla_eval.runners.live_runner import LiveEpisodeRunner
@@ -140,6 +140,36 @@ async def test_async_work_and_child_tasks_before_a_call_finish_before_time_moves
 
 
 @pytest.mark.anyio
+async def test_tasks_of_a_task_group_opened_inside_the_episode_hold_time_too():
+    done: list[tuple[float, float]] = []  # (tick, clock when its call returned)
+
+    async def work(t: float, ep: EpisodeContext) -> None:
+        for _ in range(50):
+            await checkpoint()
+        await ep.call(time.sleep, 0.002)
+        done.append((t, ep.clock.now()))
+
+    async def ticker(ep: EpisodeContext) -> None:
+        async with anyio.create_task_group() as tg:  # as a chrono Supervisor hosts its daemons
+            async for t in ep.clock.every(0.25):
+                tg.start_soon(work, t, ep)
+
+    async def run(ep: EpisodeContext) -> None:
+        ep.start_soon(ticker, ep)
+        async for req in ep.observations():
+            assert len(done) == int(ep.clock.now() / 0.25)
+            await _reply(req)
+
+    server = Daemon(run, step_dt=0.125)
+    async with serving(server):
+        (rid,) = await start(server)
+        for v in range(9):
+            pending = await observe(server, rid, v)
+            assert not pending.errors
+    assert done == [(t, t) for t in (0.25, 0.5, 0.75, 1.0)]
+
+
+@pytest.mark.anyio
 async def test_a_fires_model_call_finishes_before_time_moves_on():
     calls: list[tuple[float, float, float]] = []  # (tick, clock at the call's end, value)
 
@@ -211,6 +241,43 @@ async def test_a_task_that_never_blocks_fails_the_episode_instead_of_skipping_ti
         await observe(server, rid, 0)
         pending = await observe(server, rid, 1)
     assert "sim time cannot move on" in str(pending.errors[0])
+
+
+@pytest.mark.anyio
+async def test_a_task_that_never_blocks_holds_only_its_own_episode():
+    go = anyio.Event()
+    busy: list[int] = []  # the spinning episode's row id
+    ticks: list[float] = []
+
+    async def spin(ep: EpisodeContext) -> None:
+        await go.wait()
+        if ep.row_id in busy:
+            while True:  # never blocks
+                await checkpoint()
+
+    async def ticker(ep: EpisodeContext) -> None:
+        async for t in ep.clock.every(0.1):
+            ticks.append(t)
+
+    async def run(ep: EpisodeContext) -> None:
+        ep.start_soon(spin, ep)
+        ep.start_soon(ticker, ep)
+        async for req in ep.observations():
+            await _reply(req)
+
+    server = Daemon(run, step_dt=0.25)
+    async with serving(server):
+        a, b = await start(server, n=2)
+        busy.append(a)
+        go.set()
+        for v in range(5):  # b's time moves while a's task spins
+            pending = await observe(server, b, v)
+            assert not pending.errors
+        failed = await observe(server, a, 0)
+        after = await observe(server, b, 5)
+    assert "sim time cannot move on" in str(failed.errors[0])
+    assert not after.errors
+    assert ticks == [0.1 * n for n in range(1, 13)]  # b's ticker; a's never reached a deadline
 
 
 # ---------------------------------------------------------------------------
@@ -386,8 +453,8 @@ async def test_step_dt_reaches_the_episode_from_each_runner_or_the_server(free_p
         await conn.start_episode({"step_dt": None})  # null: the server's default
         await conn.act({"value": 1.0})
     assert seen == [
-        (0.1, 0.1, StepClock),
-        (None, 0.5, StepClock),
+        (0.1, 0.1, SimClock),
+        (None, 0.5, SimClock),
         (0.02, 0.02, WallClock),  # live: 1 / hz, wall time
-        (None, 0.5, StepClock),
+        (None, 0.5, SimClock),
     ]

@@ -22,7 +22,7 @@ from vla_eval.model_servers.daemons import (
     Mailbox,
     MailboxOverflow,
     ObservationRequest,
-    StepClock,
+    SimClock,
     episode_daemon,
 )
 from vla_eval.protocol.messages import MessageType
@@ -399,7 +399,7 @@ async def test_a_vector_slot_saying_live_is_still_sync_on_a_sim_clock(free_port)
             {"ends": [], "starts": starts, "slots": [0, 1], "observations": {"value": np.asarray([1.0, 2.0])}}
         )
     assert reply["errors"] == [] and np.asarray(reply["actions"]["actions"])[:, 0].tolist() == [1.0, 2.0]
-    assert seen == [("sync", StepClock, 0.05), ("sync", StepClock, 0.2)]  # per-slot step_dt
+    assert seen == [("sync", SimClock, 0.05), ("sync", SimClock, 0.2)]  # per-slot step_dt
 
 
 @pytest.mark.anyio
@@ -417,7 +417,7 @@ async def test_each_episode_gets_its_own_clock_by_transport_mode():
         for v in range(3):
             await observe(server, a, v)
         await observe(server, b, 0)
-    assert [type(clocks[i]) for i in range(3)] == [StepClock, StepClock, WallClock]
+    assert [type(clocks[i]) for i in range(3)] == [SimClock, SimClock, WallClock]
     assert clocks[a].now() == 0.5 and clocks[b].now() == 0.0  # independent, fresh at 0
 
 
