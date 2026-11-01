@@ -219,18 +219,25 @@ async def test_a_sleeper_cancelled_while_asleep_is_never_woken():
     assert log == ["gave up at 0.0", "obs at 0.5"]
 
 
+@pytest.mark.parametrize("loops", [1, 2])  # 2: overlapping calls, never all drained at once
 @pytest.mark.anyio
-async def test_a_fire_that_keeps_calling_at_one_instant_fails_the_episode_instead_of_skipping_time():
+async def test_a_fire_that_keeps_calling_at_one_instant_fails_the_episode_instead_of_skipping_time(loops):
     calls = 0
 
     def noop() -> None:
         nonlocal calls
         calls += 1
+        time.sleep(0.0005)  # long enough that the other loop's next call starts first
+
+    async def caller(ep: EpisodeContext) -> None:
+        while True:  # sim time never gets to move on
+            await ep.call(noop)
 
     async def ticker(ep: EpisodeContext) -> None:
         async for _ in ep.clock.every(0.1):
-            while True:  # sim time never gets to move on
-                await ep.call(noop)
+            for _ in range(loops):
+                ep.start_soon(caller, ep)
+            return
 
     async def run(ep: EpisodeContext) -> None:
         ep.start_soon(ticker, ep)

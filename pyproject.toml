@@ -58,7 +58,7 @@ exclude-newer = "2026-07-07"
 
 [tool.uv.sources]
 # Until chrono-daemon 0.1.2 (SimClock.advance_to(settle=, rtol=, atol=)) is on PyPI: MilkClouds/chrono-daemon#6.
-chrono-daemon = { git = "https://github.com/MilkClouds/chrono-daemon", rev = "1cc4a9dedabbae7d5553c7707b914850417225b2" }
+chrono-daemon = { git = "https://github.com/MilkClouds/chrono-daemon", rev = "229a51af9d81d9d719af51d0dd1b71399c827cd6" }
 
 [tool.ruff]
 line-length = 119

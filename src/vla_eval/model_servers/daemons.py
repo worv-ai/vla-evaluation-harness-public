@@ -197,6 +197,7 @@ class EpisodeContext:
         self._tasks = 0
         self._owned = 0
         self._calls_done = self._calls_settled = 0  # finished ep.call s; those a settle has seen
+        self._call_done = anyio.Event()  # set (and replaced) as each ep.call finishes
         self._drained = anyio.Event()
         self._drained.set()
         self._exited = anyio.Event()
@@ -246,6 +247,8 @@ class EpisodeContext:
         finally:
             self._owned -= 1
             self._calls_done += 1
+            self._call_done.set()
+            self._call_done = anyio.Event()
             if self._owned == 0:
                 self._drained.set()
         if self.closing:
@@ -280,12 +283,12 @@ class EpisodeContext:
         self._close()
 
     async def _settle(self) -> bool:
-        """chrono's settle hook: wait for this episode's in-flight ``ep.call`` s.  True (settle again) if any ran
-        since the last settle: one that finished during the checkpoint rounds may be followed by another."""
+        """chrono's settle hook: True (settle again) once an ``ep.call`` of this episode finished since the last
+        settle, waiting for one if any is in flight; so each True is a finished call, and ``max_settles`` bounds them."""
         if self.closing:
             raise EpisodeClosed("the episode is closing")
-        if self._owned:
-            await self._drained.wait()
+        if self._owned and self._calls_done == self._calls_settled:
+            await self._call_done.wait()
         seen, self._calls_settled = self._calls_settled, self._calls_done
         return seen != self._calls_done
 
