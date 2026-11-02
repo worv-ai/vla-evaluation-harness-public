@@ -168,7 +168,9 @@ A `DaemonModelServer` episode's `ep.clock` follows the transport:
 | a late model | none: to simulate latency, the server answers observations itself (a hold, the previous chunk) until its result is due | the runner applies the benchmark's hold action |
 
 The sync clock is chrono's `SimClock`, which the framework advances through its settle hook (`advance_to(t,
-settle=...)`); a loop never calls `advance`. Timers due at `k * step_dt` (float-close) fire before observation `k`.
+settle=...)`); a loop never calls `advance`. Observation `k` goes first at its instant (chrono `call_at`, priority
+-1): its `ep.call`s finish, then timers due at `k * step_dt` (float-close) fire, so a tick at `t` sees `t`'s
+observation, and a reply may wait for that tick.
 Determinism covers model calls made through `ep.call`; other async chains rely on `settle_rounds` checkpoints per wake
 (`DaemonModelServer(settle_rounds=...)`, default 8): raise it if a loop does many async hops before calling the model.
 Each episode's clock settles on its own. With no `step_dt` known, a sync episode's clock raises on use (loops that

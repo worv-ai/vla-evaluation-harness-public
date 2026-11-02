@@ -332,6 +332,13 @@ async def observe(server: ModelServer, rid: int, value: float, *, wait: bool = T
     return pending
 
 
+async def settled(server: Any, rid: int) -> None:
+    """Wait until the last sync observation's delivery (its instant's timers) finished."""
+    with anyio.fail_after(3):
+        async with server.daemons._eps[rid]._delivering:
+            pass
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------

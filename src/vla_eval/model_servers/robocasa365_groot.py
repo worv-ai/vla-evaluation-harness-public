@@ -16,7 +16,7 @@
 # vla-eval = { path = "../../..", editable = true }
 #
 # [tool.uv]
-# exclude-newer = "2026-11-01T13:00:00Z"
+# exclude-newer = "2026-11-02T00:20:00Z"
 # # The pinned fork's bundled Eagle backbone imports flash_attn directly, so the
 # # Transformers `kernels` extra cannot stand in for it.
 # no-build-isolation-package = ["flash-attn"]

@@ -1,5 +1,5 @@
-"""Sync sim time: the framework moves a sync episode's clock to ``k * step_dt`` before observation ``k`` is
-delivered, waking one sleeper at a time and settling its ``ep.call`` s; live episodes keep wall time."""
+"""Sync sim time: the framework moves a sync episode's clock to ``k * step_dt``, delivers observation ``k``, then
+wakes that instant's timers, one sleeper at a time, settling their ``ep.call`` s; live episodes keep wall time."""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ from vla_eval.runners.live_runner import LiveEpisodeRunner
 from vla_eval.runners.sync_runner import SyncEpisodeRunner
 from vla_eval.runners.vector_runner import VectorEpisode, VectorEpisodeRunner
 
-from tests.conftest import Daemon, StubBenchmark, echo, observe, running, serving, start
+from tests.conftest import Daemon, StubBenchmark, echo, observe, running, serving, settled, start
 
 ZERO = {"actions": np.zeros(2, np.float32)}
 
@@ -37,7 +37,7 @@ async def _reply(req: ObservationRequest) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Observation k at k * step_dt; timers fire on their deadlines, before the observation due with them
+# Observation k at k * step_dt; timers fire on their deadlines, after the observation due with them
 # ---------------------------------------------------------------------------
 
 
@@ -77,9 +77,64 @@ async def test_every_fires_once_per_deadline_even_several_per_step(period):
         (rid,) = await start(server)
         for v in range(9):  # the last at 2.0
             await observe(server, rid, v)
+        await settled(server, rid)
     fires = [t for t, kind in events if kind == "fire"]
     assert fires == [period * n for n in range(1, int(2.0 / period) + 1)]
-    assert events == sorted(events, key=lambda e: (e[0], e[1] == "obs"))  # a fire due with an observation precedes it
+    assert events == sorted(events, key=lambda e: (e[0], e[1] != "obs"))  # an observation precedes its instant's fires
+
+
+@pytest.mark.parametrize("step_dt", [0.25, 0.1])  # 0.1: 3 * 0.1 > 0.3, every(0.3) ticks just below obs 3
+@pytest.mark.anyio
+async def test_a_timer_at_t_sees_observation_t_and_its_model_call(step_dt):
+    seen: list[tuple[float, float]] = []  # (tick, the latest observation's inferred value)
+    latest = {"v": -1.0}
+
+    async def ticker(ep: EpisodeContext, period: float) -> None:
+        async for t in ep.clock.every(period):
+            seen.append((t, latest["v"]))
+
+    async def run(ep: EpisodeContext) -> None:
+        ep.start_soon(ticker, ep, 3 * step_dt if step_dt == 0.1 else step_dt)
+        async for req in ep.observations():
+            latest["v"] = await ep.call(float, req.obs["value"])
+            await _reply(req)
+
+    server = Daemon(run, step_dt=step_dt)
+    async with serving(server):
+        (rid,) = await start(server)
+        for v in range(7):
+            await observe(server, rid, v)
+        await settled(server, rid)
+    stride = 3 if step_dt == 0.1 else 1
+    assert [v for _, v in seen] == [float(k) for k in range(stride, 7, stride)]
+
+
+@pytest.mark.anyio
+async def test_a_reply_can_wait_for_its_instants_timer_without_deadlock(free_port):
+    """A loop that answers observation k >= 1 with the result of the timer due at k * step_dt (zero delay)."""
+    ticked: list[float] = []
+
+    async def run(ep: EpisodeContext) -> None:
+        state: dict[str, Any] = {"obs": None, "out": anyio.Event()}
+
+        async def ticker() -> None:
+            async for t in ep.clock.every(0.1):
+                state["result"] = await ep.call(float, state["obs"])
+                ticked.append(t)
+                state["out"].set()
+
+        ep.start_soon(ticker)
+        async for req in ep.observations():
+            if req.row.step == 0:  # no tick at 0
+                await _reply(req)
+                continue
+            state["obs"], state["out"] = req.obs["value"], anyio.Event()
+            await state["out"].wait()  # the tick at this instant runs after the observation
+            await req.reply({"actions": np.full(2, state["result"], np.float32)})
+
+    async with running(Daemon(run), free_port) as url, Connection(url) as conn:
+        result = await SyncEpisodeRunner().run_episode(Stepped(done_at_step=5), {"name": "t"}, conn)
+    assert result["steps"] == 5 and ticked == [k * 0.1 for k in range(1, 5)]
 
 
 @pytest.mark.anyio
@@ -102,9 +157,10 @@ async def test_decimal_periods_land_on_their_observations_without_drift():
         (rid,) = await start(server)
         for v in range(151):  # the last at 3.0
             await observe(server, rid, v)
+        await settled(server, rid)
     kinds = [kind for _, kind in events]
     assert kinds.count("every 0.1") == 30 and kinds.count("every 0.5") == 6
-    assert events == sorted(events, key=lambda e: (e[0], e[1] == "obs"))  # each fire before its instant's observation
+    assert events == sorted(events, key=lambda e: (e[0], e[1] != "obs"))  # each fire after its instant's observation
 
 
 @pytest.mark.anyio
@@ -123,7 +179,8 @@ async def test_a_fires_child_task_calls_finish_before_time_moves_on():
     async def run(ep: EpisodeContext) -> None:
         ep.start_soon(ticker, ep)
         async for req in ep.observations():
-            assert len(done) == 2 * int(ep.clock.now() / 0.25)  # every fire due so far has finished
+            # every earlier fire finished
+            assert len(done) == 2 * sum(t < ep.clock.now() for t in (0.25, 0.5, 0.75, 1.0))
             await _reply(req)
 
     server = Daemon(run, step_dt=0.125)
@@ -131,6 +188,7 @@ async def test_a_fires_child_task_calls_finish_before_time_moves_on():
         (rid,) = await start(server)
         for v in range(9):  # the last at 1.0
             assert not (await observe(server, rid, v)).errors
+        await settled(server, rid)
     assert sorted(done) == sorted((who, t, t) for who in ("child", "ticker") for t in (0.25, 0.5, 0.75, 1.0))
 
 
@@ -160,6 +218,7 @@ async def test_async_hops_before_a_call_are_covered_within_settle_rounds(hops, s
         (rid,) = await start(server)
         for v in range(5):
             assert not (await observe(server, rid, v)).errors
+        await settled(server, rid)
     assert (done == [(t, t) for t in (0.25, 0.5, 0.75, 1.0)]) is held  # else a call ends after time moved on
 
 
@@ -189,6 +248,7 @@ async def test_a_fires_model_call_finishes_before_time_moves_on(latency):
         (rid,) = await start(server)
         for v in range(5):  # the last at 1.0
             await observe(server, rid, v)
+        await settled(server, rid)
     assert calls == [(0.0625 * n, 0.0625 * n, 0.0625 * n) for n in range(1, 17)]
 
 
@@ -451,6 +511,61 @@ async def test_vector_slots_advance_their_own_clocks(free_port):
     assert ended == [None] * 3 and configs == [0.25] * 3
     # lengths 2, 4, 3: the length-3 episode starts mid-run in the freed slot, its clock fresh at 0
     assert seen == {n: [(k, k * 0.25) for k in range(int(n))] for n in (2.0, 4.0, 3.0)}
+
+
+@pytest.mark.anyio
+async def test_server_shutdown_ends_an_episode_whose_end_waits_for_its_last_instant():
+    async def ticker(ep: EpisodeContext) -> None:
+        async for _ in ep.clock.every(0.25):
+            while True:  # the wake keeps calling the model: its instant would last max_settles calls
+                await ep.call(time.sleep, 0.02)
+
+    async def run(ep: EpisodeContext) -> None:
+        ep.start_soon(ticker, ep)
+        async for req in ep.observations():
+            await _reply(req)
+
+    server = Daemon(run, step_dt=0.25)
+    began = time.monotonic()
+    async with serving(server) as tg:
+        (rid,) = await start(server)
+        await observe(server, rid, 0)
+        await observe(server, rid, 1)  # replied; the tick at 0.25 runs on
+        tg.start_soon(server._end_episodes, [rid], [{}])
+        await anyio.sleep(0.1)
+        assert server._running() == 1  # the end waits for the instant
+        tg.cancel_scope.cancel()
+    assert time.monotonic() - began < 2 and server._running() == 0 and server.log[-1] == ("finish", [rid])
+
+
+@pytest.mark.anyio
+async def test_vector_episodes_run_their_last_instants_timers_before_ending(free_port):
+    ticks: dict[float, list[tuple[float, float]]] = {}  # by episode length: (tick, the observation it saw)
+
+    async def run(ep: EpisodeContext) -> None:
+        latest: dict[str, Any] = {}
+
+        async def ticker() -> None:
+            async for t in ep.clock.every(0.25):
+                ticks.setdefault(latest["n"], []).append((t, latest["k"]))
+
+        ep.start_soon(ticker)
+        async for req in ep.observations():
+            latest.update(n=float(req.obs["value"]), k=float(req.row.step))
+            await req.reply(ZERO)
+
+    class Vector(Daemon):
+        supports_vector_step = True
+
+    queue = [{"name": f"task_{i}", "length": i + 2, "episode_idx": 0} for i in (0, 2, 1)]
+
+    def next_episode(slot: int) -> VectorEpisode | None:
+        return VectorEpisode(queue.pop(0), NullEpisodeRecorder()) if queue else None
+
+    async with running(Vector(run), free_port) as url, Connection(url) as conn:
+        await VectorEpisodeRunner().run(SteppedVector(), conn, next_episode, lambda *a, **k: None)
+    # every instant's tick, the last included, ran after (and saw) that instant's observation
+    assert ticks == {n: [(k * 0.25, float(k)) for k in range(1, int(n))] for n in (2.0, 4.0, 3.0)}
 
 
 # ---------------------------------------------------------------------------
