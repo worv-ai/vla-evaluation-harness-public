@@ -481,7 +481,8 @@ async def test_end_stops_the_host_after_the_daemons_call_and_before_finish():
         await observe(server, rid, 7.0, wait=False)  # a 0.1 s call
         await anyio.sleep(0.03)
         await server._end_episodes([rid], [{}])
-    assert server.events == ["stopping", "call 7.0", "host stopped", "finish"]  # the call drains before finish
+    # the observation's instant (its call) completes before the episode closes, then the host stops, then finish
+    assert server.events == ["call 7.0", "stopping", "host stopped", "finish"]
 
 
 # ---------------------------------------------------------------------------

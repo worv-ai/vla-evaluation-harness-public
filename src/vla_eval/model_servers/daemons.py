@@ -150,13 +150,13 @@ class _UnknownClock:
     def now(self) -> NoReturn:
         _unknown_step_dt()
 
-    async def sleep(self, seconds: float) -> NoReturn:
+    async def sleep(self, seconds: float, *, priority: int = 0) -> NoReturn:
         _unknown_step_dt()
 
-    async def wait_until(self, deadline: float) -> NoReturn:
+    async def wait_until(self, deadline: float, *, priority: int = 0) -> NoReturn:
         _unknown_step_dt()
 
-    def every(self, period: float, *, first: Literal["now", "after"] = "after") -> NoReturn:
+    def every(self, period: float, *, first: Literal["now", "after"] = "after", priority: int = 0) -> NoReturn:
         _unknown_step_dt()
 
 
@@ -198,6 +198,7 @@ class EpisodeContext:
         self._owned = 0
         self._calls_done = self._calls_settled = 0  # finished ep.call s; those a settle has seen
         self._call_done = anyio.Event()  # set (and replaced) as each ep.call finishes
+        self._delivering = anyio.Lock()  # a sync reply can arrive mid-advance: the next observation waits its turn
         self._drained = anyio.Event()
         self._drained.set()
         self._exited = anyio.Event()
@@ -433,26 +434,45 @@ class EpisodeDaemons:
                 await self._deliver(ep, one_obs, one, seq)
 
     async def _deliver(self, ep: EpisodeContext, obs: Observation, rows: Rows, seq: int | None) -> None:
-        """Admit observation ``k`` once a sync clock reached ``k * step_dt`` (one per episode is in flight)."""
+        """Admit observation ``k``; a sync clock first moves to ``k * step_dt``, where the observation goes before
+        that instant's other wakes (priority -1).  A reply can precede them, so an episode's deliveries queue."""
         clock = ep.clock
-        try:
-            if isinstance(clock, SimClock):
+        async with ep._delivering:
+            try:
+                if not isinstance(clock, SimClock):
+                    if ep.closing:
+                        await self.server.send_error(rows, EpisodeClosed("the episode is not running"))
+                        return
+                    now = None if isinstance(clock, _UnknownClock) else clock.now()
+                    ep._mailbox.put(ObservationRequest(obs, rows, now, seq, self.server))
+                    return
                 assert ep.step_dt is not None
-                try:  # due sleepers wake one at a time; each wake's model calls finish first
+                admitted = False
+
+                def admit() -> None:
+                    nonlocal admitted
+                    if not ep.closing:
+                        ep._mailbox.put(ObservationRequest(obs, rows, clock.now(), seq, self.server))
+                        admitted = True
+
+                cancel = clock.call_at(rows[0].step * ep.step_dt, admit, priority=-1)
+                try:  # due wakes one at a time, each settling its model calls
                     await clock.advance_to(rows[0].step * ep.step_dt, settle=ep._settle)
                 except EpisodeClosed:
                     if not ep.closing:
                         raise
-            if ep.closing:
-                await self.server.send_error(rows, EpisodeClosed("the episode is not running"))
-                return
-            now = None if isinstance(clock, _UnknownClock) else clock.now()
-            ep._mailbox.put(ObservationRequest(obs, rows, now, seq, self.server))
-        except Exception as exc:
-            ep.fail(exc)
+                finally:
+                    cancel()
+                if not admitted:
+                    await self.server.send_error(rows, EpisodeClosed("the episode is not running"))
+            except Exception as exc:
+                ep.fail(exc)
 
     async def on_episode_end(self, rows: Rows, results: list[EpisodeResult]) -> None:
         eps = [ep for rid in rows.ids.tolist() if (ep := self._eps.pop(rid, None)) is not None]
+        for ep in eps:  # the last instant's wakes run (deterministic) before the episode closes
+            async with ep._delivering:
+                pass
         for ep in eps:
             ep._close()
         for ep in eps:  # tasks unwound and model calls drained before finish

@@ -17,7 +17,7 @@
 # vla-eval = { path = "../../..", editable = true }
 #
 # [tool.uv]
-# exclude-newer = "2026-11-01T13:00:00Z"
+# exclude-newer = "2026-11-02T00:20:00Z"
 #
 # [tool.ty.rules]  # ty checks scripts on their own, against the host env without their deps
 # unresolved-import = "ignore"
