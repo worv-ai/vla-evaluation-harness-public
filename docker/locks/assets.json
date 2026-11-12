@@ -1,0 +1,162 @@
+{
+  "calvin": {
+    "bytes": 32352402,
+    "files": 211,
+    "paths": [
+      "/app/calvin/calvin_env/data",
+      "/app/calvin/calvin_env/tacto/meshes",
+      "/data"
+    ],
+    "sha256": "babb82f3418cbd21691e78f2a4ed24002b60f564b966aefac5d10940074e93b9",
+    "source_image": "sha256:cf7b79289ec61dd45ccf06f5bccf9e70b38cae7c9f0e113594fbe46917cb572e"
+  },
+  "duobench": {
+    "bytes": 250354827,
+    "files": 722,
+    "paths": [
+      "/opt/rcs/assets",
+      "/opt/duobench/assets"
+    ],
+    "sha256": "687e2c3692d2cafa8a4123d2381039aa7dbb7c544af8ebbadcc4676c70d9b1d2",
+    "source_image": "sha256:f4d8d05b0540f008e64ffd82b02ef64abae63d18e872212666e26154f75c8f02"
+  },
+  "kinetix": {
+    "bytes": 0,
+    "files": 0,
+    "paths": [],
+    "sha256": "3f6dd97de0fcf96363f455b717a49bdf1f2d8e3c45da7ebce8ef51aa2d8a12c9"
+  },
+  "libero": {
+    "bytes": 1038432980,
+    "files": 1423,
+    "paths": [
+      "/app/libero/libero/libero/assets",
+      "/app/libero/notebooks/custom_assets",
+      "/opt/venv/lib/python3.11/site-packages/robosuite/models/assets"
+    ],
+    "sha256": "2845aefeb5152b4b3e5efaaea2be9727f2e41cb8053f44017cfd92dbca700aea",
+    "source_image": "ghcr.io/allenai/vla-evaluation-harness/libero:0.9.0"
+  },
+  "libero_mem": {
+    "bytes": 1005900799,
+    "files": 1416,
+    "paths": [
+      "/app/libero-mem/libero/libero/assets",
+      "/app/libero-mem/notebooks/custom_assets",
+      "/opt/venv/lib/python3.11/site-packages/robosuite/models/assets",
+      "/app/libero-mem/thirdparty/robosuite/robosuite/models/assets"
+    ],
+    "sha256": "6ac71c951431e76530100fa16e0bf1243c51f63ea1afc136371c40e8295cde73",
+    "source_image": "ghcr.io/allenai/vla-evaluation-harness/libero-mem:0.9.0"
+  },
+  "libero_plus": {
+    "bytes": 9564902345,
+    "files": 449631,
+    "paths": [
+      "/app/LIBERO-plus/libero/libero/assets",
+      "/app/LIBERO-plus/notebooks/custom_assets",
+      "/opt/venv/lib/python3.11/site-packages/robosuite/models/assets"
+    ],
+    "sha256": "e128aadd085383dbcd7d6221832a87999261679d39df45b9be7eaa89e4f9601a",
+    "source_image": "ghcr.io/allenai/vla-evaluation-harness/libero-plus:0.9.0"
+  },
+  "libero_pro": {
+    "bytes": 1260120784,
+    "files": 1702,
+    "paths": [
+      "/app/libero-pro/libero/libero/assets",
+      "/app/libero-pro/notebooks/custom_assets",
+      "/opt/venv/lib/python3.11/site-packages/robosuite/models/assets"
+    ],
+    "sha256": "5af3e5948df5151d1b49fcf50d92fe23503791f32e2629be1d09621d27ee6f44",
+    "source_image": "ghcr.io/allenai/vla-evaluation-harness/libero-pro:0.9.0"
+  },
+  "maniskill2": {
+    "bytes": 1281704866,
+    "files": 5035,
+    "paths": [
+      "/workspace/data"
+    ],
+    "sha256": "6b4b0934b7ac5da16f7ce51d7943ebf2730bd6e14cd635c56827211087b206b3",
+    "source_image": "sha256:323633ef2f3b4ecf69967f3cdf0665c4122bd13f01f03996a0a19bb34b7a323a"
+  },
+  "mikasa_robo": {
+    "bytes": 0,
+    "files": 0,
+    "paths": [],
+    "sha256": "3f6dd97de0fcf96363f455b717a49bdf1f2d8e3c45da7ebce8ef51aa2d8a12c9"
+  },
+  "molmospaces": {
+    "bytes": 13366059796,
+    "files": 129500,
+    "paths": [
+      "/assets",
+      "/cache/molmo-spaces-resources"
+    ],
+    "sha256": "7b5cbc86b01423a29d97270701576689e3ec5d272aaeeed5175ba20757ccf9cd",
+    "source_image": "sha256:364de695c7a38a5289bc2a0e67725a901df3aa7940444bf5c9397aa7b98d2cdc"
+  },
+  "robocasa": {
+    "bytes": 9194359522,
+    "files": 71503,
+    "paths": [
+      "/app/robocasa/robocasa/models/assets",
+      "/app/robosuite/robosuite/models/assets"
+    ],
+    "sha256": "3d0044706fdb1cc796299049386ec0d926d61e2494c1643abefa1ab5e67904c4",
+    "source_image": "sha256:c49e4851c5f3224c7445aaaa499517d969f269fef08da19601a0b1520a22def0"
+  },
+  "robocasa365": {
+    "bytes": 24613429792,
+    "files": 124377,
+    "paths": [
+      "/app/robocasa365/robocasa/models/assets",
+      "/app/robosuite/robosuite/models/assets"
+    ],
+    "sha256": "2a04b0d4aa2d636b6ea4a2a8715d66c2e9633b493f644a5d555ccbbe46961c8f",
+    "source_image": "sha256:f0bd812b71ede32b412b8c002aa5f3df2e005be72949e00337aa6fc1ee6798ed"
+  },
+  "robocerebra": {
+    "bytes": 611709691,
+    "files": 832,
+    "paths": [
+      "/opt/venv/lib/python3.11/site-packages/robosuite/models/assets"
+    ],
+    "sha256": "88f7d51fee1363f32402f76352b693f28a0cc9c2c10d1d140d8eb2acbd82cbd8",
+    "source_image": "ghcr.io/allenai/vla-evaluation-harness/robocerebra:0.9.0"
+  },
+  "robomme": {
+    "bytes": 205882716,
+    "files": 468,
+    "paths": [
+      "/app/ManiSkill/mani_skill/assets",
+      "/app/robomme_benchmark/assets"
+    ],
+    "sha256": "78dc75154655752a6a0cfb5df0e96f5e4b853360b7c5370045988b4c408120d9",
+    "source_image": "sha256:679c10219f929890b43c7c2f1acb78b1ad6da9883b2e2359595ab239b531bb24"
+  },
+  "robotwin": {
+    "bytes": 16611247768,
+    "files": 20857,
+    "paths": [
+      "/app/RoboTwin/assets"
+    ],
+    "sha256": "84439872b876b9b082c051fb51ff7273e81857bf48e85e33a3173eefad632fe0",
+    "source_image": "sha256:15da5ebce1d7f346f7d139375edf76bfc59ab2e649cf319636474dfd72f2cc44"
+  },
+  "simpler": {
+    "bytes": 0,
+    "files": 0,
+    "paths": [],
+    "sha256": "3f6dd97de0fcf96363f455b717a49bdf1f2d8e3c45da7ebce8ef51aa2d8a12c9"
+  },
+  "vlabench": {
+    "bytes": 12065008797,
+    "files": 35792,
+    "paths": [
+      "/app/VLABench/VLABench/assets"
+    ],
+    "sha256": "f8b97a89525e5290a8cf66472aa5334795e38ff09136513f3e450d7d8ede9976",
+    "source_image": "sha256:6b3de1a5c9cee886bea84bc10dc0a88acb75cf6a123b311e86c3ca277c0b0014"
+  }
+}
