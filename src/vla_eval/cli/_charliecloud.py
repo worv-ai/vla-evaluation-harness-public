@@ -436,6 +436,23 @@ def run_via_charliecloud(
         except ValueError as exc:
             _stderr_console().print(f"[red]ERROR: {exc}[/red]")
             sys.exit(1)
+        asset_mounts = []
+        if docker_cfg.assets:
+            from vla_eval.assets import MANIFEST, local_path, verify
+
+            asset_image = docker_cfg.assets.get("image")
+            if not asset_image:
+                raise ValueError("docker.assets.image is required")
+            asset_dir = ensure_image_dir(
+                asset_image, auto_yes=auto_yes, gpu=False, tools=tools, image_format=image_format
+            )
+            asset_dir = cleanup.enter_context(mount_image(asset_dir, squashfuse))
+            manifest = verify(asset_dir)
+            expected = json.loads((img_dir / MANIFEST).read_text())
+            if any(expected[key] != manifest[key] for key in ("version", "paths", "files")):
+                raise ValueError("Runtime and asset manifests differ")
+            asset_mounts = [str(local_path(asset_dir, path)) + ":" + path for path in manifest["paths"]]
+
         results_dir, config_path = prepare_container_config(config)
         cleanup.callback(Path(config_path).unlink, missing_ok=True)
         env = {"VLA_EVAL_HOST_OUTPUT_DIR": results_dir}
@@ -454,7 +471,7 @@ def run_via_charliecloud(
             results_dir=results_dir,
             config_path=config_path,
             env=env,
-            volumes=docker_cfg.volumes,
+            volumes=[*asset_mounts, *docker_cfg.volumes],
             dev_mount=dev_mount,
             inner_args=inner_run_args(
                 shard_id=shard_id,

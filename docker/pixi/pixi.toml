@@ -1,0 +1,22 @@
+[workspace]
+name = "vla-native-environments"
+channels = ["conda-forge"]
+platforms = ["linux-64"]
+requires-pixi = "==0.80.0"
+
+# Native interpreter/ABI locks. Simulator PyPI installs remain in their recipes.
+[feature.duobench.dependencies]
+python = { version = "==3.11.16", build = "h5f976f7_2_cpython" }
+pip = "==26.2.1"
+urdfdom = "==4.0.1"
+urdfdom_headers = "*"
+glfw = "*"
+tinyxml2 = "==10.0.0"
+libffi = "==3.7.0"
+
+[feature.lavapipe.dependencies]
+mesa-lavapipe = "==26.2.1"
+
+[environments]
+lavapipe = { features = ["lavapipe"], no-default-feature = true }
+duobench = { features = ["duobench"], no-default-feature = true }

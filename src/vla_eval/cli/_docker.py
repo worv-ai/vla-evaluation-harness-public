@@ -290,6 +290,7 @@ def run_via_docker(
             eval_id=eval_id,
             no_save=no_save,
             requeue_unhealthy=requeue_unhealthy,
+            auto_yes=auto_yes,
         )
         logger.info("Running via Docker: %s", " ".join(cmd))
         return exec_docker(docker, cmd, container_name)
@@ -312,11 +313,21 @@ def build_docker_command(
     no_save: bool = False,
     requeue_unhealthy: bool = False,
     interactive: bool = True,
+    auto_yes: bool = False,
 ) -> list[str]:
     """Container arguments shared by production runs and smoke tests."""
     docker_cfg = DockerConfig.from_dict(config.get("docker"))
     if docker_cfg.image is None:
         raise ValueError("docker.image must be set")
+    asset_mounts = []
+    if docker_cfg.assets:
+        from vla_eval.assets import prepare_mounts
+
+        asset_mounts = prepare_mounts(
+            docker_cfg.image,
+            docker_cfg.assets,
+            ensure_local=lambda image: ensure_image_local(docker, image, auto_yes),
+        )
 
     from vla_eval.docker_resources import gpu_docker_flag, shard_docker_flags, tty_docker_flags
 
@@ -362,6 +373,9 @@ def build_docker_command(
         mount = dev_src_mount_flags()
         cmd.extend(mount)
         logger.info("Dev mode: mounting %s -> /workspace/src", mount[1].split(":", 1)[0])
+
+    for mount in asset_mounts:
+        cmd.extend(["-v", mount])
 
     # Extra volumes / env vars from config
     for vol in docker_cfg.volumes:
