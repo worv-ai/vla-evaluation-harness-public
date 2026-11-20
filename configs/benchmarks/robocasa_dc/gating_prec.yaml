@@ -1,0 +1,24 @@
+# FAITHFUL precision-sensitive cross-emb eval (model B, holds out the 5 PREC_SENS tasks).
+# SeeTraceAct two-model protocol: each split is scored by a model that holds out only its own 5
+# tasks. Compare to paper prec-sens cross-emb 12.8%. max_steps=1000 = eval.py default.
+server:
+  url: "ws://localhost:8000"
+  timeout: 300
+
+output_dir: "./gating_prec"
+
+benchmarks:
+  - benchmark: "vla_eval.benchmarks.robocasa_dc.benchmark:RoboCasaDCBenchmark"
+    mode: sync
+    episodes_per_task: 50
+    recording:
+      record_video: false
+      record_step: false
+    params:
+      predefined_envs_root: "${oc.env:ROBOCASA_DC_EVAL_ENVS,data/robocasa_dc/eval_envs}"
+      robocasa_eval_py: "${oc.env:ROBOCASA_DC_EVAL_PY,/path/to/SeeTraceAct/src/robocasa/eval.py}"
+      robots: PandaOmron
+      controllers: OSC_POSE
+      camera_size: 128
+      max_steps: 1000
+      tasks: ["TurnOffStove", "CoffeePressButton", "TurnOffSinkFaucet", "PnPCounterToSink", "PnPStoveToCounter"]

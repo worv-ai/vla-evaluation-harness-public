@@ -1,0 +1,44 @@
+# RoboCasa-DC cross-embodiment eval (SeeTraceAct). Sim deps baked; the robocasa FORK package
+# (with its 21GB kitchen assets) + eval_envs + SeeTraceAct eval.py are mounted at runtime, and
+# rendering uses osmesa (CPU) — base image ships libosmesa6 — so the benchmark scales to high
+# shard counts without GPU-render contention. The reflex-dual model server runs NATIVELY (it
+# needs the delicate reflex env); shards connect to it over --network host.
+ARG BASE_IMAGE=ghcr.io/allenai/vla-evaluation-harness/base:latest
+FROM ${BASE_IMAGE}
+
+# py3.10 (robocasa fork pins numba 0.56.4 / numpy 1.23.x → CPython <=3.10); conda's py3.10
+# bundles SQLite >= 3.38 so vla_eval.recording works with no pysqlite3 shim.
+RUN conda create -n rcdc python=3.10 pip -y && conda clean -afy
+SHELL ["conda", "run", "-n", "rcdc", "/bin/bash", "-c"]
+
+# Sim deps = the mimicdroid-robocasa fork's verified-working set (its pyproject pins), MINUS the
+# robocasa package itself (mounted at runtime via PYTHONPATH so its 21GB assets aren't baked).
+RUN uv pip install --no-cache-dir \
+        "numpy==1.23.3" "numba==0.56.4" "scipy>=1.2.3" "mujoco==3.2.6" "mink==0.0.10" quadprog \
+        "tianshou==0.4.10" pygame Pillow opencv-python pyyaml pynput tqdm termcolor imageio h5py \
+        lxml hidapi huggingface_hub \
+        "git+https://github.com/ShahRutav/robosuite@abs_robot"
+
+# vla_eval runtime deps EXCEPT numpy (its pyproject wants numpy>=1.24, which would break
+# numba 0.56.4 / the robocasa sim). numpy stays pinned at 1.23.3 above; pillow/pyyaml/tqdm/
+# imageio already installed with the sim deps.
+RUN uv pip install --no-cache-dir \
+        anyio msgpack "websockets>=12" omegaconf "rich>=13" "jsonargparse[signatures]>=4.36" \
+        "lazyregistry>=0.4.0" "imageio[ffmpeg]"
+
+# Harness (vla_eval) — --no-deps so it does NOT pull numpy>=1.24 over the sim's 1.23.3.
+WORKDIR /workspace
+COPY pyproject.toml README.md ./
+COPY src/ src/
+ARG HARNESS_VERSION=0.0.0
+ENV SETUPTOOLS_SCM_PRETEND_VERSION=${HARNESS_VERSION}
+RUN uv pip install --no-cache-dir --no-deps -e .
+COPY configs/ configs/
+
+# Runtime knobs (overridable via docker.env in the benchmark config):
+#   PYTHONPATH=/data/robocasa-fork  -> mounted mimicdroid-robocasa repo (robocasa pkg + assets)
+#   ROBOCASA_DC_EVAL_ENVS, ROBOCASA_DC_EVAL_PY -> mounted eval_envs / eval.py
+ENV MUJOCO_GL=osmesa PYOPENGL_PLATFORM=osmesa
+
+ENTRYPOINT ["conda", "run", "--no-capture-output", "-n", "rcdc", "vla-eval"]
+CMD ["run", "--config", "/workspace/configs/benchmarks/robocasa_dc/eval.yaml", "--no-docker"]

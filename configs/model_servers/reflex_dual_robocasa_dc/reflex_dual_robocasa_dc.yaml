@@ -1,0 +1,23 @@
+# Reflex dual-VLA (Qwen3.5 S2 + ReFlExS1GR00T) — robocasa_dc cross-embodiment server.
+#
+# NOTE: this server is NOT a self-contained uv script (the reflex env is delicate:
+# transformers 5.8 / kernels 0.14 / custom Qwen3.5+GR00T deps). Do NOT launch via
+# `vla-eval serve` (which `uv run`s the script). Launch it from reflex-train's own venv,
+# with cwd=reflex-train so the GR00T base path (s1.pretrained="data/gr00t_n15_3b") resolves:
+#
+#   env -C projects/reflex-train \
+#     CUDA_VISIBLE_DEVICES=0 HF_HUB_OFFLINE=0 TOKENIZERS_PARALLELISM=false \
+#     projects/reflex-train/.venv/bin/python -m vla_eval.model_servers.reflex_dual_robocasa_dc \
+#       --args.ckpt_dir <ckpt> --args.data_dir <robocasa_dc data root> \
+#       --args.max_batch_size 8 --port 8000 [--args.cognition_off true]
+#
+# The benchmark connects via `server.url: ws://localhost:8000` in the benchmark config.
+# `--args.cognition_off true` is the S1-alone control (null_cognition) for the gating ablation.
+
+script: "src/vla_eval/model_servers/reflex_dual_robocasa_dc.py"
+args:
+  ckpt_dir: "/path/to/robocasa_dc_checkpoint"
+  data_dir: "data/robocasa_dc"
+  cognition_off: false
+  max_batch_size: 8
+  port: 8000

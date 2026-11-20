@@ -1,0 +1,26 @@
+# Low-concurrency correctness validation before the full gating run: 3 representative tasks
+# (incl. PnPCounterToMicrowave, which has only 40 eval demos -> exercises the wrap path) x 10
+# seeds = 30 eps, recording on, generous act-timeout. Run at small N so the server is never
+# queued -> timely actions, no timeouts -> a clean SR sanity check against the buggy 2% run.
+server:
+  url: "ws://localhost:8000"
+  timeout: 300
+
+output_dir: "./validate_gate"
+
+recording:
+  record_video: false
+  record_step: false
+
+benchmarks:
+  - benchmark: "vla_eval.benchmarks.robocasa_dc.benchmark:RoboCasaDCBenchmark"
+    mode: sync
+    episodes_per_task: 10
+    params:
+      predefined_envs_root: "${oc.env:ROBOCASA_DC_EVAL_ENVS,data/robocasa_dc/eval_envs}"
+      robocasa_eval_py: "${oc.env:ROBOCASA_DC_EVAL_PY,/path/to/SeeTraceAct/src/robocasa/eval.py}"
+      robots: PandaOmron
+      controllers: OSC_POSE
+      camera_size: 128
+      max_steps: 300
+      tasks: ["CloseDrawer", "PnPCounterToMicrowave", "TurnOffSinkFaucet"]
