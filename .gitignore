@@ -48,3 +48,11 @@ src/vla_eval/_version.py
 
 # Leaderboard local cache (extract.py / refine.py working files)
 leaderboard/.cache/
+
+# In-repository worktrees
+.worktrees/
+
+# Pixi environments and local configuration
+.pixi/
+
+.cache/docker-validation-assets/
