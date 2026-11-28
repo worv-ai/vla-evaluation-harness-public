@@ -79,6 +79,8 @@ for r in x5 franka; do
 done
 ```
 
+The run fails at start if `Assets/Robots/x5/curobo.yml` is missing or its URDF path does not exist in the container.
+
 As upstream, a pose whose IK fails is dropped silently: that arm keeps its last joint target (the gripper still moves).
 
 ## Protocol notes

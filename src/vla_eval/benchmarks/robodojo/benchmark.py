@@ -62,6 +62,8 @@ DEFAULT_MAX_STEPS = 2000
 MAX_FAILED_RESETS = 5
 # Upstream caps ``*_random`` (clutter) tasks at ``sim.scene.clutter_env_limit`` envs (pipeline_utils.py:57-64).
 RANDOM_TASK_MAX_ENVS = 5
+# Planner config the policy arms' IK reads; every task drives dual X5 (the competition Franka has no planner).
+CUROBO_CONFIG = Path("Assets") / "Robots" / "x5" / "curobo.yml"
 
 _T = TypeVar("_T")
 
@@ -361,7 +363,22 @@ class RoboDojoBenchmark(VectorStepBenchmark):
         ]
         if missing:
             raise FileNotFoundError(f"RoboDojo task modules not found under {self._root}: {missing}")
+        if self._enable_planner:
+            self._check_curobo_config()
         return [{"name": name, "suite": "robodojo"} for name in self._task_names]
+
+    def _check_curobo_config(self) -> None:
+        """Fail at run start, not after Isaac Sim boots, if ``curobo.yml`` is missing or made for another root."""
+        import yaml
+
+        path = self._root / CUROBO_CONFIG
+        config = yaml.safe_load(path.read_text()) if path.is_file() else None
+        urdf = (((config or {}).get("robot_cfg") or {}).get("kinematics") or {}).get("urdf_path")
+        if not urdf or not Path(urdf).is_file():  # also catches a leftover ${ASSETS_PATH}
+            raise FileNotFoundError(
+                f"RoboDojo planner config {path} is missing or its urdf_path {urdf!r} does not exist; generate it "
+                "from curobo_tmp.yml (see 'End-effector actions' in configs/benchmarks/robodojo/README.md)"
+            )
 
     def resume(self, results: list[dict[str, Any]]) -> None:
         for r in results:
